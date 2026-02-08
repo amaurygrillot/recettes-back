@@ -1,5 +1,9 @@
 package ilenreste.unpeu.recettesback.controllers;
 
+import ilenreste.unpeu.recettesback.models.auth.AuthenticationRequest;
+import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -28,13 +32,21 @@ public class AuthenticationController {
     }
 
     @PostMapping("/login")
-    public String login(@RequestBody String username, @RequestBody String password) {
+    public ResponseEntity<String> login(@RequestBody AuthenticationRequest authenticationRequest) {
 
         Authentication auth = authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(
-                        username, password
+                        authenticationRequest.username(), authenticationRequest.password()
                 )
         );
+
+        CustomUserDetails userDetails = (CustomUserDetails) auth.getPrincipal();
+
+        if (userDetails == null || userDetails.getId() == null) {
+            return ResponseEntity.internalServerError().build();
+        } else if (!auth.isAuthenticated() || !userDetails.isEnabled()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
 
         Instant now = Instant.now();
 
@@ -42,14 +54,20 @@ public class AuthenticationController {
                 .issuer("self")
                 .issuedAt(now)
                 .expiresAt(now.plusSeconds(3600))
-                .subject(auth.getName())
-                .claim("roles", auth.getAuthorities().stream()
+                .subject(userDetails.getUsername())
+                .claim("userId", userDetails.getId())
+                .claim("roles", userDetails.getAuthorities().stream()
                         .map(GrantedAuthority::getAuthority)
                         .toList())
                 .build();
 
-        return jwtEncoder.encode(JwtEncoderParameters.from(claims))
+        String tokenValue = jwtEncoder
+                .encode(JwtEncoderParameters.from(claims))
                 .getTokenValue();
+        return ResponseEntity.ok(tokenValue);
     }
+
+    //TODO: forgot password
+
 }
 

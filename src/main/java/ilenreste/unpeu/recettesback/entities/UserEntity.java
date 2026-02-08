@@ -10,7 +10,9 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.JoinTable;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.Table;
+import lombok.AllArgsConstructor;
 import lombok.Getter;
+import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 import java.util.HashSet;
@@ -18,13 +20,15 @@ import java.util.Set;
 
 @Getter
 @Setter
+@NoArgsConstructor
+@AllArgsConstructor
 @Entity
 @Table(name = "users")
 public class UserEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private String id;
 
     @Column(nullable = false, unique = true)
     private String username;
@@ -33,6 +37,15 @@ public class UserEntity {
     private String password;
 
     private boolean enabled;
+
+    @Column(nullable = false)
+    private String email;
+
+    @Column
+    private String firstname;
+
+    @Column
+    private String lastname;
 
     @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(

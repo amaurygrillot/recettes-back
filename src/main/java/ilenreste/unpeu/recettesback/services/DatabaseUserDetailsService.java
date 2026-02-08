@@ -1,8 +1,8 @@
 package ilenreste.unpeu.recettesback.services;
 
-import ilenreste.unpeu.recettesback.entities.RoleEntity;
 import ilenreste.unpeu.recettesback.entities.UserEntity;
-import ilenreste.unpeu.recettesback.repositories.UserRepository;
+import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
+import ilenreste.unpeu.recettesback.repositories.UsersRepository;
 import lombok.NonNull;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -12,29 +12,20 @@ import org.springframework.stereotype.Service;
 @Service
 public class DatabaseUserDetailsService implements UserDetailsService {
 
-    private final UserRepository userRepository;
+    private final UsersRepository usersRepository;
 
-    public DatabaseUserDetailsService(UserRepository userRepository) {
-        this.userRepository = userRepository;
+    public DatabaseUserDetailsService(UsersRepository usersRepository) {
+        this.usersRepository = usersRepository;
     }
 
     @Override
     public @NonNull UserDetails loadUserByUsername(@NonNull String username) throws UsernameNotFoundException {
 
-        UserEntity user = userRepository.findByUsername(username)
+        UserEntity user = usersRepository.findByUsername(username)
                 .orElseThrow(() ->
                         new UsernameNotFoundException("User not found"));
 
-        return org.springframework.security.core.userdetails.User
-                .withUsername(user.getUsername())
-                .password(user.getPassword())
-                .disabled(!user.isEnabled())
-                .authorities(
-                        user.getRoles().stream()
-                                .map(RoleEntity::getName)
-                                .toArray(String[]::new)
-                )
-                .build();
+        return new CustomUserDetails(user);
     }
 }
 
