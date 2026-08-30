@@ -34,23 +34,92 @@ in a confusing way. Recipes would add six or more entries to each.
 
 Make the filter **authenticate when it can, and decline to decide when it cannot**.
 
-| Request                        | Today                     | After                                                 |
-|--------------------------------|---------------------------|-------------------------------------------------------|
-| No `Authorization` header      | 401 from the filter       | continue the chain unauthenticated; the chain decides |
-| `Bearer <valid token>`         | authenticated             | authenticated (unchanged)                             |
-| `Bearer <invalid/expired>`     | 401 from the filter       | 401 from the filter (unchanged)                       |
-| Malformed header               | 401 from the filter       | continue unauthenticated                              |
+| Request                            | Today               | After                                                          |
+|------------------------------------|---------------------|----------------------------------------------------------------|
+| No `Authorization` header          | 401 from the filter | continue the chain unauthenticated; the chain decides          |
+| Header not starting with `Bearer ` | 401 from the filter | continue unauthenticated — no credential was offered           |
+| `Bearer <valid token>`             | authenticated       | authenticated (unchanged)                                      |
+| `Bearer <invalid/expired>`         | 401 from the filter | 401 from the filter, **except on the credential routes below** |
 
 A **present but invalid** token still fails fast with a 401. That distinction is deliberate: no credentials is a
 legitimate way to call a public endpoint, but a broken token is a caller who thinks they are authenticated and is not,
 and silently downgrading them to anonymous turns an expired session into a confusing 403 on the next write.
 
+Note the second row is a *different* case from the fourth, and the two must not be collapsed: `Authorization: Basic
+abc` is a caller offering no bearer credential at all, so it is treated exactly like a missing header, while
+`Bearer <garbage>` is a caller offering one that does not work.
+
 With that in place:
 
-- `shouldNotFilter` and `PUBLIC_ENDPOINTS` are **deleted**. The filter runs on every request and only ever *adds*
-  authentication; it never rejects for absence. `SecurityFilterConfig` becomes the single source of truth for who may
-  reach what, and the two-lists-to-keep-in-sync problem in `CLAUDE.md` section 4 goes away rather than doubling.
+- `shouldNotFilter` is **deleted**. The filter must run on every request, including the public ones — that is the whole
+  point, since skipping it is what makes an authenticated `GET /recipes` blind to its own caller.
+- `SecurityFilterConfig` becomes the single source of truth for *who may reach what*, and the two-lists-to-keep-in-sync
+  problem in `CLAUDE.md` section 4 goes away: the six-plus recipe routes are declared once, in `authorizeHttpRequests`,
+  and never in the filter.
 - `authorizeHttpRequests` expresses the whole policy declaratively, per method.
+
+### The exception: routes that hand out credentials
+
+`PUBLIC_ENDPOINTS` does **not** simply disappear. It shrinks to three entries and changes meaning — from "skip the
+filter entirely" to "on this route, never *reject*" — and is renamed accordingly:
+
+```java
+private static final List<RequestMatcher> CREDENTIAL_ENDPOINTS = List.of(
+        PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, "/auth/**"),
+        PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, "/users/create"),
+        PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.PUT, "/users/reinit-password")
+);
+```
+
+These are the routes whose entire purpose is to *obtain* a working credential, and rejecting them for holding a broken
+one is a deadlock. The scenario is not hypothetical: `RsaKeyConfig` generates the RSA key pair in memory at every
+startup, so **every restart invalidates every token in circulation**. A browser client that attaches its stored token to
+all requests — the default shape of an SPA HTTP interceptor — would then be 401'd by the filter on `POST
+/auth/login` itself, before `AuthenticationController` ever runs, and could never obtain a fresh token. The only escape
+is clearing browser storage by hand. `PUT /users/reinit-password` is worse still: a dead session is precisely *why*
+someone is on the password-reset screen.
+
+Today this can't happen only because `shouldNotFilter` skips those three routes outright. Deleting the list without
+replacing this behaviour is a regression dressed up as a simplification.
+
+The resulting filter:
+
+```java
+@Override
+protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+        throws ServletException, IOException {
+
+    String authHeader = request.getHeader("Authorization");
+    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        chain.doFilter(request, response);          // no credential offered — the chain decides
+        return;
+    }
+
+    try {
+        Jwt jwt = jwtDecoder.decode(authHeader.substring(7));
+        SecurityContextHolder.getContext().setAuthentication(toAuthentication(jwt));
+    } catch (JwtException jwtException) {
+        if (CREDENTIAL_ENDPOINTS.stream().noneMatch(matcher -> matcher.matches(request))) {
+            log.warn("Rejecting request with an undecodable JWT", jwtException);
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            return;
+        }
+        log.debug("Ignoring an undecodable JWT on a credential endpoint", jwtException);
+    }
+
+    chain.doFilter(request, response);
+}
+```
+
+Two details worth keeping. The list is **stable** — it does not grow when public routes are added, because a public
+*read* route needs nothing from it, which is what makes this a genuinely smaller obligation than the old
+`PUBLIC_ENDPOINTS`. And a malformed token is client-supplied input, so it logs at `warn`/`debug`, not the `error` the
+current filter uses: an expired token is a routine event and should not page anyone.
+
+One doc to update alongside the rename: [password-reset.md](password-reset.md) points at
+`JwtAuthenticationFilter.PUBLIC_ENDPOINTS` as the reason its two routes are reachable without a JWT. That is still true
+today, and becomes wrong the moment this lands — the reason changes from "the filter is skipped" to "the filter does not
+reject here, and `SecurityFilterConfig` permits it".
 
 ## The catch: 401 becomes 403 unless an entry point is configured
 
@@ -142,16 +211,25 @@ This is the part a `standaloneSetup` MockMvc test cannot cover, for the same rea
 `SecurityErrorHandlingTest`: no security filter chain, no filter, nothing under test. It needs a `@SpringBootTest`
 against the real chain, asserting at minimum:
 
-| Case                                              | Expected |
-|---------------------------------------------------|----------|
-| `GET /recipes` with no header                      | 200      |
-| `GET /recipes` with a valid token                  | 200, and the service sees the user |
-| `GET /recipes` with a malformed/expired token      | 401      |
-| `POST /recipes` with no header                     | 401 (not 403 — this is the regression to guard) |
-| `POST /recipes` with a valid `USER` token          | 201      |
-| `PUT /recipes/{id}` by a non-author `USER`         | 403      |
-| `PUT /recipes/{id}` by an `ADMIN`                  | 200      |
-| `POST /tags` by a plain `USER`                     | 403      |
+| Case                                                      | Expected                                              |
+|-----------------------------------------------------------|-------------------------------------------------------|
+| `GET /recipes` with no header                             | 200                                                   |
+| `GET /recipes` with a valid token                         | 200, and the service sees the user                    |
+| `GET /recipes` with `Authorization: Basic abc`            | 200 — no bearer credential offered, same as no header |
+| `GET /recipes` with `Bearer <expired>`                    | 401 — a broken credential is not the same as none     |
+| `POST /auth/login` with `Bearer <expired>` still attached | 200 — the lockout regression to guard                 |
+| `PUT /users/reinit-password` with `Bearer <expired>`      | 400/200 per the flow — never 401 from the filter      |
+| `POST /recipes` with no header                            | 401 (not 403 — this is the other regression to guard) |
+| `POST /recipes` with a valid `USER` token                 | 201                                                   |
+| `PUT /recipes/{id}` by a non-author `USER`                | 403                                                   |
+| `PUT /recipes/{id}` by an `ADMIN`                         | 200                                                   |
+| `POST /tags` by a plain `USER`                            | 403                                                   |
 
-The `POST /recipes` anonymous case is the important one: it is 401 only because of the explicit
-`AuthenticationEntryPoint`, and it silently becomes 403 if that line is ever dropped.
+Rows three and four exist as a pair on purpose: they are the two halves of the distinction drawn in
+[The change](#the-change), and a test suite that asserts only one of them will not notice if the filter starts rejecting
+every request carrying an unrelated `Authorization` header.
+
+Two rows guard regressions rather than features. `POST /recipes` anonymous is 401 only because of the explicit
+`AuthenticationEntryPoint`, and silently becomes 403 if that line is ever dropped. `POST /auth/login` with a dead token
+is 200 only because of `CREDENTIAL_ENDPOINTS`, and silently becomes an unrecoverable 401 if that list is ever
+"simplified" away.

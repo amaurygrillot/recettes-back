@@ -66,7 +66,7 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     InvalidReferenceException      -> 400
     ResourceConflictException      -> 409
     ForbiddenOperationException    -> 403
-    DataIntegrityViolationException-> 409   // the lost check-then-insert race
+    DataIntegrityViolationException-> 409 only if it is a unique violation, else 500  // see below
     Exception                      -> 500   // logged with the stack trace
 }
 
@@ -74,6 +74,43 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 @Order(Ordered.HIGHEST_PRECEDENCE)
 class RecipeExceptionHandler { /* only what needs recipe-specific detail */ }
 ```
+
+### `DataIntegrityViolationException` must be narrowed before it becomes a 409
+
+The 409 exists for exactly one case: the lost check-then-insert race on a `normalized_name`, where the service's
+`existsBy` pre-check passed and the database's unique constraint caught the duplicate anyway. But
+`DataIntegrityViolationException` is Spring's wrapper for **every** constraint class — `NOT NULL`, foreign key, check
+constraint — and most of those mean an application bug, not a conflict.
+
+Mapping the whole type to 409 fails twice over. A step arriving with a null `instruction` because
+`RecipeStepRequest.instruction` was never annotated `@NotBlank` hits `recipe_steps.instruction NOT NULL` and the caller
+is told to resolve a conflict that does not exist — a status the root `CLAUDE.md` reserves for "the request conflicts
+with existing state". Worse, the failure never reaches the `Exception -> 500` branch, which is the only one that logs a
+stack trace, so the actual bug leaves no trace at all.
+
+So the handler inspects the cause and defers anything it does not recognise:
+
+```java
+
+@ExceptionHandler(DataIntegrityViolationException.class)
+ResponseEntity<ProblemDetail> handle(DataIntegrityViolationException exception) {
+    if (exception.getCause() instanceof ConstraintViolationException violation
+            && isUniqueViolation(violation)) {                       // SQLState 23505 on PostgreSQL
+        log.info("Unique constraint {} lost a create race", violation.getConstraintName());
+        return problem(HttpStatus.CONFLICT, "That name already exists.");
+    }
+    log.error("Unexpected data integrity violation", exception);
+    return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL);
+}
+```
+
+`isUniqueViolation` tests the SQLState (`23505`), not the message text — constraint messages are Postgres-version
+specific and locale-dependent, and string-matching them is the same anti-pattern this whole document exists to remove.
+
+The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
+`media.created_at NOT NULL` trap in [recipes-domain-model.md](recipes-domain-model.md#auditing) and any missed
+`@NotBlank` on a child request record both surface as `DataIntegrityViolationException` and would otherwise be
+misreported as conflicts.
 
 Controllers then contain no `try/catch` at all:
 

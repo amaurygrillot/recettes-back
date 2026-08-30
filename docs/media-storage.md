@@ -48,16 +48,30 @@ agree with each other. Restoring a database newer than the media directory leave
 
 ## The `media` table
 
-| Column            | Type                | Notes                                                                 |
-|-------------------|---------------------|-----------------------------------------------------------------------|
-| `id`              | UUID (String)       | what the API exposes; also the cache key                              |
-| `storage_key`     | varchar, unique     | relative path under the storage root, e.g. `ab/cd/<uuid>.jpg`         |
-| `content_type`    | varchar, not null   | **ours**, decided by the re-encoder — never the client's declared one |
-| `width`, `height` | int, not null       | lets the frontend reserve layout space and avoid reflow               |
-| `size_bytes`      | bigint, not null    | of the stored (re-encoded) file                                       |
-| `checksum_sha256` | char(64), not null  | integrity checking and orphan auditing; **not** unique — see below    |
-| `uploaded_by_id`  | FK → `users`        | who to attribute an abuse report to, and the basis for a quota        |
-| `created_at`      | timestamp, not null | drives orphan cleanup                                                 |
+| Column            | Type                | Notes                                                                                                |
+|-------------------|---------------------|------------------------------------------------------------------------------------------------------|
+| `id`              | UUID (String)       | what the API exposes; also the cache key                                                             |
+| `storage_key`     | varchar, unique     | relative path under the storage root, e.g. `ab/cd/<uuid>.jpg`                                        |
+| `content_type`    | varchar, not null   | **ours**, decided by the re-encoder — never the client's declared one                                |
+| `width`, `height` | int, not null       | of the **stored (downscaled)** image — see below; lets the frontend reserve layout space             |
+| `size_bytes`      | bigint, not null    | of the stored (re-encoded) file                                                                      |
+| `checksum_sha256` | char(64), not null  | of the stored (re-encoded) bytes; integrity checking and orphan auditing; **not** unique — see below |
+| `uploaded_by_id`  | FK → `users`        | who to attribute an abuse report to, and the basis for a quota; set by JPA auditing (`@CreatedBy`)   |
+| `created_at`      | timestamp, not null | drives orphan cleanup; set by JPA auditing (`@CreatedDate`)                                          |
+
+**Every column in this table describes the file we stored, never the file that was uploaded.** That is obvious for
+`content_type` and `size_bytes` and easy to get wrong for `width`/`height`, because the pipeline reads dimensions twice:
+once at step 3 from the header, to reject decompression bombs before decoding, and once implicitly at step 4 after
+downscaling to `app.media.max-stored-edge`. The step-3 values are already in a local variable when the row is built, so
+reusing them is the natural mistake — and it means a 4032×3024 phone photo stored at 2000×1500 records 4032×3024. The
+column's whole purpose is defeated: the frontend reserves a box at twice the real pixel size, and every layout computed
+from it is wrong for every photo larger than the cap. **Record the dimensions of the `BufferedImage`
+that was actually written**, after step 4.
+
+`created_at` and `uploaded_by_id` are populated by Spring Data JPA auditing, which `MediaEntity` opts into itself — it
+does not extend `AuditableEntity`, since media rows are immutable and `updated_at` would be dead weight. The mechanics
+and the failure mode if the listener is forgotten are in
+[recipes-domain-model.md](recipes-domain-model.md#auditing).
 
 `checksum_sha256` is not unique, so uploading the same photo twice stores it twice. Deduplicating means two recipes
 share one row, and then deleting one recipe must not delete the other's picture — refcounting that is real complexity
@@ -81,14 +95,18 @@ The pipeline, in order — each step is a gate, and a failure at any of them sto
    Anything else is `400`.
 3. **Dimension cap read from the header, before decoding.** Use `ImageIO.getImageReaders` and
    `reader.getWidth(0)` / `getHeight(0)`, which parse the header without allocating the pixel raster. Proposed cap:
-   8000 × 8000, and a total-pixel cap. This is what stops a decompression bomb — a 400 KB PNG can declare
-   30000 × 30000 and expand to several gigabytes of heap the moment you call `ImageIO.read` on it.
+   8000 × 8000, and a total-pixel cap. This is what stops a decompression bomb — a 400 KB PNG can declare 30000 × 30000
+   and expand to several gigabytes of heap the moment you call `ImageIO.read` on it. These dimensions are used for
+   **this gate only** and are then discarded — they are not what goes in the row.
 4. **Full decode and re-encode.** Decode, honour the EXIF orientation tag by rotating the raster, then write out a
-   fresh JPEG (or PNG when the source has an alpha channel, so ingredient icons keep transparency). Downscale to a
-   sane maximum edge (proposed: 2000 px) while re-encoding.
+   fresh JPEG (or PNG when the source has an alpha channel, so ingredient icons keep transparency). Downscale to a sane
+   maximum edge (proposed: 2000 px) while re-encoding. Note that the orientation rotation can swap width and height,
+   which is a second reason the step-3 numbers cannot be reused.
 5. **Write under a generated key.** `<uuid>` plus the extension our encoder produced, sharded as
    `<first 2 chars>/<next 2 chars>/<uuid>.<ext>` so no single directory accumulates every image on the server.
-6. **Insert the `media` row**, and only then return. If the insert fails, delete the file just written.
+6. **Insert the `media` row**, and only then return. Every column is measured from the artefact of steps 4–5:
+   `width`/`height` from the written `BufferedImage`, `size_bytes` and `checksum_sha256` from the bytes on disk,
+   `content_type` from the encoder we chose. If the insert fails, delete the file just written.
 
 ### Why re-encoding is the centrepiece
 

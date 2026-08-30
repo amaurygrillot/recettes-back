@@ -146,6 +146,39 @@ write. JPA's `@OrderColumn` was considered and rejected: it makes Hibernate issu
 reordering and behaves badly with nulls in the collection. An explicit column the service owns is boring and
 predictable, and it is readable from plain SQL when debugging.
 
+#### Writing `position` is only half the job — every such collection needs `@OrderBy("position")`
+
+Rejecting `@OrderColumn` means **nothing re-applies the order on the read path unless it is asked for explicitly**, and
+the collections are mapped as `Set` (see [Reading recipes without N+1 queries](#reading-recipes-without-n1-queries)), so
+Hibernate hydrates them into a `PersistentSet` backed by a `HashSet` — iteration order is hash order, not insertion
+order and certainly not `position` order. A five-step recipe stored correctly as 0..4 comes back out of
+`GET /recipes/{id}` with "Enfourner 40 min" second and "Préchauffer le four" last, and no test that only round-trips a
+single-step recipe will ever notice.
+
+So every one of these associations carries `@OrderBy("position")`:
+
+```java
+
+@OneToMany(mappedBy = "recipe", cascade = ALL, orphanRemoval = true)
+@OrderBy("position")
+private Set<RecipeStepEntity> steps = new LinkedHashSet<>();
+```
+
+That applies to `steps`, `ingredientGroups`, `coverPictures`, each group's `ingredients`, and each step's `pictures`.
+`@OrderBy` adds an `ORDER BY` to the SQL Hibernate already issues and hydrates into a `LinkedHashSet`, so it costs
+nothing extra and survives batch fetching.
+
+Two consequences that follow from it, both easy to miss:
+
+- `RecipeSummaryResponse`'s "first cover picture" is only well-defined because `coverPictures` is ordered. Without
+  `@OrderBy`, the thumbnail shown in the recipe list can change between two identical requests with no write in between.
+- The mapper must **iterate**, never re-sort and never re-derive: `position` is a storage detail, and the API contract
+  is the order of the returned array. It is not exposed as a field in the response.
+
+This is the same class of bug as the `IN`-does-not-preserve-order note in
+[Listing](#listing--get-recipes) below — ordering that exists in the database is not ordering that reaches the client.
+`@ManyToMany` categories and tags are exempt: they have no `position` and the API sorts them by name instead.
+
 ### `recipe_ingredients` — quantity and unit
 
 You chose a numeric amount plus a `units` reference table:
@@ -431,23 +464,78 @@ Beyond the primary keys and the `unique` constraints on `normalized_name`:
 | `recipe_tags(tag_id)`               | tag filter and `isTagUsed`           |
 | `recipe_ingredients(ingredient_id)` | `isIngredientUsed`                   |
 | `recipe_ingredients(unit_id)`       | `isUnitUsed`                         |
-| `media(created_at)`                 | orphan sweep                         |
+| `media(created_at)`                 | orphan sweep — the `created_at` half |
+| `recipe_cover_pictures(media_id)`   | orphan sweep — first `NOT EXISTS`    |
+| `recipe_step_pictures(media_id)`    | orphan sweep — second `NOT EXISTS`   |
+| `ingredients(icon_media_id)`        | orphan sweep — third `NOT EXISTS`    |
 
 The join tables get a PK index on `(recipe_id, category_id)` automatically, which covers lookups *from* a recipe; the
 second index above is what covers lookups *from* a category, and a composite PK's index cannot serve that direction.
+
+The same argument is what puts the last three rows in the table, and they are easy to leave out because the
+`created_at` index looks like it already covers the orphan sweep. It does not: `findOrphans` filters on `created_at`
+and then probes three separate tables through `NOT EXISTS`. **PostgreSQL does not index foreign-key columns
+automatically** — only primary keys and `unique` constraints get one for free. `recipe_cover_pictures` and
+`recipe_step_pictures` do have an index from their `UNIQUE (parent_id, position)` constraint, but its leading column is
+`recipe_id`/`step_id`, which cannot serve a lookup by `media_id`; `ingredients.icon_media_id` has nothing at all.
+Without these three, every candidate row in the sweep costs three sequential scans.
+
+The ordered child tables need no separate `parent_id` index: their `UNIQUE (parent_id, position)` constraint already
+provides one with `parent_id` leading, which is the direction those lookups actually go.
 
 ## Auditing
 
 Enable Spring Data JPA auditing (`@EnableJpaAuditing`) rather than stamping timestamps by hand in every service —
 five services each remembering to set `updated_at` is precisely the duplication that gets forgotten in one branch.
 
-- An `AuditableEntity` `@MappedSuperclass` carries `createdAt` (`@CreatedDate`), `updatedAt` (`@LastModifiedDate`)
-  and `updatedBy` (`@LastModifiedBy`); recipes and the reference entities extend it.
+- An `AuditableEntity` `@MappedSuperclass` carries **four** fields: `createdAt` (`@CreatedDate`), `createdBy`
+  (`@CreatedBy`), `updatedAt` (`@LastModifiedDate`) and `updatedBy` (`@LastModifiedBy`). Recipes and the reference
+  entities extend it, and it is annotated `@EntityListeners(AuditingEntityListener.class)` — without that listener the
+  annotations are inert and every column silently stays null.
+- **`@CreatedBy` is not optional here.** `ingredients.created_by_id` in
+  the [reference tables](#reference-tables-shared-unique-values)
+  above and `media.uploaded_by_id` both need it, and `ingredients` needs it precisely because ingredient creation is
+  open to every authenticated user: it is the only record of who added a shared row, and it is what an admin reads
+  before merging a duplicate. Omit it and, under `ddl-auto=update`, the column is never created — silently, with no
+  error — and the information cannot be recovered afterwards.
+- **`MediaEntity` does not extend `AuditableEntity`, but it is still audited.** Media rows are immutable by design (an
+  edited picture is a new upload with a new id, never a rewrite), so `updated_at`/`updated_by_id` would be dead columns.
+  It therefore declares its own two fields — `@CreatedDate Instant createdAt` and
+  `@CreatedBy UserEntity uploadedBy` mapped to `uploaded_by_id` — and carries
+  `@EntityListeners(AuditingEntityListener.class)` **itself**. This is easy to get wrong by omission: `media.created_at`
+  is `NOT NULL` and drives the orphan sweep, so an entity that inherits nothing and forgets the listener inserts null
+  and every single `POST /media` dies on the constraint.
 - An `AuditorAware<UserEntity>` bean reads the `userId` claim from the `JwtAuthenticationToken` in the
   `SecurityContextHolder` and returns `usersRepository.getReferenceById(userId)`. `getReferenceById` returns a lazy
   proxy, so `updated_by_id` stays a genuine foreign key without costing a SELECT on every save.
-- It returns `Optional.empty()` when there is no authentication — relevant for seeding and tests; public reads never
-  write.
+- It returns `Optional.empty()` for anything that is not a `JwtAuthenticationToken` — see the trap below.
+
+### The `AuditorAware` guard must be a type check, not a null check
+
+Once [optional-authentication.md](optional-authentication.md) lands, anonymous requests no longer stop at the filter;
+they continue down the chain, and Spring Security's `AnonymousAuthenticationFilter` puts an
+`AnonymousAuthenticationToken` in the `SecurityContextHolder` whose principal is the **String** `"anonymousUser"`. So
+"no authentication" is not the same as `authentication == null`, and a guard written the obvious way — a null check
+followed by a cast to `JwtAuthenticationToken` — takes the non-empty branch on an anonymous request and throws
+`ClassCastException`. `POST /users/create` is already `permitAll()` and writes, so this is reachable the moment any
+audited entity is touched from an unauthenticated path.
+
+```java
+
+@Bean
+AuditorAware<UserEntity> auditorAware(UsersRepository usersRepository) {
+  return () -> Optional.ofNullable(SecurityContextHolder.getContext().getAuthentication())
+          .filter(JwtAuthenticationToken.class::isInstance)     // excludes anonymous *and* null
+          .map(authentication -> (String) ((JwtAuthenticationToken) authentication).getToken()
+                  .getClaims().get("userId"))
+          .map(usersRepository::getReferenceById);
+}
+```
+
+Filtering on the concrete token type rather than on `isAuthenticated()` is deliberate: `AnonymousAuthenticationToken`
+reports `isAuthenticated() == true`, so that check would not catch it either.
+
+Empty is also the right answer for seeding and for tests running without a security context.
 
 Existing entities (`UserEntity`, `RoleEntity`) are **not** retrofitted onto `AuditableEntity` in this scope. That is a
 separate schema change to their tables with no bearing on recipes.
@@ -524,6 +612,66 @@ whole collection**. `Optional<List<RecipeStepRequest>> steps` absent means steps
 the steps, in this order. A present `categoryIds` is still validated `@NotEmpty` — an update may not strip a recipe of
 its last category.
 
+### Where the `@NotEmpty` goes — inside the `Optional`, not on it
+
+#### What it is actually for: absent and empty are different requests
+
+`Optional` answers *"was this field supplied?"*. `@NotEmpty` answers *"is the supplied value usable?"*. Those are
+different questions, and `categoryIds` is the one field where both need answering, because the JSON can express three
+states and they need three different outcomes:
+
+| Request body           | Deserializes to          | Means                  | Outcome                   |
+|------------------------|--------------------------|------------------------|---------------------------|
+| field omitted          | `Optional.empty()`       | don't touch categories | 200, collection unchanged |
+| `"categoryIds": []`    | `Optional.of(List.of())` | set categories to none | **400**                   |
+| `"categoryIds": ["x"]` | `Optional.of([x])`       | set categories to `x`  | 200                       |
+
+Drop the constraint and the middle row silently succeeds: `PUT` with an empty array clears the collection and leaves the
+recipe uncategorised, which breaks the invariant the design leans on everywhere else — every recipe carries at least one
+category, so every recipe is browsable. `CreateRecipeRequest` enforces that at creation; an update must not be a back
+door around it.
+
+The contrast with the field directly above it is the point: `tagIds` has the same `Optional<List<String>>` shape and
+**no** constraint, because clearing every tag is a legitimate edit. Same type, deliberately different rule, and the
+annotation is the only thing expressing the difference.
+
+#### Why the placement matters
+
+The constraint has to apply to the *contained list*, not to the `Optional` wrapping it — the box being absent is a legal
+state we rely on, so a constraint on the box is asking the wrong question:
+
+```java
+public record UpdateRecipeRequest(
+        Optional<@NotBlank String> title,
+        Optional<@NotEmpty List<String>> categoryIds,          // constraint on the *contained* list
+        Optional<List<String>> tagIds,
+        Optional<@Valid List<RecipeStepRequest>> steps,
+        ...
+) {
+}
+```
+
+The constraint is a **type-use annotation on the type argument** — the Bean Validation 2.0 container-element form, and
+exactly how the existing `UpdateUserRequest` already writes it (`Optional<@Size(min = 3, max = 50) String> username`).
+That form is known to work in this codebase, which is reason enough to copy it.
+
+Writing it in front of the field instead — `@NotEmpty Optional<List<String>> categoryIds` — looks equivalent and is not.
+`@NotEmpty` lists `TYPE_USE` among its targets, so the compiler binds it to the `Optional` type rather than to the
+`List` inside, and the constraint ends up aimed at the wrapper. Whether that then fails loudly
+(`UnexpectedTypeException`: no validator for `Optional`) or quietly (the value extractor unwraps an absent `Optional`
+to `null`, which `@NotEmpty` rejects, turning every untouched-categories update into a `400`) depends on a Hibernate
+Validator internal — whether `OptionalValueExtractor` is declared `@UnwrapByDefault` — that is **not worth relying on
+either way**. Both outcomes are wrong and neither is what the table above asks for.
+
+> Unverified: which of those two failures actually occurs was not confirmed against the Hibernate Validator version on
+> this classpath. The recommendation does not depend on it — but if you want certainty before writing the code, a
+> three-line unit test that validates both record shapes against `Optional.empty()` settles it in one run, and is worth
+> keeping as documentation of the rule.
+
+The rule generalises to every constrained field in every `Optional`-based request record: **the annotation belongs
+inside the diamond.** On the create side there is no `Optional` and no ambiguity — `CreateRecipeRequest.categoryIds`
+is a plain `@NotEmpty List<String>`.
+
 The alternative — per-element patching with client-supplied child ids and add/update/remove intent — is a much more
 complex contract that buys nothing here: the editing UI is a form holding the entire recipe, so it always knows the
 full list. Replacement also makes reordering free, where patching needs explicit position juggling.
@@ -539,9 +687,14 @@ the category.
 Covered per-query in [Repositories](#repositories) above; the settings that make it work:
 
 - `spring.jpa.properties.hibernate.default_batch_fetch_size=50` — batches every lazy collection load.
-- Collections mapped as `Set`, not `List`, so a stray fetch join cannot produce a bag.
+- Collections mapped as `Set`, not `List`, so a stray fetch join cannot produce a bag. **A `Set` is unordered, so every
+  ordered collection also needs `@OrderBy("position")`** — see
+  [Writing
+  `position` is only half the job](#writing-position-is-only-half-the-job--every-such-collection-needs-orderbyposition).
+  Choosing `Set` for the bag problem and forgetting `@OrderBy` is how recipe steps end up shuffled in the response.
 - `RecipeSummaryResponse` carries only id, title, first cover picture id, categories, tags and author name. A recipe
-  list page must not cost one full recipe load per row.
+  list page must not cost one full recipe load per row. "First cover picture" means first by `position`, which is only
+  well-defined because of the `@OrderBy` above.
 - Pagination is `Pageable` with a **server-side cap** on page size (e.g. 100). Uncapped, `?size=100000` is a free
   denial of service on a VPS.
 
@@ -574,9 +727,28 @@ The 90% line-coverage gate applies to all of this. Concretely:
   four usage checks returning true and false.
 - A `@SpringBootTest` covering the authorization matrix end to end: anonymous GET succeeds, anonymous POST is 401, a
   non-author PUT is 403, an admin PUT succeeds. As the existing `SecurityErrorHandlingTest` shows, a
-  `standaloneSetup` MockMvc cannot catch this class of bug because it has no security filter chain.
+  `standaloneSetup` MockMvc cannot catch this class of bug because it has no security filter chain. The full matrix,
+  including the credential-endpoint lockout case, is in
+  [optional-authentication.md](optional-authentication.md#testing).
 - `.http` files in `src/test/requests`, one per endpoint/flow, each walking the full scenario including failures:
   `recipes.http`, `ingredients.http`, `categories.http`, `tags.http`, `units.http`, `media.http`.
+
+### Four regression tests that will not happen by accident
+
+Each of these guards a decision that is invisible in a passing happy path, and each was a bug in an earlier draft of
+this design. None is reached by "write a test per service method".
+
+| Test                                                                                               | Guards                                                                                 |
+|----------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| Round-trip a recipe with **five** steps and assert the response order matches the request          | `@OrderBy("position")` — a one-step recipe always passes                               |
+| `PUT /recipes/{id}` with a body containing **only** `title`, assert 200 and unchanged categories   | absent ≠ empty — the `@NotEmpty` sitting inside the `Optional`, not on it              |
+| `PUT /recipes/{id}` with `"categoryIds": []`, assert 400 and unchanged categories                  | the other half of the same pair — empty ≠ absent                                       |
+| `POST /media` and assert `width`/`height` equal the **downscaled** size for a source above the cap | dimensions recorded post-re-encode, not from the step-3 header read                    |
+| `POST /users/create` (anonymous, `permitAll`) against an audited entity                            | `AuditorAware` returning empty for `AnonymousAuthenticationToken` rather than throwing |
+
+The first one is worth spelling out because it is the easiest to write uselessly: assert on the **sequence**, not on a
+set or a size. `assertThat(response.steps()).extracting(Step::instruction).containsExactly(...)` fails on a shuffle;
+`containsExactlyInAnyOrder` does not, and neither does a count.
 
 ## Open points to confirm
 
