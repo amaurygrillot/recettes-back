@@ -29,6 +29,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             PathPatternRequestMatcher.withDefaults()
                     .matcher(HttpMethod.POST, "/users/create"),
             PathPatternRequestMatcher.withDefaults()
+                    .matcher(HttpMethod.PUT, "/users/reinit-password"),
+            PathPatternRequestMatcher.withDefaults()
                     .matcher(HttpMethod.POST, "/auth/**")
     );
 

@@ -1,7 +1,11 @@
 package ilenreste.unpeu.recettesback.controllers;
 
 import ilenreste.unpeu.recettesback.models.auth.AuthenticationRequest;
+import ilenreste.unpeu.recettesback.models.auth.ReinitPasswordRequest;
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
+import ilenreste.unpeu.recettesback.services.PasswordResetService;
+import jakarta.validation.Valid;
+import lombok.extern.log4j.Log4j2;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -18,17 +22,21 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
 
+@Log4j2
 @RequestMapping("/auth")
 @RestController
 public class AuthenticationController {
 
     private final AuthenticationManager authenticationManager;
     private final JwtEncoder jwtEncoder;
+    private final PasswordResetService passwordResetService;
 
     public AuthenticationController(AuthenticationManager authenticationManager,
-                                    JwtEncoder jwtEncoder) {
+                                    JwtEncoder jwtEncoder,
+                                    PasswordResetService passwordResetService) {
         this.authenticationManager = authenticationManager;
         this.jwtEncoder = jwtEncoder;
+        this.passwordResetService = passwordResetService;
     }
 
     @PostMapping("/login")
@@ -67,7 +75,22 @@ public class AuthenticationController {
         return ResponseEntity.ok(tokenValue);
     }
 
-    //TODO: forgot password
+    /**
+     * Kicks off the "forgot password" flow: if the email belongs to an
+     * account, an email with a reset link/token is sent. Always responds the
+     * same way whether or not the email is registered, so this endpoint can't
+     * be used to discover which addresses have accounts (user enumeration).
+     */
+    @PostMapping("/reinit-password")
+    public ResponseEntity<Void> reinitPassword(@Valid @RequestBody ReinitPasswordRequest request) {
+        try {
+            passwordResetService.requestReset(request.email());
+        } catch (Exception exception) {
+            log.error("Error while requesting password reset", exception);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+        return ResponseEntity.accepted().build();
+    }
 
 }
 

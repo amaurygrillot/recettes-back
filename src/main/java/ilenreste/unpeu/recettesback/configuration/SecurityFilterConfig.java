@@ -24,9 +24,17 @@ public class SecurityFilterConfig {
                         )
                 )
                 .authorizeHttpRequests(auth -> auth
+                        // Bean-validation failures (any @Valid @RequestBody) are reported via the servlet
+                        // container's sendError mechanism, which internally forwards to GET /error to render
+                        // the body. That forward re-enters this filter chain as its own request; without this
+                        // rule it falls through to anyRequest().authenticated() and gets rejected (403,
+                        // swallowing the real 400) since it's unauthenticated and no AuthenticationEntryPoint
+                        // is configured. See docs/security-error-handling.md.
+                        .requestMatchers("/error").permitAll()
                         .requestMatchers("/public/**", "/health").permitAll()
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.POST, "/users/create").permitAll()
+                        .requestMatchers(HttpMethod.PUT, "/users/reinit-password").permitAll()
                         .requestMatchers(HttpMethod.POST, "/auth/**").permitAll()
                         .requestMatchers("/users/**").hasRole("USER")
                         .anyRequest().authenticated()
