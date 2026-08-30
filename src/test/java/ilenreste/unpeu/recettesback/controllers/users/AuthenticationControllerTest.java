@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.controllers.users;
 
+import ilenreste.unpeu.recettesback.exceptions.ApiExceptionHandler;
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
 import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,7 +39,10 @@ class AuthenticationControllerTest {
         AuthenticationController controller = new AuthenticationController(
                 authenticationManager, jwtEncoder, passwordResetService
         );
-        mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
+        // The controller no longer maps exceptions itself; the global advice does.
+        mockMvc = MockMvcBuilders.standaloneSetup(controller)
+                .setControllerAdvice(new ApiExceptionHandler())
+                .build();
     }
 
     private Authentication mockAuthentication(String id, boolean authenticated, boolean enabled) {

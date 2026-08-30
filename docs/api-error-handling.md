@@ -1,6 +1,6 @@
 # API error handling — exception mapping and status codes
 
-Status: **design only**, nothing implemented yet. Introduced for the recipes feature; see
+Status: **implemented**. Introduced for the recipes feature; see
 [recipes-domain-model.md](recipes-domain-model.md). Distinct from
 [security-error-handling.md](security-error-handling.md), which explains why `/error` must be `permitAll()` — that
 document covers the servlet-container plumbing, this one covers the application's own exception-to-status mapping.
@@ -106,6 +106,17 @@ ResponseEntity<ProblemDetail> handle(DataIntegrityViolationException exception) 
 
 `isUniqueViolation` tests the SQLState (`23505`), not the message text — constraint messages are Postgres-version
 specific and locale-dependent, and string-matching them is the same anti-pattern this whole document exists to remove.
+
+As implemented it **walks the whole cause chain** looking for a `java.sql.SQLException` carrying that SQLState, rather
+than inspecting only `getCause()`. How deeply Spring and Hibernate nest the driver's exception is an implementation
+detail of versions we do not control, and a one-level check silently degrades to "everything is a 500" when that
+nesting changes — the failure mode being that the create-race 409 quietly stops happening and no test that only
+provokes the happy path notices. The loop is also guarded against a self-referencing cause, which some drivers
+produce.
+
+Where the handler classes live: the global `ApiExceptionHandler` sits in the flat, cross-cutting `exceptions` package
+next to the exception types it maps; a targeted advice sits next to the controller it serves (`UserExceptionHandler`
+in `controllers/users`), because it is meaningless without that controller.
 
 The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
 `media.created_at NOT NULL` trap in [recipes-domain-model.md](recipes-domain-model.md#auditing) and any missed

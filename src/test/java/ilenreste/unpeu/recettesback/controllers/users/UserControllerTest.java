@@ -1,5 +1,8 @@
 package ilenreste.unpeu.recettesback.controllers.users;
 
+import ilenreste.unpeu.recettesback.exceptions.ApiExceptionHandler;
+import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
 import ilenreste.unpeu.recettesback.services.users.UserService;
 import org.junit.jupiter.api.AfterEach;
@@ -14,7 +17,10 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -33,7 +39,11 @@ class UserControllerTest {
         passwordResetService = mock(PasswordResetService.class);
         userService = mock(UserService.class);
         UserController controller = new UserController(userService, passwordResetService);
+        // The controller holds no try/catch any more, so the advices are what turns an
+        // exception into a status. Registering both, in this order, is also what keeps the
+        // targeted advice's HIGHEST_PRECEDENCE meaningful here.
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
+                .setControllerAdvice(new UserExceptionHandler(), new ApiExceptionHandler())
                 .setCustomArgumentResolvers(new AuthenticationPrincipalArgumentResolver())
                 .build();
     }
@@ -66,15 +76,15 @@ class UserControllerTest {
     }
 
     @Test
-    void createUser_returns400_whenUsernameAlreadyExists() throws Exception {
-        doThrow(new IllegalStateException("Username already exists")).when(userService).createUser(any());
+    void createUser_returns409_whenUsernameAlreadyExists() throws Exception {
+        doThrow(new ResourceConflictException("Username already exists")).when(userService).createUser(any());
 
         mockMvc.perform(post("/users/create")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"username":"jane","password":"Password123","email":"jane@example.com","firstname":"Jane","lastname":"Doe"}
                                 """))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isConflict());
     }
 
     @Test
@@ -116,16 +126,17 @@ class UserControllerTest {
     }
 
     @Test
-    void updateUser_returns400_whenUserDoesNotExist() throws Exception {
+    void updateUser_returns404_whenUserDoesNotExist() throws Exception {
         authenticateAs("missing-id");
-        doThrow(new IllegalStateException("User doesn't exist")).when(userService).updateUser(eq("missing-id"), any());
+        doThrow(ResourceNotFoundException.of("user", "missing-id"))
+                .when(userService).updateUser(eq("missing-id"), any());
 
         mockMvc.perform(put("/users/update")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"firstname":"Janet"}
                                 """))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isNotFound());
     }
 
     @Test
@@ -190,6 +201,39 @@ class UserControllerTest {
                 .andExpect(status().isBadRequest());
 
         verifyNoInteractions(passwordResetService);
+    }
+
+    /**
+     * The anti-enumeration guarantee, asserted on the <em>body</em> and not just the status.
+     * <p>
+     * Unknown email, unknown token, expired token and a token issued to another account must be
+     * indistinguishable to the caller, or the endpoint becomes an oracle for which addresses have
+     * accounts. Asserting the body is also what proves UserExceptionHandler actually ran: ordered
+     * below the global advice it would be dead code, and every one of these would still be a 400 -
+     * just with four different detail messages.
+     */
+    @Test
+    void reinitPassword_answersIdentically_forEveryDistinctFailureCause() throws Exception {
+        List<String> bodies = new ArrayList<>();
+        for (String cause : List.of(
+                "Invalid password reset request",
+                "Invalid or expired password reset token",
+                "token belongs to another account",
+                "token expired")) {
+            reset(passwordResetService);
+            doThrow(new IllegalStateException(cause)).when(passwordResetService).resetPassword(any());
+
+            bodies.add(mockMvc.perform(put("/users/reinit-password")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"email":"jane@example.com","token":"abc123","newPassword":"NewPassword123"}
+                                    """))
+                    .andExpect(status().isBadRequest())
+                    .andReturn().getResponse().getContentAsString());
+        }
+
+        assertThat(bodies).hasSize(4).containsOnly(bodies.getFirst());
+        assertThat(bodies.getFirst()).contains(UserExceptionHandler.RESET_FAILED_DETAIL);
     }
 
     @Test

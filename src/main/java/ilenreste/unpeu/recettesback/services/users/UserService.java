@@ -3,6 +3,8 @@ package ilenreste.unpeu.recettesback.services.users;
 import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;
+import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.models.users.requests.CreateUserRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;
 import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
@@ -34,7 +36,7 @@ public class UserService {
     public void createUser(CreateUserRequest request) {
 
         if (usersRepository.existsByUsername(request.username())) {
-            throw new IllegalStateException("Username already exists");
+            throw new ResourceConflictException("Username already exists");
         }
 
         String passwordHash = passwordEncoder.encode(request.password());
@@ -56,7 +58,7 @@ public class UserService {
 
     public void updateUser(String userId, UpdateUserRequest request) {
         UserEntity user = usersRepository.findById(userId)
-                .orElseThrow(() -> new IllegalStateException("User doesn't exist"));
+                .orElseThrow(() -> ResourceNotFoundException.of("user", userId));
         updateUser(user, request);
     }
 

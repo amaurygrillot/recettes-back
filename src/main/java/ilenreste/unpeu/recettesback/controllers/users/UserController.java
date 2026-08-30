@@ -11,7 +11,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 @Log4j2
 @RequestMapping("/users")
@@ -28,49 +32,31 @@ public class UserController {
 
     @PostMapping("/create")
     public ResponseEntity<Void> createUser(@Valid @RequestBody CreateUserRequest request) {
-        try {
-            userService.createUser(request);
-        } catch (IllegalStateException illegalStateException) {
-            log.error("Bad request for create user", illegalStateException);
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
-        } catch (Exception exception) {
-            log.error("Error when trying to create user", exception);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
-        }
+        log.info("Creating a new user account");
+        userService.createUser(request);
         return ResponseEntity.status(HttpStatus.CREATED).build();
     }
 
     @PutMapping("/update")
     public ResponseEntity<Void> updateUser(@AuthenticationPrincipal Jwt jwt,
                                            @Valid @RequestBody UpdateUserRequest request) {
-        try {
-            String userId = (String) jwt.getClaims().get("userId");
-            userService.updateUser(userId, request);
-        } catch (IllegalStateException illegalStateException) {
-            log.error("Bad request for update user", illegalStateException);
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
-        } catch (Exception exception) {
-            log.error("Error when trying to update user", exception);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
-        }
+        String userId = (String) jwt.getClaims().get("userId");
+        log.info("Updating user {}", userId);
+        userService.updateUser(userId, request);
         return ResponseEntity.ok().build();
     }
 
     /**
      * Completes the "forgot password" flow: sets a new password if the token
      * from the reset email is valid for the given account.
+     * <p>
+     * Every way this can fail answers identically — see
+     * {@link UserExceptionHandler}.
      */
     @PutMapping("/reinit-password")
     public ResponseEntity<Void> reinitPassword(@Valid @RequestBody ResetPasswordRequest request) {
-        try {
-            passwordResetService.resetPassword(request);
-        } catch (IllegalStateException illegalStateException) {
-            log.error("Bad request for reset password", illegalStateException);
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
-        } catch (Exception exception) {
-            log.error("Error when trying to reset password", exception);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
-        }
+        log.info("Applying a password reset");
+        passwordResetService.resetPassword(request);
         return ResponseEntity.ok().build();
     }
 }

@@ -83,12 +83,8 @@ public class AuthenticationController {
      */
     @PostMapping("/reinit-password")
     public ResponseEntity<Void> reinitPassword(@Valid @RequestBody ReinitPasswordRequest request) {
-        try {
-            passwordResetService.requestReset(request.email());
-        } catch (Exception exception) {
-            log.error("Error while requesting password reset", exception);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
-        }
+        log.info("Password reset requested");
+        passwordResetService.requestReset(request.email());
         return ResponseEntity.accepted().build();
     }
 

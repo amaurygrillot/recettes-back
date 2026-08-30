@@ -3,6 +3,8 @@ package ilenreste.unpeu.recettesback.services.users;
 import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;
+import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.models.users.requests.CreateUserRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;
 import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
@@ -42,12 +44,12 @@ class UserServiceTest {
     }
 
     @Test
-    void createUser_throwsIllegalState_whenUsernameAlreadyExists() {
+    void createUser_throwsConflict_whenUsernameAlreadyExists() {
         CreateUserRequest request = new CreateUserRequest("jane", "Password123", "jane@example.com", "Jane", "Doe");
         when(usersRepository.existsByUsername("jane")).thenReturn(true);
 
         assertThatThrownBy(() -> userService.createUser(request))
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(ResourceConflictException.class)
                 .hasMessage("Username already exists");
 
         verifyNoInteractions(rolesRepository, userRolesRepository, passwordEncoder);
@@ -86,14 +88,14 @@ class UserServiceTest {
     }
 
     @Test
-    void updateUserById_throwsIllegalState_whenUserDoesNotExist() {
+    void updateUserById_throwsNotFound_whenUserDoesNotExist() {
         when(usersRepository.findById("missing-id")).thenReturn(Optional.empty());
         UpdateUserRequest request = new UpdateUserRequest(
                 Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
 
         assertThatThrownBy(() -> userService.updateUser("missing-id", request))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("User doesn't exist");
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessage("No user with id missing-id");
 
         verify(usersRepository, never()).save(any());
     }

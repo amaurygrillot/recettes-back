@@ -492,6 +492,10 @@ five services each remembering to set `updated_at` is precisely the duplication 
   (`@CreatedBy`), `updatedAt` (`@LastModifiedDate`) and `updatedBy` (`@LastModifiedBy`). Recipes and the reference
   entities extend it, and it is annotated `@EntityListeners(AuditingEntityListener.class)` — without that listener the
   annotations are inert and every column silently stays null.
+- **Correction to the `recipes` table above:** `updated_by_id` is *not* null until the first update. Spring Data's
+  `AuditingHandler` stamps both pairs on insert, so a freshly created row has `updated_at == created_at` and
+  `updated_by_id == created_by_id`. That is the behaviour that keeps `updated_at` safely `NOT NULL`, and it is not
+  worth switching off — "never updated" is readable as `updated_at == created_at`.
 - **`@CreatedBy` is not optional here.** `ingredients.created_by_id` in
   the [reference tables](#reference-tables-shared-unique-values)
   above and `media.uploaded_by_id` both need it, and `ingredients` needs it precisely because ingredient creation is
