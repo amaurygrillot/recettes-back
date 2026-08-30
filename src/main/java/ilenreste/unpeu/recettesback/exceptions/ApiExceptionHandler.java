@@ -9,6 +9,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
@@ -95,6 +97,26 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         }
         log.error("Unexpected data integrity violation", exception);
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL, request);
+    }
+
+    /**
+     * Hands Spring Security's own exceptions back rather than answering them.
+     * <p>
+     * Without this, {@code @ExceptionHandler(Exception.class)} below swallows them: it runs at the
+     * {@code DispatcherServlet} level, which is <em>inside</em> {@code ExceptionTranslationFilter},
+     * so an {@link AuthenticationException} thrown by {@code AuthenticationManager} during
+     * {@code POST /auth/login} would never reach the filter that turns it into a 401 — and a wrong
+     * password would answer <strong>500</strong>. Same for an {@link AccessDeniedException} raised
+     * below the dispatcher.
+     * <p>
+     * Rethrowing is the supported idiom: {@code ExceptionHandlerExceptionResolver} treats a handler
+     * that throws the original exception as "not resolved" and lets it continue up the chain to
+     * {@code ExceptionTranslationFilter}, which invokes
+     * {@link ilenreste.unpeu.recettesback.configuration.ProblemDetailErrorResponder}.
+     */
+    @ExceptionHandler({AuthenticationException.class, AccessDeniedException.class})
+    ResponseEntity<ProblemDetail> rethrowSecurityException(RuntimeException exception) {
+        throw exception;
     }
 
     @ExceptionHandler(Exception.class)

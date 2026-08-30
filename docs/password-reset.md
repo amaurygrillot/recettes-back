@@ -9,8 +9,14 @@ A user who forgot their password can:
 2. `PUT /users/reinit-password` with `{ "email", "token", "newPassword" }`. If the token is valid for that email, the
    password is updated.
 
-Both routes are public (no JWT) — see `SecurityFilterConfig` and
-`JwtAuthenticationFilter.PUBLIC_ENDPOINTS`.
+Both routes are public (no JWT) — declared `permitAll()` in `SecurityFilterConfig`, which is now the single source of
+truth for who may reach what.
+
+They also appear in `JwtAuthenticationFilter.CREDENTIAL_ENDPOINTS`, but for a different reason and with a different
+meaning: not "skip the filter here" but "on this route, never *reject* a broken token". A dead session is precisely why
+someone is on the password-reset screen, and `RsaKeyConfig` invalidates every token in circulation at every restart —
+so a client still attaching its stale token must not be locked out of the very endpoints that would give it a new one.
+See [optional-authentication.md](optional-authentication.md).
 
 ## Why the token isn't a JWT
 
