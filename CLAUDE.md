@@ -93,23 +93,35 @@ parse the extension-less `.env` file as `key=value` Java `.properties` syntax. C
 
 ## Architecture
 
-Standard layered structure under `ilenreste.unpeu.recettesback`:
+Layered structure under `ilenreste.unpeu.recettesback`, with each layer **subdivided by domain**:
 
-- `controllers` — REST endpoints (`AuthenticationController`, `UserController`). Thin: validate/delegate to a service,
-  translate exceptions to HTTP statuses (`IllegalStateException` → 400, anything else → 500).
-- `services` — business logic (`UserService` for create/update, `DatabaseUserDetailsService` implementing Spring
-  Security's `UserDetailsService` for login lookups, `PasswordResetService`/`PasswordResetTokenService` for the
-  forgot-password flow, `MailService`/`SmtpMailService` for outgoing email). All service classes live directly under
-  `services` — do not create feature-specific packages (e.g. `mail`, `notifications`) for them, even for a single
-  interface + implementation pair.
-- `repositories` — Spring Data JPA repositories (`UsersRepository`, `RolesRepository`, `UserRolesRepository`).
-- `entities` — JPA entities (`UserEntity`, `RoleEntity`, `UserRolesEntity`). Users and roles are many-to-many via the
-  `user_roles` join table.
-- `models` — DTOs, split into `auth` (`AuthenticationRequest`) and `users` (`CustomUserDetails`, and
-  `users.requests` for `CreateUserRequest`/`UpdateUserRequest`). `UpdateUserRequest` uses `Optional<T>` fields for
-  partial updates — only present fields are applied in `UserService.updateUser`.
-- `configuration` — Spring `@Configuration` classes wiring security and JWT infrastructure.
-- `filters` — `JwtAuthenticationFilter`, a custom `OncePerRequestFilter`.
+- `controllers` — REST endpoints. Thin: validate/delegate to a service; they contain no `try/catch`, because
+  exception-to-status mapping is centralised (see [docs/api-error-handling.md](docs/api-error-handling.md)).
+- `services` — business logic.
+- `repositories` — Spring Data JPA repositories.
+- `entities` — JPA entities. `AuditableEntity` (`@MappedSuperclass`) stays at the `entities` root: it is the shared
+  supertype, owned by no domain.
+- `models` — DTOs (`requests`/`responses` sub-packages where a domain has both).
+- `mappers` — entity ↔ DTO translation.
+
+### Domain sub-packages
+
+`controllers`, `services`, `repositories`, `entities`, `models` and `mappers` each split into **the same domain
+names** — `recipes`, `reference`, `media`, `users` — so the tree reads either way round: "all the recipe classes" or
+"all the repositories". A new class goes in `<layer>/<domain>/`.
+
+Use those four names; do not invent a per-feature package (e.g. `mail`, `notifications`) for one interface plus its
+implementation — `MailService`/`SmtpMailService` belong in `services/users`, next to the password-reset flow that is
+their only caller.
+
+> This supersedes the earlier rule that every service lived directly under a flat `services` package. That rule was
+> written when six flat files were perfectly readable; the recipes feature takes it to fourteen across four unrelated
+> domains, while every other layer is grouped. The trade-off inverted — see
+> [docs/recipes-domain-model.md](docs/recipes-domain-model.md#package-layout).
+
+`configuration`, `filters` and `exceptions` stay **flat**. They are cross-cutting — `SecurityFilterConfig` is not a
+recipes class or a users class, and `ResourceNotFoundException` is thrown by every domain. Subdividing them would
+produce single-class packages that answer no question.
 
 ### Authentication flow
 

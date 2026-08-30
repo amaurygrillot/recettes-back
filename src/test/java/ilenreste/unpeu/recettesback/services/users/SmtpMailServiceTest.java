@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.services;
+package ilenreste.unpeu.recettesback.services.users;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

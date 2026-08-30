@@ -1,9 +1,9 @@
-package ilenreste.unpeu.recettesback.controllers;
+package ilenreste.unpeu.recettesback.controllers.users;
 
 import ilenreste.unpeu.recettesback.models.auth.AuthenticationRequest;
 import ilenreste.unpeu.recettesback.models.auth.ReinitPasswordRequest;
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
-import ilenreste.unpeu.recettesback.services.PasswordResetService;
+import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
 import jakarta.validation.Valid;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.http.HttpStatus;

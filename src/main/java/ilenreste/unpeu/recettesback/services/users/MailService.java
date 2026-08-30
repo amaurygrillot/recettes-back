@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.services;
+package ilenreste.unpeu.recettesback.services.users;
 
 public interface MailService {
 

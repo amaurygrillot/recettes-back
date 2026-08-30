@@ -1,8 +1,8 @@
-package ilenreste.unpeu.recettesback.services;
+package ilenreste.unpeu.recettesback.services.users;
 
-import ilenreste.unpeu.recettesback.entities.PasswordResetTokenEntity;
-import ilenreste.unpeu.recettesback.entities.UserEntity;
-import ilenreste.unpeu.recettesback.repositories.PasswordResetTokenRepository;
+import ilenreste.unpeu.recettesback.entities.users.PasswordResetTokenEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.repositories.users.PasswordResetTokenRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;

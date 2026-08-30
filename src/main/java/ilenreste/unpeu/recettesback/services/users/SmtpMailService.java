@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.services;
+package ilenreste.unpeu.recettesback.services.users;
 
 import lombok.extern.log4j.Log4j2;
 import org.jspecify.annotations.NonNull;

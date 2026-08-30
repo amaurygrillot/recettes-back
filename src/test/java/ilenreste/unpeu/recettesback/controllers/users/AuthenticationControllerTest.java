@@ -1,7 +1,7 @@
-package ilenreste.unpeu.recettesback.controllers;
+package ilenreste.unpeu.recettesback.controllers.users;
 
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
-import ilenreste.unpeu.recettesback.services.PasswordResetService;
+import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;

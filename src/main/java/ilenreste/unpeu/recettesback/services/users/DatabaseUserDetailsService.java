@@ -1,8 +1,8 @@
-package ilenreste.unpeu.recettesback.services;
+package ilenreste.unpeu.recettesback.services.users;
 
-import ilenreste.unpeu.recettesback.entities.UserEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
-import ilenreste.unpeu.recettesback.repositories.UsersRepository;
+import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import lombok.NonNull;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;

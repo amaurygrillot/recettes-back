@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.entities;
+package ilenreste.unpeu.recettesback.entities.users;
 
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;

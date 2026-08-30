@@ -1,8 +1,8 @@
-package ilenreste.unpeu.recettesback.services;
+package ilenreste.unpeu.recettesback.services.users;
 
-import ilenreste.unpeu.recettesback.entities.UserEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
-import ilenreste.unpeu.recettesback.repositories.UsersRepository;
+import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;

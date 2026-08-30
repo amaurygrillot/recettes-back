@@ -252,7 +252,7 @@ single-class packages that answer no question.
 
 `AuditableEntity` stays at the `entities` root for the same reason — it is the shared supertype, owned by no domain.
 
-### The `services` conflict — needs your call
+### The `services` conflict — resolved: grouped, and `CLAUDE.md` amended
 
 The root `CLAUDE.md` currently says, verbatim:
 
@@ -280,9 +280,9 @@ classes. At 14 files across four unrelated domains that trade-off has inverted �
 *same four domain names* used everywhere else, not per-feature packages invented ad hoc, which is what the rule was
 actually guarding against.
 
-**Until you say otherwise, the implementation session should keep `services` flat and follow `CLAUDE.md`.** If you agree
-with the recommendation, `CLAUDE.md` line 103 needs updating in the same commit — a design doc must not be the only
-place a convention is recorded.
+**Decided: group by domain.** `CLAUDE.md`'s Architecture section was rewritten in the same commit as the package move
+— a design doc must not be the only place a convention is recorded — and now states the domain-sub-package rule
+directly, with the superseded flat-`services` rule kept as an explicit note so the change is not mistaken for drift.
 
 ### Moving the existing classes
 

@@ -1,6 +1,6 @@
-package ilenreste.unpeu.recettesback.repositories;
+package ilenreste.unpeu.recettesback.repositories.users;
 
-import ilenreste.unpeu.recettesback.entities.UserRolesEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.UUID;

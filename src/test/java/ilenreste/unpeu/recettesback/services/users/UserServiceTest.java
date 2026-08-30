@@ -1,13 +1,13 @@
-package ilenreste.unpeu.recettesback.services;
+package ilenreste.unpeu.recettesback.services.users;
 
-import ilenreste.unpeu.recettesback.entities.RoleEntity;
-import ilenreste.unpeu.recettesback.entities.UserEntity;
-import ilenreste.unpeu.recettesback.entities.UserRolesEntity;
+import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;
 import ilenreste.unpeu.recettesback.models.users.requests.CreateUserRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;
-import ilenreste.unpeu.recettesback.repositories.RolesRepository;
-import ilenreste.unpeu.recettesback.repositories.UserRolesRepository;
-import ilenreste.unpeu.recettesback.repositories.UsersRepository;
+import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
+import ilenreste.unpeu.recettesback.repositories.users.UserRolesRepository;
+import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
