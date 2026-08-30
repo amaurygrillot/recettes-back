@@ -3,6 +3,7 @@ package ilenreste.unpeu.recettesback.services;
 import lombok.extern.log4j.Log4j2;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.mail.MailException;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
@@ -38,7 +39,15 @@ public class SmtpMailService implements MailService {
 
         // Never log the link/token: it is a bearer credential for the reset flow.
         log.info("Sending password reset email");
-        mailSender.send(message);
+        try {
+            mailSender.send(message);
+        } catch (MailException mailException) {
+            // Swallowed deliberately: a delivery failure must not propagate to the
+            // caller. It is only ever attempted for a registered email, so letting
+            // it surface (e.g. as a 500) would tell an attacker the email exists —
+            // see the contract on MailService.sendPasswordResetEmail.
+            log.error("Failed to send password reset email", mailException);
+        }
     }
 
     private @NonNull SimpleMailMessage buildMessage(String toEmail, String link) {

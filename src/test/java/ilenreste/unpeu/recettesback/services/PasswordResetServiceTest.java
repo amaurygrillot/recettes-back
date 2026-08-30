@@ -14,7 +14,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -73,7 +72,7 @@ class PasswordResetServiceTest {
         verify(tokenService).consumeToken(user, "raw-token");
 
         ArgumentCaptor<UpdateUserRequest> captor = ArgumentCaptor.forClass(UpdateUserRequest.class);
-        verify(userService).updateUser(eq("user-1"), captor.capture());
+        verify(userService).updateUser(eq(user), captor.capture());
         assertThat(captor.getValue().password()).contains("NewPassword123");
         assertThat(captor.getValue().email()).isEmpty();
         assertThat(captor.getValue().username()).isEmpty();

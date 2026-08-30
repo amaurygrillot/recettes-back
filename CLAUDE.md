@@ -55,9 +55,12 @@ There is no linter/formatter plugin configured in `pom.xml` (no Checkstyle/Spotl
 
 ### Testing
 
-Testing is a priority for this project, with a target of >90% test coverage. Whenever a request or response format is
-added or changed (a controller endpoint, a DTO in `models`, etc.), add or update a matching sample request in
-`src/test/requests` alongside the actual test code.
+Testing is a priority for this project, with a target of >90% **line** coverage (not class coverage — a class with
+uncovered branches counts against this even if every class in the package has at least one test). This is enforced by
+the `jacoco-maven-plugin` in [pom.xml](pom.xml): `./mvnw test` (and therefore `./mvnw clean package`) runs the tests,
+generates an HTML report at `target/site/jacoco/index.html`, and **fails the build** if line coverage across the whole
+project drops below 90%. Whenever a request or response format is added or changed (a controller endpoint, a DTO in
+`models`, etc.), add or update a matching sample request in `src/test/requests` alongside the actual test code.
 
 Sample requests in `src/test/requests` are `.http` files (IntelliJ HTTP Client / VS Code REST Client syntax:
 `@variable = value` definitions, `###`-separated request blocks). They are organized **one file per endpoint or feature

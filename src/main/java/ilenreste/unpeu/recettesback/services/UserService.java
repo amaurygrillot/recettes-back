@@ -57,6 +57,15 @@ public class UserService {
     public void updateUser(String userId, UpdateUserRequest request) {
         UserEntity user = usersRepository.findById(userId)
                 .orElseThrow(() -> new IllegalStateException("User doesn't exist"));
+        updateUser(user, request);
+    }
+
+    /**
+     * Same as {@link #updateUser(String, UpdateUserRequest)} but for a caller
+     * that already holds the {@link UserEntity} (e.g. after looking it up by
+     * some other key), sparing a redundant fetch-by-id.
+     */
+    public void updateUser(UserEntity user, UpdateUserRequest request) {
         request.email().ifPresent(user::setEmail);
         request.firstname().ifPresent(user::setFirstname);
         request.lastname().ifPresent(user::setLastname);

@@ -16,7 +16,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * This has to run against the real embedded container ({@code webEnvironment = RANDOM_PORT}, a real
  * HTTP call): a standalone {@code MockMvcBuilders.standaloneSetup(...)} controller test has no
- * security filter chain at all, so it cannot reproduce this class of bug.
+ * security filter chain at all, so it cannot reproduce this class of bug - which is also why the
+ * public-endpoint matchers in SecurityFilterConfig (e.g. for PUT /users/reinit-password) need their
+ * own real-chain coverage here rather than relying on the standalone controller tests.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureTestRestTemplate
@@ -34,6 +36,25 @@ class SecurityErrorHandlingTest {
         ResponseEntity<String> response =
                 restTemplate.postForEntity("/auth/reinit-password", request, String.class);
 
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void reinitPasswordEndpoint_isReachableWithoutAuthentication_throughRealFilterChain() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<String> request = new HttpEntity<>(
+                "{\"email\":\"ghost@example.com\",\"token\":\"not-a-real-token\",\"newPassword\":\"SomePassword123\"}",
+                headers
+        );
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/users/reinit-password", HttpMethod.PUT, request, String.class
+        );
+
+        // No JWT was sent. 401/403 would mean SecurityFilterConfig's permitAll() rule for this route
+        // regressed; 400 proves the request reached UserController's business logic instead (an
+        // unknown email/token correctly reported as a bad request).
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 }
