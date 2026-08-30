@@ -17,11 +17,11 @@ once in their own tables, so a recipe references them rather than repeating thei
 ```mermaid
 erDiagram
     users ||--o{ recipes : authors
-    categories ||--o{ recipes : classifies
+  recipes }o--o{ categories: classified_in
+  recipes }o--o{ tags: tagged_with
     recipes ||--o{ recipe_cover_pictures : has
     recipes ||--o{ recipe_steps : has
     recipes ||--o{ recipe_ingredient_groups : has
-    recipes }o--o{ tags : tagged_with
     recipe_steps ||--o{ recipe_step_pictures : illustrated_by
     recipe_ingredient_groups ||--o{ recipe_ingredients : contains
     ingredients ||--o{ recipe_ingredients : referenced_by
@@ -35,7 +35,7 @@ erDiagram
 
 | Table         | Columns                                                                                         | Who can create         |
 |---------------|-------------------------------------------------------------------------------------------------|------------------------|
-| `ingredients` | `id`, `name`, `normalized_name` (unique), `icon_media_id` (null), `created_at`, `created_by_id`  | any authenticated user |
+| `ingredients` | `id`, `name`, `normalized_name` (unique), `icon_media_id` (null), `created_at`, `created_by_id` | any authenticated user |
 | `categories`  | `id`, `name`, `normalized_name` (unique)                                                        | `ADMIN` only           |
 | `tags`        | `id`, `name`, `normalized_name` (unique)                                                        | `ADMIN` only           |
 | `units`       | `id`, `name`, `normalized_name` (unique), `abbreviation`                                        | `ADMIN` only           |
@@ -66,16 +66,17 @@ the race also maps to 409, see [api-error-handling.md](api-error-handling.md).
 
 ### `recipes`
 
-| Column            | Type                | Notes                                                  |
-|-------------------|---------------------|--------------------------------------------------------|
-| `id`              | UUID (String)       | `GenerationType.UUID`, matching every existing entity  |
-| `title`           | varchar, not null   | not unique — see below                                 |
-| `recommendations` | text, nullable      | free text shown beside the recipe, outside the steps   |
-| `category_id`     | FK → `categories`   | not null                                               |
-| `author_id`       | FK → `users`        | not null, **immutable after creation**                 |
-| `created_at`      | timestamp, not null | set by JPA auditing                                    |
-| `updated_at`      | timestamp, not null | set by JPA auditing                                    |
-| `updated_by_id`   | FK → `users`, null  | set by JPA auditing; null until the first update       |
+| Column            | Type                | Notes                                                 |
+|-------------------|---------------------|-------------------------------------------------------|
+| `id`              | UUID (String)       | `GenerationType.UUID`, matching every existing entity |
+| `title`           | varchar, not null   | not unique — see below                                |
+| `recommendations` | text, nullable      | free text shown beside the recipe, outside the steps  |
+| `author_id`       | FK → `users`        | not null, **immutable after creation**                |
+| `created_at`      | timestamp, not null | set by JPA auditing                                   |
+| `updated_at`      | timestamp, not null | set by JPA auditing                                   |
+| `updated_by_id`   | FK → `users`, null  | set by JPA auditing; null until the first update      |
+
+Categories are **not** a column here — see the next section.
 
 **`author_id` is both the author and the creating user.** You clarified these are the same person, so there is no
 separate `created_by` column — a second FK holding the same value forever is a bug waiting to happen (the two drift,
@@ -89,6 +90,40 @@ variants. A uniqueness constraint here would produce a 409 the user cannot act o
 a list would only add ordering machinery for something the frontend renders as one paragraph. If it later needs
 bullets, markdown in this field handles it without a schema change.
 
+### Categories are many-to-many
+
+A recipe belongs to **one or more** categories, through a `recipe_categories` join table with a composite primary key
+`(recipe_id, category_id)` — structurally identical to `recipe_tags`, and mapped the same way, as a plain
+`@ManyToMany`.
+
+| Table               | Columns                                   |
+|---------------------|-------------------------------------------|
+| `recipe_categories` | `recipe_id`, `category_id` — composite PK |
+| `recipe_tags`       | `recipe_id`, `tag_id` — composite PK      |
+
+**At least one category is required.** `CreateRecipeRequest.categoryIds` is `@NotEmpty`; the "one or more" is enforced
+at the API layer, not by the schema, since a join table cannot express a minimum cardinality. This keeps the original
+intent (every recipe is classified and therefore browsable) while allowing the tarte that is honestly both a dessert and
+a goûter.
+
+No ordering column: unlike steps or ingredient lines, there is no meaningful "first" category. The API returns them
+sorted by name so the output is at least stable.
+
+#### Categories and tags are now structurally identical — is that a problem?
+
+Worth naming, since after this change both are admin-curated many-to-many reference tables with a unique normalized
+name. The only differences left are semantic:
+
+- **Categories** are a taxonomy: a small, stable, mostly-disjoint set (entrées, plats, desserts) that drives the main
+  navigation, and every recipe must have at least one.
+- **Tags** are open-ended facets (végétarien, sans gluten, rapide, Noël) that can proliferate, and are optional.
+
+That distinction is real and it is a product decision, but it is enforced by convention and by the `@NotEmpty` on
+categories — nothing in the schema stops the two from converging into "two lists of labels" over time. Both are kept
+because you asked for both tables. **If in six months the category list has grown to twenty entries and recipes carry
+five each, that is the signal they have merged in practice and one of them should go.** Recorded here so that is a
+recognisable outcome rather than a surprise.
+
 ### Ordered child tables
 
 Steps, ingredient groups, ingredient lines and pictures are all ordered, and each carries an explicit `position`
@@ -101,7 +136,6 @@ integer with a `UNIQUE (parent_id, position)` constraint.
 | `recipe_cover_pictures`    | `id`, `recipe_id`, `media_id`, `position`, `alt_text` (null)                               |
 | `recipe_ingredient_groups` | `id`, `recipe_id`, `position`, `title` (nullable)                                          |
 | `recipe_ingredients`       | `id`, `group_id`, `ingredient_id`, `quantity`, `unit_id` (null), `note` (null), `position` |
-| `recipe_tags`              | `recipe_id`, `tag_id` — composite PK, plain `@ManyToMany` join table                       |
 
 `recipe_ingredient_groups.title` is nullable on purpose: most recipes have a single unnamed ingredient list, and
 forcing a title there would make every such recipe carry a meaningless "Ingrédients" heading. Null means "render the
@@ -128,37 +162,279 @@ You chose a numeric amount plus a `units` reference table:
 Keeping the amount numeric is what makes serving-scaling and an aggregated shopping list possible later. Neither is in
 scope now, but both become schema migrations if the quantity is a string.
 
-## Java package layout
+## Package layout
 
-Follows the existing structure; the only new top-level packages are `mappers` and `exceptions`.
+You asked for domain grouping given the file count, and it is the right call: this feature adds roughly 40 classes, and
+a flat `entities` package holding 16 of them stops being navigable. The layout below uses **the same four domain names
+at every layer** — `recipes`, `reference`, `media`, `users` — so the tree can be read either way round: "all the recipe
+classes" or "all the repositories".
 
 ```
-entities/     RecipeEntity, RecipeStepEntity, RecipeStepPictureEntity, RecipeCoverPictureEntity,
-              RecipeIngredientGroupEntity, RecipeIngredientEntity, IngredientEntity,
-              CategoryEntity, TagEntity, UnitEntity, MediaEntity, AuditableEntity (@MappedSuperclass)
-repositories/ RecipesRepository, IngredientsRepository, CategoriesRepository, TagsRepository,
-              UnitsRepository, MediaRepository
-services/     RecipeService, IngredientService, CategoryService, TagService, UnitService,
-              MediaService, MediaStorageService (interface), FilesystemMediaStorageService
-controllers/  RecipeController, IngredientController, CategoryController, TagController,
-              UnitController, MediaController
-models/recipes/requests/   CreateRecipeRequest, UpdateRecipeRequest, RecipeStepRequest,
-                           IngredientGroupRequest, RecipeIngredientRequest, PictureRequest
-models/recipes/responses/  RecipeResponse, RecipeSummaryResponse, RecipeStepResponse, ...
-models/reference/          CreateIngredientRequest, IngredientResponse, CategoryResponse, ...
-mappers/      RecipeMapper, ReferenceMapper
-exceptions/   ResourceNotFoundException, ResourceConflictException, ForbiddenOperationException,
-              InvalidReferenceException
+ilenreste.unpeu.recettesback
+├── configuration/           unchanged, flat (cross-cutting, not domain-owned)
+├── filters/                 unchanged, flat
+├── exceptions/              ResourceNotFoundException, InvalidReferenceException,
+│                            ResourceConflictException, ForbiddenOperationException
+├── entities/
+│   ├── AuditableEntity      @MappedSuperclass, shared — stays at the root
+│   ├── recipes/             RecipeEntity, RecipeStepEntity, RecipeStepPictureEntity,
+│   │                        RecipeCoverPictureEntity, RecipeIngredientGroupEntity,
+│   │                        RecipeIngredientEntity
+│   ├── reference/           IngredientEntity, CategoryEntity, TagEntity, UnitEntity
+│   ├── media/               MediaEntity
+│   └── users/               UserEntity, RoleEntity, UserRolesEntity,
+│                            PasswordResetTokenEntity            ← existing, moved
+├── repositories/
+│   ├── recipes/             RecipesRepository
+│   ├── reference/           IngredientsRepository, CategoriesRepository,
+│   │                        TagsRepository, UnitsRepository
+│   ├── media/               MediaRepository
+│   └── users/               UsersRepository, RolesRepository, UserRolesRepository,
+│                            PasswordResetTokenRepository        ← existing, moved
+├── services/                see the note below — this one conflicts with CLAUDE.md
+├── controllers/
+│   ├── recipes/             RecipeController
+│   ├── reference/           IngredientController, CategoryController,
+│   │                        TagController, UnitController
+│   ├── media/               MediaController
+│   └── users/               UserController, AuthenticationController   ← existing, moved
+├── mappers/
+│   ├── recipes/             RecipeMapper
+│   ├── reference/           ReferenceMapper
+│   └── media/               MediaMapper
+└── models/
+    ├── auth/                existing, already domain-grouped
+    ├── users/               existing, already domain-grouped
+    ├── recipes/             requests/, responses/
+    ├── reference/           requests/, responses/
+    └── media/               responses/
 ```
 
-Per the root `CLAUDE.md`, all services live directly under `services` — `MediaStorageService` and its
-`FilesystemMediaStorageService` implementation are siblings there, exactly like `MailService`/`SmtpMailService`.
+`models` already works this way (`models/auth`, `models/users`), so this generalises a convention the codebase has
+rather than inventing one.
 
-`mappers` is a package rather than static factory methods on the response records. Entity-to-DTO translation for a
-full recipe spans six entity types; putting it inside `RecipeService` gives that service two reasons to change
-(business rules *and* wire format), and putting it inside the record makes a DTO depend on the entity layer. A
-`@Component RecipeMapper` keeps each piece single-purpose and is trivially unit-testable — which matters, because it
-is a large block of lines counting against the coverage gate.
+`configuration`, `filters` and `exceptions` stay flat. They are cross-cutting: `SecurityFilterConfig` is not a recipes
+class or a users class, and `ResourceNotFoundException` is thrown by every domain. Subdividing them would produce
+single-class packages that answer no question.
+
+`AuditableEntity` stays at the `entities` root for the same reason — it is the shared supertype, owned by no domain.
+
+### The `services` conflict — needs your call
+
+The root `CLAUDE.md` currently says, verbatim:
+
+> All service classes live directly under `services` — do not create feature-specific packages (e.g. `mail`,
+> `notifications`) for them, even for a single interface + implementation pair.
+
+That rule and this request point in opposite directions, and I am not going to quietly override a standing instruction
+you wrote. The stakes: recipes add eight services (`RecipeService`, `IngredientService`,
+`CategoryService`, `TagService`, `UnitService`, `MediaService`, `MediaStorageService`,
+`FilesystemMediaStorageService`) to the six that exist, giving **14 flat files** in one package.
+
+My recommendation is to group them like every other layer and amend `CLAUDE.md`:
+
+```
+services/
+├── recipes/    RecipeService
+├── reference/  IngredientService, CategoryService, TagService, UnitService
+├── media/      MediaService, MediaStorageService, FilesystemMediaStorageService
+└── users/      UserService, DatabaseUserDetailsService, PasswordResetService,
+                PasswordResetTokenService, MailService, SmtpMailService
+```
+
+The rule was written when six flat files were perfectly readable and the risk was inventing a `mail` package for two
+classes. At 14 files across four unrelated domains that trade-off has inverted — and note the proposed packages are the
+*same four domain names* used everywhere else, not per-feature packages invented ad hoc, which is what the rule was
+actually guarding against.
+
+**Until you say otherwise, the implementation session should keep `services` flat and follow `CLAUDE.md`.** If you agree
+with the recommendation, `CLAUDE.md` line 103 needs updating in the same commit — a design doc must not be the only
+place a convention is recorded.
+
+### Moving the existing classes
+
+The `← existing, moved` entries above are a pure package rename of code that already works: no logic changes, only
+imports. Worth doing so the tree does not end up half-grouped, but it should be its **own commit**, separate from the
+recipes work, so that a `git log` for the feature is not drowned in import churn. It is also the kind of change an IDE
+refactor does correctly in one action.
+
+## Repositories
+
+Every query the implementation needs, with the reasoning where the obvious version is wrong. All interfaces extend
+`JpaRepository<T, String>`, so `findById`, `findAllById`, `save`, `saveAll`, `delete` and `existsById` come for free and
+are not repeated below.
+
+### `RecipesRepository`
+
+#### Listing — `GET /recipes`
+
+The naive version, `Page<RecipeEntity> findByCategories_Id(String id, Pageable p)`, is broken in two ways at once: a
+join onto a to-many collection produces **duplicate rows** (one per matching category), and Spring Data's derived
+`COUNT` query then counts those duplicates, so `page.getTotalElements()` lies and the last page is wrong.
+
+Filter with `EXISTS` subqueries instead of joins, and page over **ids only**:
+
+```java
+
+@Query("""
+        SELECT r.id FROM RecipeEntity r
+        WHERE (:authorId   IS NULL OR r.author.id = :authorId)
+          AND (:categoryId IS NULL OR EXISTS (SELECT 1 FROM r.categories c WHERE c.id = :categoryId))
+          AND (:tagId      IS NULL OR EXISTS (SELECT 1 FROM r.tags       t WHERE t.id = :tagId))
+          AND (:q          IS NULL OR LOWER(r.title) LIKE LOWER(CONCAT('%', :q, '%')))
+        """)
+Page<String> searchIds(@Param("authorId") String authorId,
+                       @Param("categoryId") String categoryId,
+                       @Param("tagId") String tagId,
+                       @Param("q") String q,
+                       Pageable pageable);
+
+@Query("SELECT r FROM RecipeEntity r JOIN FETCH r.author WHERE r.id IN :ids")
+List<RecipeEntity> findAllForSummary(@Param("ids") Collection<String> ids);
+```
+
+`EXISTS` keeps one row per recipe, so both the page and its count are correct. The second query then loads exactly that
+page's recipes; their `categories`, `tags` and `coverPictures` collections are filled by Hibernate's batch fetching
+(below) in a bounded number of extra queries, not one per row.
+
+**`IN` does not preserve order.** `findAllForSummary` returns rows in whatever order PostgreSQL likes, so the service
+must reorder them to match `searchIds`' page content before mapping — otherwise the sort the user asked for silently
+disappears. This is the single easiest thing to get wrong in this whole design.
+
+The `:param IS NULL OR ...` form is used instead of a JPA `Specification` because four optional filters is exactly the
+size where the Criteria API costs more in ceremony than it returns. If filters keep being added, revisit.
+
+`LIKE '%q%'` cannot use a B-tree index, so title search is a sequential scan. Fine for hundreds of recipes; if it ever
+is not, the fix is a `pg_trgm` GIN index or PostgreSQL full-text search, not a different query shape.
+
+#### Detail — `GET /recipes/{id}`
+
+Plain inherited `findById`, plus `spring.jpa.properties.hibernate.default_batch_fetch_size=50` in
+`application.properties`. That setting makes Hibernate load each lazy collection level with a single batched
+`IN`-query instead of one query per parent, which flattens the N+1 across the whole graph without a single
+`@EntityGraph`.
+
+Deliberately not written: a `findDetailById` stacking several `LEFT JOIN FETCH`. More than one collection fetch in one
+query throws `MultipleBagFetchException` or returns a cartesian product. Add a targeted `@EntityGraph` later only if the
+SQL log shows an actual problem — batch fetching is the version that does not need tuning per query.
+
+#### Ownership check
+
+```java
+
+@Query("SELECT r.author.id FROM RecipeEntity r WHERE r.id = :id")
+Optional<String> findAuthorIdById(@Param("id") String id);
+```
+
+`PUT` needs the whole entity anyway, but `DELETE` does not — this checks permission and existence in one scalar query
+without materialising a recipe that is about to be thrown away. An empty `Optional` is the 404; a mismatch is the 403.
+
+#### Reference-usage checks (the 409-on-delete rule)
+
+All four live here rather than on the reference repositories, because they all ask the same question — "does any recipe
+still point at this?" — and keeping them together is what stops a fifth variant being invented later.
+
+```java
+
+@Query("SELECT COUNT(r) > 0 FROM RecipeEntity r JOIN r.categories c WHERE c.id = :categoryId")
+boolean isCategoryUsed(@Param("categoryId") String categoryId);
+
+@Query("SELECT COUNT(r) > 0 FROM RecipeEntity r JOIN r.tags t WHERE t.id = :tagId")
+boolean isTagUsed(@Param("tagId") String tagId);
+
+@Query("""
+        SELECT COUNT(ri) > 0 FROM RecipeEntity r
+        JOIN r.ingredientGroups g JOIN g.ingredients ri
+        WHERE ri.ingredient.id = :ingredientId
+        """)
+boolean isIngredientUsed(@Param("ingredientId") String ingredientId);
+
+@Query("""
+        SELECT COUNT(ri) > 0 FROM RecipeEntity r
+        JOIN r.ingredientGroups g JOIN g.ingredients ri
+        WHERE ri.unit.id = :unitId
+        """)
+boolean isUnitUsed(@Param("unitId") String unitId);
+```
+
+Duplicate rows are harmless here — the question is only whether the count exceeds zero.
+
+### Reference repositories
+
+`IngredientsRepository`, `CategoriesRepository`, `TagsRepository` and `UnitsRepository` are the same three methods over
+their own entity:
+
+```java
+Optional<IngredientEntity> findByNormalizedName(String normalizedName);
+
+boolean existsByNormalizedName(String normalizedName);
+
+Page<IngredientEntity> findByNormalizedNameStartingWithOrderByName(String prefix, Pageable pageable);
+```
+
+- `existsByNormalizedName` — the pre-check that produces a clean 409 on create.
+- `findByNormalizedName` — lets create return *which* existing row collided, so the client can select it instead of
+  retrying blindly.
+- `findByNormalizedNameStartingWith` — autocomplete in the recipe editor. **`StartingWith`, not `Containing`**: a
+  trailing wildcard uses the index on `normalized_name`, a leading one cannot. Searching against the normalized column
+  is also what makes typing `oeuf` find `Œuf`.
+
+Only `IngredientsRepository` needs the paged search (its table is the one that grows); on categories, tags and units a
+plain `findAll(Sort)` is enough and the endpoint returns everything.
+
+### Validating body references in one query, not N
+
+`POST /recipes` carries many ids: category ids, tag ids, one ingredient id per line, a unit id per line, media ids. A
+`findById().orElseThrow()` per id is 30+ queries on a normal recipe.
+
+The pattern, used identically at all five call sites: collect the distinct ids into a `Set`, call the inherited
+`findAllById(ids)` **once**, and compare sizes. If fewer rows came back, subtract the returned ids from the requested
+set and throw `InvalidReferenceException` naming the field and the missing ids — which is what makes the 400 response
+actionable instead of just "bad request". The loaded entities go into a `Map<String, T>` that the rest of the write path
+resolves against, so nothing is fetched twice.
+
+Worth extracting as one small helper (`ReferenceResolver`) rather than written out five times.
+
+### `MediaRepository`
+
+```java
+
+@Query("SELECT COALESCE(SUM(m.sizeBytes), 0) FROM MediaEntity m WHERE m.uploadedBy.id = :userId")
+long totalBytesUploadedBy(@Param("userId") String userId);
+
+@Query("""
+        SELECT m FROM MediaEntity m
+        WHERE m.createdAt < :threshold
+          AND NOT EXISTS (SELECT 1 FROM RecipeCoverPictureEntity c WHERE c.media = m)
+          AND NOT EXISTS (SELECT 1 FROM RecipeStepPictureEntity  s WHERE s.media = m)
+          AND NOT EXISTS (SELECT 1 FROM IngredientEntity         i WHERE i.icon  = m)
+        """)
+List<MediaEntity> findOrphans(@Param("threshold") Instant threshold);
+```
+
+Both back gaps listed as deferred in [media-storage.md](media-storage.md) (per-user quota, orphan cleanup). They are
+specified now because both are cheap to add while the entity is being written and awkward to retrofit — but neither
+needs a scheduler wired up in this scope.
+
+`COALESCE` matters: `SUM` over zero rows returns `null`, and a `long` return type then throws on unboxing the first time
+a user with no uploads is checked.
+
+### Indexes
+
+Beyond the primary keys and the `unique` constraints on `normalized_name`:
+
+| Index                               | Serves                               |
+|-------------------------------------|--------------------------------------|
+| `recipes(author_id)`                | `authorId` filter, "my recipes"      |
+| `recipes(created_at DESC)`          | default listing order                |
+| `recipe_categories(category_id)`    | category filter and `isCategoryUsed` |
+| `recipe_tags(tag_id)`               | tag filter and `isTagUsed`           |
+| `recipe_ingredients(ingredient_id)` | `isIngredientUsed`                   |
+| `recipe_ingredients(unit_id)`       | `isUnitUsed`                         |
+| `media(created_at)`                 | orphan sweep                         |
+
+The join tables get a PK index on `(recipe_id, category_id)` automatically, which covers lookups *from* a recipe; the
+second index above is what covers lookups *from* a category, and a composite PK's index cannot serve that direction.
 
 ## Auditing
 
@@ -191,10 +467,14 @@ separate schema change to their tables with no bearing on recipes.
 | PUT    | `/recipes/{id}` | author or `ADMIN` | 200     | partial update, see below                                           |
 | DELETE | `/recipes/{id}` | author or `ADMIN` | 204     | **not in your requirements — flagged below**                        |
 
+`categoryId` stays a single-value filter (match recipes carrying *that* category) even though a recipe now has several.
+Multi-category filtering — "desserts AND rapide" — needs an AND-vs-OR decision and a different query shape; out of scope
+until there is a UI asking for it.
+
 `DELETE` was not in your list. A library with no way to remove a mistaken entry is awkward, and its permission rule is
 identical to update, so it is designed here — but say the word and it comes out. If it stays, deletion cascades to
-steps, groups, ingredient lines and picture links, and merely dereferences (never deletes) ingredients, tags and the
-category.
+steps, groups, ingredient lines and picture links, and merely dereferences (never deletes) ingredients, tags and
+categories.
 
 ### Reference data
 
@@ -239,35 +519,31 @@ Fully specified in [media-storage.md](media-storage.md).
 `UpdateRecipeRequest` uses `Optional<T>` fields, matching the existing `UpdateUserRequest` — an absent field is left
 alone.
 
-For the **collections** (steps, ingredient groups, cover pictures, tags), a present value **replaces the whole
-collection**. `Optional<List<RecipeStepRequest>> steps` absent means steps untouched; present means these are now the
-steps, in this order.
+For the **collections** (steps, ingredient groups, cover pictures, **categories**, tags), a present value **replaces the
+whole collection**. `Optional<List<RecipeStepRequest>> steps` absent means steps untouched; present means these are now
+the steps, in this order. A present `categoryIds` is still validated `@NotEmpty` — an update may not strip a recipe of
+its last category.
 
 The alternative — per-element patching with client-supplied child ids and add/update/remove intent — is a much more
 complex contract that buys nothing here: the editing UI is a form holding the entire recipe, so it always knows the
 full list. Replacement also makes reordering free, where patching needs explicit position juggling.
 
-Implementation note: replacement means `orphanRemoval = true` on those `@OneToMany` collections, and mutating the
-existing collection in place (`clear()` then `addAll()`) rather than assigning a new one — reassigning a
-Hibernate-managed collection throws.
+Implementation note: replacement means `orphanRemoval = true` on the owned `@OneToMany` collections (steps, groups,
+pictures), and mutating the existing collection in place (`clear()` then `addAll()`) rather than assigning a new one —
+reassigning a Hibernate-managed collection throws. The `@ManyToMany` collections (categories, tags) take the same
+in-place treatment but **without** `orphanRemoval`: removing a category from a recipe must delete the join row, never
+the category.
 
 ## Reading recipes without N+1 queries
 
-A full recipe touches category, author, tags, groups → lines → ingredient + unit, steps → pictures, and cover
-pictures. Loading that lazily is a textbook N+1.
+Covered per-query in [Repositories](#repositories) above; the settings that make it work:
 
-- **Detail** (`GET /recipes/{id}`): do not stack `JOIN FETCH` across several collections — Hibernate either throws
-  `MultipleBagFetchException` or returns a cartesian product. Instead map the collections as `Set` and set
-  `spring.jpa.properties.hibernate.default_batch_fetch_size=50`, so Hibernate loads each collection level in one
-  batched IN-query. Predictable, and it needs no per-query tuning.
-- **List** (`GET /recipes`): never load the full graph. `RecipeSummaryResponse` carries only id, title, first cover
-  picture id, category, tags and author name, populated by a dedicated projection query. A recipe list page must not
-  cost one full recipe load per row.
+- `spring.jpa.properties.hibernate.default_batch_fetch_size=50` — batches every lazy collection load.
+- Collections mapped as `Set`, not `List`, so a stray fetch join cannot produce a bag.
+- `RecipeSummaryResponse` carries only id, title, first cover picture id, categories, tags and author name. A recipe
+  list page must not cost one full recipe load per row.
 - Pagination is `Pageable` with a **server-side cap** on page size (e.g. 100). Uncapped, `?size=100000` is a free
   denial of service on a VPS.
-
-Indexes: `recipes(category_id)`, `recipes(author_id)`, `recipes(created_at DESC)` for the default listing order, and
-`recipe_tags(tag_id)` for tag filtering.
 
 ## Reference data has to be seeded
 
@@ -289,8 +565,13 @@ The 90% line-coverage gate applies to all of this. Concretely:
 
 - Service unit tests with mocked repositories, in the style of the existing `UserServiceTest` — including the failure
   branches, which is where the interesting status codes come from: unknown ingredient id, non-author update attempt,
-  duplicate normalized name, deleting an in-use tag.
+  duplicate normalized name, deleting an in-use tag, an update with an empty `categoryIds`.
 - `RecipeMapper` tested directly against a hand-built entity graph.
+- **`@DataJpaTest` for the hand-written `@Query` methods.** A mocked repository proves nothing about JPQL that does not
+  compile or a filter that returns the wrong rows, and every query in [Repositories](#repositories) is hand-written.
+  Cover at least: each filter of `searchIds` in isolation and combined, the correctness of
+  `getTotalElements` with a recipe in several categories (the duplicate-row bug this design avoids), and each of the
+  four usage checks returning true and false.
 - A `@SpringBootTest` covering the authorization matrix end to end: anonymous GET succeeds, anonymous POST is 401, a
   non-author PUT is 403, an admin PUT succeeds. As the existing `SecurityErrorHandlingTest` shows, a
   `standaloneSetup` MockMvc cannot catch this class of bug because it has no security filter chain.
@@ -299,9 +580,14 @@ The 90% line-coverage gate applies to all of this. Concretely:
 
 ## Open points to confirm
 
-1. `DELETE /recipes/{id}` — not in your requirements; designed above unless you cut it.
-2. Ingredient **edit/delete** restricted to `ADMIN` while **create** is open to every authenticated user.
-3. `units` administered by `ADMIN`, like categories and tags.
-4. No `servings` / prep-time / cook-time fields — you did not list them, so they are out. All three are additive
+1. **`services` packaging** — grouping it by domain contradicts `CLAUDE.md` line 103. Recommendation above is to group
+   and amend the rule; until you say so, the implementation keeps `services` flat.
+2. **Moving existing classes** into the new domain folders — recommended, as its own commit.
+3. `DELETE /recipes/{id}` — not in your requirements; designed above unless you cut it.
+4. Ingredient **edit/delete** restricted to `ADMIN` while **create** is open to every authenticated user.
+5. `units` administered by `ADMIN`, like categories and tags.
+6. **Categories vs tags** are now structurally identical; the difference is convention plus the `@NotEmpty`. Kept as two
+   tables because you asked for both — flagged so the eventual convergence is recognisable.
+7. No `servings` / prep-time / cook-time fields — you did not list them, so they are out. All three are additive
    later, but `servings` in particular is what makes the numeric quantities scalable, so it is worth deciding now
    rather than after recipes exist.

@@ -22,6 +22,10 @@ MediaStorageService (interface)
 The interface plus one implementation mirrors the existing `MailService` / `SmtpMailService` pair, so it is the shape
 this codebase already uses for "one capability, one swappable backend".
 
+Package placement for these classes — and whether `services` is grouped by domain at all — is settled in
+[recipes-domain-model.md](recipes-domain-model.md#package-layout), which also specifies the `MediaRepository`
+queries backing the quota and orphan-cleanup gaps listed at the end of this document.
+
 ### Why not the alternatives
 
 - **Bytes in PostgreSQL (`bytea`)** — attractive because one `pg_dump` then restores everything and there are no
