@@ -1,0 +1,206 @@
+### Media upload and download
+### Covers: POST /media, GET /media/{id}
+### See docs/media-storage.md for the threat model behind the status codes used here.
+###
+### Prerequisites: a USER row in `roles`, an account you can log in with, and some sample
+### files next to this one. Requests 1-2 set up the token every write below needs.
+
+@baseUrl = http://localhost:8080
+@username = jane
+@password = Password123
+
+### 1. Log in -> 200 OK, the response body IS the raw JWT (no JSON wrapper)
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("token", response.body);
+    });
+%}
+
+### 2. Upload a JPEG -> 201 Created, with a Location header and the stored dimensions
+### Point ./sample.jpg at any photo. If it is larger than app.media.max-stored-edge (2000px),
+### note that width/height below come back DOWNSCALED - they describe the file we stored, not
+### the file you sent.
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample.jpg"
+Content-Type: image/jpeg
+
+< ./sample.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 201 with the stored dimensions", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.id !== undefined, "Expected a media id");
+        client.assert(response.body.contentType === "image/jpeg", "Expected image/jpeg");
+        client.global.set("mediaId", response.body.id);
+    });
+%}
+
+### 3. Download the full image -> 200 OK, with the hardening headers
+### Deliberately sent WITHOUT an Authorization header: recipes are public, so their
+### pictures must be readable by anyone.
+GET {{baseUrl}}/media/{{mediaId}}
+
+> {%
+    client.test("Returns 200 with nosniff and an immutable cache", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.headers.valueOf("X-Content-Type-Options") === "nosniff",
+            "Expected X-Content-Type-Options: nosniff");
+        client.assert(response.headers.valueOf("Cache-Control").includes("immutable"),
+            "Expected an immutable Cache-Control");
+    });
+%}
+
+### 4. Download the thumbnail variant -> 200 OK, a much smaller body
+### This is what a recipe list page requests. Twenty full-size covers is a multi-megabyte
+### page to paint twenty small cards.
+GET {{baseUrl}}/media/{{mediaId}}?variant=thumbnail
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 5. Ask for a variant that does not exist -> 400 Bad Request
+GET {{baseUrl}}/media/{{mediaId}}?variant=enormous
+
+> {%
+    client.test("Returns 400 naming the valid variants", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 6. Download an id that does not exist -> 404 Not Found
+GET {{baseUrl}}/media/00000000-0000-0000-0000-000000000000
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 7. Upload without a token -> 401 Unauthorized
+### 401 and not 403: no credential was offered at all. Guarded by the explicit
+### AuthenticationEntryPoint in SecurityFilterConfig - see docs/optional-authentication.md.
+POST {{baseUrl}}/media
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample.jpg"
+Content-Type: image/jpeg
+
+< ./sample.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 8. Upload a non-image that claims to be a JPEG -> 400 Bad Request
+### Put any text file at ./not-an-image.txt. The filename and the declared Content-Type
+### below are both wrong on purpose: neither is consulted, the leading bytes decide.
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+< ./not-an-image.txt
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400 mentioning the accepted formats", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 9. Upload an SVG -> 400 Bad Request
+### Rejected outright and permanently: an SVG is an XML document that can carry <script>,
+### and no re-encode makes it safe while it remains an SVG. Put any .svg at ./icon.svg.
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="icon.svg"
+Content-Type: image/svg+xml
+
+< ./icon.svg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 10. Upload a HEIC photo -> 400 Bad Request
+### Worth running by hand with a real iPhone photo, because this is the error a real user is
+### most likely to hit: iPhones shoot HEIC by default and stock ImageIO cannot read it. The
+### message tells them to convert to JPEG. Put one at ./photo.heic.
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="photo.heic"
+Content-Type: image/heic
+
+< ./photo.heic
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400 telling the user to convert to JPEG", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 11. Upload a file larger than 8 MB -> 413 Content Too Large
+### Rejected by the servlet container before any application code runs. Put anything over
+### spring.servlet.multipart.max-file-size at ./too-big.jpg.
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="too-big.jpg"
+Content-Type: image/jpeg
+
+< ./too-big.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 413, not a connection reset", function () {
+        client.assert(response.status === 413, "Expected 413 but got " + response.status);
+    });
+%}
+
+### 12. Upload a decompression bomb -> 400 Bad Request
+### Cannot be scripted from a normal photo: you need a file whose header DECLARES enormous
+### dimensions while the file itself stays small (e.g. a PNG with an IHDR claiming
+### 30000x30000). ImageReencoderTest builds one byte by byte and asserts it is rejected from
+### the header alone, without ever decoding. Reproduce here only if you want to see the
+### response body; the automated test is the real coverage.
+
+### 13. Saturate the processing pool -> 503 Service Unavailable with Retry-After
+### Not scriptable as a single request: it needs more than app.media.max-concurrent-processing
+### (4) large uploads in flight at once. Lower that property to 1 and fire request #2 twice
+### concurrently to see it. MediaServiceTest covers it deterministically with a latch.

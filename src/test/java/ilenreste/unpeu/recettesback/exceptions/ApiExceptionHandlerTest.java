@@ -40,7 +40,7 @@ class ApiExceptionHandlerTest {
         InvalidReferenceException exception =
                 new InvalidReferenceException("categoryIds", List.of("zzz", "aaa"));
 
-        ResponseEntity<ProblemDetail> response = handler.handleInvalidReference(exception, request("/recipes"));
+        ResponseEntity<ProblemDetail> response = handler.handleInvalidInput(exception, request("/recipes"));
 
         // 400, not 404: /recipes exists and is reachable - it is the payload that is wrong.
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);

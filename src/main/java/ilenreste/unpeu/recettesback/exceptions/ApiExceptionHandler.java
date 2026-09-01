@@ -6,6 +6,7 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -13,6 +14,8 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import java.net.URI;
@@ -56,11 +59,53 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return problem(HttpStatus.NOT_FOUND, exception.getMessage(), request);
     }
 
-    @ExceptionHandler(InvalidReferenceException.class)
-    ResponseEntity<ProblemDetail> handleInvalidReference(InvalidReferenceException exception,
-                                                         HttpServletRequest request) {
-        log.debug("Request body referenced something unknown: {}", exception.getMessage());
+    /**
+     * Covers {@link InvalidReferenceException} too, since it is a subclass — one
+     * handler rather than two identical ones.
+     */
+    @ExceptionHandler(InvalidInputException.class)
+    ResponseEntity<ProblemDetail> handleInvalidInput(InvalidInputException exception,
+                                                     HttpServletRequest request) {
+        log.debug("Rejecting an unusable request payload: {}", exception.getMessage());
         return problem(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+    }
+
+    /**
+     * An oversized multipart part is rejected by the servlet container before any
+     * application code runs. {@link ResponseEntityExceptionHandler} already maps
+     * it to 413, so this <strong>overrides its hook</strong> rather than
+     * declaring another {@code @ExceptionHandler} for the same type — two
+     * handlers for one exception is an ambiguity Spring refuses to start with.
+     * All this adds is a detail naming the limit, so the caller knows how much
+     * smaller the file has to be.
+     */
+    @Override
+    protected ResponseEntity<Object> handleMaxUploadSizeExceededException(
+            MaxUploadSizeExceededException exception, HttpHeaders headers,
+            HttpStatusCode status, WebRequest request) {
+        log.info("Rejecting an upload above the multipart size limit");
+        long maxBytes = exception.getMaxUploadSize();
+        String detail = maxBytes > 0
+                ? "That file is too large. The maximum upload size is %d MB.".formatted(maxBytes / (1024 * 1024))
+                : "That file is too large.";
+        return handleExceptionInternal(exception, ProblemDetail.forStatusAndDetail(status, detail),
+                headers, status, request);
+    }
+
+    /**
+     * Momentary capacity, not failure — so 503 with {@code Retry-After}, never a
+     * 500. Nothing is wrong with the request and repeating it shortly will work.
+     */
+    @ExceptionHandler(ServiceOverloadedException.class)
+    ResponseEntity<ProblemDetail> handleOverloaded(ServiceOverloadedException exception,
+                                                   HttpServletRequest request) {
+        log.warn("Refusing a request at capacity: {}", exception.getMessage());
+        ProblemDetail body = ProblemDetail.forStatusAndDetail(
+                HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
+        body.setInstance(URI.create(request.getRequestURI()));
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(Math.max(1, exception.retryAfter().toSeconds())))
+                .body(body);
     }
 
     @ExceptionHandler(ResourceConflictException.class)
