@@ -203,18 +203,20 @@ class OptionalAuthenticationTest {
     }
 
     /**
-     * The public-read rule, asserted before the controllers exist: 404 means the request was
-     * permitted and simply found no handler. A 401 here would mean the permitAll() rule is missing
-     * or ordered below something broader.
+     * The public-read rule. What matters is that the security chain does not reject these, not what
+     * the handler behind them says: 200 (a controller exists), 404 (none yet, or an unknown id) and
+     * 400 all prove the request got through. A 401 or 403 would mean the permitAll() rule is
+     * missing, or ordered below something broader that swallowed it.
      */
     @Test
     void publicReadRoutes_arePermitted_withoutAnyCredential() {
-        for (String path : new String[]{"/recipes", "/media/some-id", "/tags", "/units", "/categories"}) {
+        for (String path : new String[]{"/recipes", "/media/some-id", "/tags", "/units",
+                "/categories", "/ingredients"}) {
             ResponseEntity<String> response = restTemplate.getForEntity(path, String.class);
 
             assertThat(response.getStatusCode())
                     .as("anonymous GET %s must not be rejected by the security chain", path)
-                    .isEqualTo(HttpStatus.NOT_FOUND);
+                    .isNotIn(HttpStatus.UNAUTHORIZED, HttpStatus.FORBIDDEN);
         }
     }
 

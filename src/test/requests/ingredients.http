@@ -1,0 +1,269 @@
+### Ingredients
+### Covers: GET /ingredients, GET /ingredients/{id}, POST /ingredients,
+###         PUT /ingredients/{id}, DELETE /ingredients/{id}
+###
+### The one reference table with asymmetric permissions: ANY authenticated user may add an
+### ingredient, because a recipe cannot be written without the ingredients it uses - but only an
+### admin may rename or delete one, since renaming a shared row silently rewrites every recipe
+### referencing it. Requests 6-8 are that asymmetry, and they are the point of this file.
+###
+### Also the only reference endpoint that is paginated: ingredients are the table that grows.
+
+@baseUrl = http://localhost:8080
+@adminUsername = jane
+@adminPassword = Password123
+@plainUsername = bob
+@plainPassword = Password123
+
+### 1. Log in as an admin -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{adminUsername}}",
+  "password": "{{adminPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("adminToken", response.body);
+    });
+%}
+
+### 2. Log in as a plain user -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{plainUsername}}",
+  "password": "{{plainPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("userToken", response.body);
+    });
+%}
+
+### 3. Search ingredients with no credentials -> 200 OK, a page
+GET {{baseUrl}}/ingredients?page=0&size=20
+
+> {%
+    client.test("Returns a page without authentication", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.content !== undefined, "Expected a paginated body");
+    });
+%}
+
+### 4. Ask for an absurd page size -> capped, not honoured
+### spring.data.web.pageable.max-page-size is 100. Uncapped, ?size=100000 is a free denial of
+### service on a VPS.
+GET {{baseUrl}}/ingredients?size=100000
+
+> {%
+    client.test("Caps the page size at 100", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.size <= 100, "Expected the page size to be capped, got " + response.body.size);
+    });
+%}
+
+### 5. Create an ingredient as a PLAIN USER -> 201 Created
+### Deliberately not admin-only: a recipe cannot be written without its ingredients.
+POST {{baseUrl}}/ingredients
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "Crème fraîche"
+}
+
+> {%
+    client.test("Returns 201 for a non-admin", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("ingredientId", response.body.id);
+    });
+%}
+
+### 6. Rename it as that same plain user -> 403 Forbidden
+### The other half of the asymmetry. Renaming a shared row rewrites every recipe using it.
+PUT {{baseUrl}}/ingredients/{{ingredientId}}
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "Crème épaisse"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 7. Delete it as that same plain user -> 403 Forbidden
+DELETE {{baseUrl}}/ingredients/{{ingredientId}}
+Authorization: Bearer {{userToken}}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 8. Rename it as an admin -> 200 OK
+PUT {{baseUrl}}/ingredients/{{ingredientId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Crème fraîche épaisse"
+}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9. Search without the accent -> finds it anyway
+### The search runs against normalized_name, which is exactly what that column is for. Note it is
+### a PREFIX search: "creme" finds it, "fraiche" does not - a trailing wildcard can use the index
+### and a leading one cannot.
+GET {{baseUrl}}/ingredients?q=creme
+
+> {%
+    client.test("Finds the accented ingredient by its unaccented prefix", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.totalElements >= 1, "Expected at least one match");
+    });
+%}
+
+### 10. Create a duplicate spelled differently -> 409 Conflict
+POST {{baseUrl}}/ingredients
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "  CREME FRAICHE EPAISSE  "
+}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}
+
+### 11. Create an ingredient with a plural of an existing one -> 201 Created
+### Plurals are deliberately NOT normalized away. Stemming French correctly is a real NLP
+### problem, and getting it wrong silently merges unrelated ingredients.
+POST {{baseUrl}}/ingredients
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "Oeufs"
+}
+
+> {%
+    client.test("Returns 201 - oeuf and oeufs are two rows", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("oeufsId", response.body.id);
+    });
+%}
+
+### 12. Attach an icon that does not exist -> 400 Bad Request
+### 400 and not 404: /ingredients is perfectly reachable, it is the payload that is wrong. The
+### detail names the offending field so the client can act on it.
+POST {{baseUrl}}/ingredients
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "Beurre demi-sel",
+  "iconMediaId": "00000000-0000-0000-0000-000000000000"
+}
+
+> {%
+    client.test("Returns 400 naming iconMediaId", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+        client.assert(response.body.detail.includes("iconMediaId"), "Expected the field to be named");
+    });
+%}
+
+### 13. Attach a real icon -> 201 Created
+### Upload the image first via media.http request #2, then paste its id below. Media is uploaded
+### independently and referenced by id - the same "reference data must exist first" rule.
+@iconMediaId = paste-a-media-id-from-media-http
+POST {{baseUrl}}/ingredients
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "Beurre demi-sel",
+  "iconMediaId": "{{iconMediaId}}"
+}
+
+> {%
+    client.test("Returns 201 with the icon attached", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("beurreId", response.body.id);
+    });
+%}
+
+### 14. Update it omitting iconMediaId -> the icon is CLEARED
+### This is a full update, not a patch: an absent icon means "no icon", not "leave it alone".
+PUT {{baseUrl}}/ingredients/{{beurreId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Beurre demi-sel"
+}
+
+> {%
+    client.test("Returns 200 with no icon", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.iconMediaId === null, "Expected the icon to be cleared");
+    });
+%}
+
+### 15. Fetch an ingredient that does not exist -> 404 Not Found
+GET {{baseUrl}}/ingredients/00000000-0000-0000-0000-000000000000
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 16. Clean up: delete as an admin -> 204 No Content
+DELETE {{baseUrl}}/ingredients/{{ingredientId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+###
+DELETE {{baseUrl}}/ingredients/{{oeufsId}}
+Authorization: Bearer {{adminToken}}
+
+###
+DELETE {{baseUrl}}/ingredients/{{beurreId}}
+Authorization: Bearer {{adminToken}}
+
+### 17. Delete an ingredient a recipe still uses -> 409 Conflict
+### Create a recipe using it first (recipes.http), then paste its id here.
+@usedIngredientId = paste-an-ingredient-id-that-a-recipe-references
+DELETE {{baseUrl}}/ingredients/{{usedIngredientId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}

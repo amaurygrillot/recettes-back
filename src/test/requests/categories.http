@@ -1,0 +1,200 @@
+### Categories
+### Covers: GET /categories, GET /categories/{id}, POST /categories,
+###         PUT /categories/{id}, DELETE /categories/{id}
+###
+### Categories are the taxonomy that drives navigation: reads are public, every write is
+### admin-only. Requests 1-2 set up the token. You need an account with the ADMIN role -
+### set app.bootstrap.admin-username to an existing username and restart, or insert the
+### user_roles row by hand.
+###
+### tags.http and units.http follow the same rules; the rationale is only spelled out here.
+
+@baseUrl = http://localhost:8080
+@adminUsername = jane
+@adminPassword = Password123
+@plainUsername = bob
+@plainPassword = Password123
+
+### 1. Log in as an admin -> 200 OK, the body IS the raw JWT
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{adminUsername}}",
+  "password": "{{adminPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("adminToken", response.body);
+    });
+%}
+
+### 2. Log in as a plain user -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{plainUsername}}",
+  "password": "{{plainPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("userToken", response.body);
+    });
+%}
+
+### 3. List categories with no credentials at all -> 200 OK
+### Recipes are public, so the taxonomy that navigates them has to be too.
+GET {{baseUrl}}/categories
+
+> {%
+    client.test("Returns 200 without authentication", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 4. Create a category as an admin -> 201 Created, with a Location header
+POST {{baseUrl}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Dessert"
+}
+
+> {%
+    client.test("Returns 201", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("categoryId", response.body.id);
+    });
+%}
+
+### 5. Create the same category spelled differently -> 409 Conflict
+### "DESSERT", "dessert" and " Dessert " all normalize to the same value. The response names
+### the row it collided with, so a client can select that one instead of retrying blindly.
+POST {{baseUrl}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "  DESSERT  "
+}
+
+> {%
+    client.test("Returns 409 naming the existing row", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+        client.assert(response.body.detail.includes("already exists"), "Expected a useful detail");
+    });
+%}
+
+### 6. Create a category as a plain USER -> 403 Forbidden
+### Authenticated but not permitted. Contrast with #7.
+POST {{baseUrl}}/categories
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "name": "Boisson"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 7. Create a category with no token at all -> 401 Unauthorized
+### 401 and not 403: no credential was offered. This pair is a regression guard - without the
+### explicit AuthenticationEntryPoint in SecurityFilterConfig this silently becomes a 403.
+POST {{baseUrl}}/categories
+Content-Type: application/json
+
+{
+  "name": "Boisson"
+}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 8. Create a category with a blank name -> 400 Bad Request (validation failure)
+POST {{baseUrl}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "   "
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 9. Fetch one category -> 200 OK
+GET {{baseUrl}}/categories/{{categoryId}}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.normalizedName === undefined,
+            "normalizedName is a storage detail and must not be exposed");
+    });
+%}
+
+### 10. Fetch a category that does not exist -> 404 Not Found
+GET {{baseUrl}}/categories/00000000-0000-0000-0000-000000000000
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 11. Rename a category to a different spelling of its own name -> 200 OK
+### Normalizes to the same value, so the collision check must NOT fire against the row being
+### renamed. This is how a display name gets tidied up.
+PUT {{baseUrl}}/categories/{{categoryId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "dessert"
+}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 12. Delete an unused category -> 204 No Content
+DELETE {{baseUrl}}/categories/{{categoryId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 13. Delete a category a recipe still uses -> 409 Conflict
+### Needs a recipe first: run recipes.http through creating one, then put its category id below.
+### Never a cascade - an admin tidying the category list must not silently gut other people's
+### recipes.
+@usedCategoryId = paste-a-category-id-that-a-recipe-references
+DELETE {{baseUrl}}/categories/{{usedCategoryId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 409, and the category survives", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}
