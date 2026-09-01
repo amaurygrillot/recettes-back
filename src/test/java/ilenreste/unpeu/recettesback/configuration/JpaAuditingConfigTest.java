@@ -2,6 +2,7 @@ package ilenreste.unpeu.recettesback.configuration;
 
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
+import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
@@ -16,11 +17,15 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * The guard on <em>who</em> the auditor is lives in {@link CurrentUserService} and is tested there.
+ * What is left here is the wiring: that the auditor is resolved as a lazy reference, and that an
+ * absent user produces an empty auditor rather than a null one.
+ */
 class JpaAuditingConfigTest {
 
     private final UsersRepository usersRepository = mock(UsersRepository.class);
@@ -29,7 +34,7 @@ class JpaAuditingConfigTest {
     private AuditorAware<UserEntity> auditorAware() {
         ObjectProvider<UsersRepository> provider = mock(ObjectProvider.class);
         when(provider.getObject()).thenReturn(usersRepository);
-        return new JpaAuditingConfig().auditorAware(provider);
+        return new JpaAuditingConfig().auditorAware(provider, new CurrentUserService());
     }
 
     @AfterEach
@@ -38,7 +43,7 @@ class JpaAuditingConfigTest {
     }
 
     @Test
-    void returnsTheUserReference_whenTheRequestCarriesAJwt() {
+    void resolvesTheAuditorAsALazyReference_ratherThanLoadingTheUser() {
         Jwt jwt = Jwt.withTokenValue("token")
                 .header("alg", "none")
                 .claim("userId", "user-1")
@@ -47,48 +52,26 @@ class JpaAuditingConfigTest {
                 .build();
         SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt, List.of()));
         UserEntity reference = new UserEntity();
+        // getReferenceById, not findById: the foreign key is genuine without a SELECT on every save.
         when(usersRepository.getReferenceById("user-1")).thenReturn(reference);
 
         assertThat(auditorAware().getCurrentAuditor()).contains(reference);
     }
 
     @Test
-    void returnsEmpty_whenThereIsNoAuthenticationAtAll() {
+    void returnsEmpty_whenThereIsNoAuthenticatedUser() {
         assertThat(auditorAware().getCurrentAuditor()).isEmpty();
         verifyNoInteractions(usersRepository);
     }
 
-    /**
-     * The regression this guard exists for. Once public reads land, an anonymous request continues
-     * down the filter chain and Spring Security's AnonymousAuthenticationFilter puts an
-     * AnonymousAuthenticationToken in the context whose principal is the String "anonymousUser" -
-     * so "no authentication" is not authentication == null. A null check followed by a cast takes
-     * the non-empty branch here and throws ClassCastException, and POST /users/create is permitAll()
-     * and writes, so that path is reachable.
-     */
     @Test
-    void returnsEmpty_forAnAnonymousToken_ratherThanThrowingClassCastException() {
+    void returnsEmpty_forAnAnonymousRequest() {
+        // POST /users/create is permitAll() and writes, so this path is reachable - and if it threw,
+        // every anonymous write against an audited entity would be a 500.
         SecurityContextHolder.getContext().setAuthentication(new AnonymousAuthenticationToken(
                 "key", "anonymousUser", AuthorityUtils.createAuthorityList("ROLE_ANONYMOUS")));
 
-        AuditorAware<UserEntity> auditorAware = auditorAware();
-
-        assertThatCode(auditorAware::getCurrentAuditor).doesNotThrowAnyException();
-        assertThat(auditorAware.getCurrentAuditor()).isEmpty();
+        assertThat(auditorAware().getCurrentAuditor()).isEmpty();
         verifyNoInteractions(usersRepository);
-    }
-
-    /**
-     * isAuthenticated() would not have caught the case above: AnonymousAuthenticationToken reports
-     * true. This asserts the distinguishing property directly, so the guard cannot be "simplified"
-     * into that weaker check without a red test.
-     */
-    @Test
-    void anonymousTokenReportsItselfAuthenticated_whichIsWhyTheGuardIsATypeCheck() {
-        AnonymousAuthenticationToken anonymous = new AnonymousAuthenticationToken(
-                "key", "anonymousUser", AuthorityUtils.createAuthorityList("ROLE_ANONYMOUS"));
-
-        assertThat(anonymous.isAuthenticated()).isTrue();
-        assertThat(anonymous.getPrincipal()).isInstanceOf(String.class);
     }
 }

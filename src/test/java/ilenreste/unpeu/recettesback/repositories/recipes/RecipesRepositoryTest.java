@@ -1,6 +1,7 @@
 package ilenreste.unpeu.recettesback.repositories.recipes;
 
 import ilenreste.unpeu.recettesback.configuration.JpaAuditingConfig;
+import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientGroupEntity;
@@ -50,7 +51,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Import(JpaAuditingConfig.class)
+@Import({JpaAuditingConfig.class, CurrentUserService.class})
 class RecipesRepositoryTest {
 
     @Autowired

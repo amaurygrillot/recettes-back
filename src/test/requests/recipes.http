@@ -1,0 +1,458 @@
+### Recipes
+### Covers: GET /recipes, GET /recipes/{id}, POST /recipes, PUT /recipes/{id}, DELETE /recipes/{id}
+###
+### Reads are public. Writing needs a login; editing or deleting needs to be the AUTHOR or an
+### ADMIN - a rule that depends on a row in the database, so no URL matcher expresses it and
+### RecipeService performs it after loading the recipe.
+###
+### Prerequisites: two accounts (an author and a second plain user), an admin, and at least one
+### category. Run categories.http first, or paste ids below.
+
+@baseUrl = http://localhost:8080
+@authorUsername = jane
+@authorPassword = Password123
+@otherUsername = bob
+@otherPassword = Password123
+@adminUsername = admin
+@adminPassword = Password123
+
+### 1. Log in as the author -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{authorUsername}}",
+  "password": "{{authorPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("authorToken", response.body);
+    });
+%}
+
+### 2. Log in as a different plain user -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{otherUsername}}",
+  "password": "{{otherPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("otherToken", response.body);
+    });
+%}
+
+### 3. Log in as an admin -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{adminUsername}}",
+  "password": "{{adminPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("adminToken", response.body);
+    });
+%}
+
+### 4. Grab a category, a tag, a unit and an ingredient to build a recipe from
+GET {{baseUrl}}/categories
+
+> {%
+    client.test("At least one category exists", function () {
+        client.assert(response.body.length > 0,
+            "Create a category first - see categories.http");
+        client.global.set("categoryId", response.body[0].id);
+    });
+%}
+
+###
+GET {{baseUrl}}/units
+
+> {%
+    client.test("The seeded units are there", function () {
+        client.global.set("unitId", response.body[0].id);
+    });
+%}
+
+###
+POST {{baseUrl}}/ingredients
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "name": "Farine T55"
+}
+
+> {%
+    client.test("Created or already present", function () {
+        if (response.status === 201) {
+            client.global.set("ingredientId", response.body.id);
+        }
+        client.assert(response.status === 201 || response.status === 409,
+            "Expected 201 or 409 but got " + response.status);
+    });
+%}
+
+### 5. Create a full recipe -> 201 Created
+### Note there is no authorId in the body: the author is the authenticated caller, stamped by
+### JPA auditing. Accepting one here would let anyone post under someone else's name.
+### Note also that no element carries a "position": the ORDER OF EACH ARRAY is the contract, and
+### the service renumbers 0..n-1 from it.
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte aux pommes",
+  "recommendations": "Se déguste tiède, avec une boule de glace vanille.",
+  "categoryIds": ["{{categoryId}}"],
+  "tagIds": [],
+  "ingredientGroups": [
+    {
+      "title": "Pour la pâte",
+      "ingredients": [
+        {"ingredientId": "{{ingredientId}}", "quantity": 250, "unitId": "{{unitId}}"},
+        {"ingredientId": "{{ingredientId}}", "note": "pour le plan de travail"}
+      ]
+    },
+    {
+      "title": "Pour la garniture",
+      "ingredients": [
+        {"ingredientId": "{{ingredientId}}", "quantity": 0.5, "unitId": "{{unitId}}"}
+      ]
+    }
+  ],
+  "steps": [
+    {"instruction": "Préchauffer le four à 180 °C"},
+    {"instruction": "Étaler la pâte"},
+    {"instruction": "Couper les pommes en lamelles"},
+    {"instruction": "Disposer les pommes en rosace"},
+    {"instruction": "Enfourner 40 min"}
+  ]
+}
+
+> {%
+    client.test("Returns 201 with the steps in the order they were sent", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("recipeId", response.body.id);
+        const steps = response.body.steps.map(s => s.instruction);
+        client.assert(steps[0].startsWith("Préchauffer") && steps[4].startsWith("Enfourner"),
+            "Step order was not preserved: " + JSON.stringify(steps));
+    });
+%}
+
+### 6. Read it back with NO credentials -> 200 OK, in the same order
+### Recipes are public. This is also the regression a one-step recipe can never catch: the
+### collections are Sets, so only @OrderBy("position") puts the ORDER BY into the SQL.
+GET {{baseUrl}}/recipes/{{recipeId}}
+
+> {%
+    client.test("Returns 200 and preserves order", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        const steps = response.body.steps.map(s => s.instruction);
+        client.assert(steps[0].startsWith("Préchauffer"), "Steps came back shuffled");
+        client.assert(response.body.ingredientGroups[0].title === "Pour la pâte",
+            "Ingredient groups came back shuffled");
+        // A null quantity and a null unit are legitimate: "farine, pour le plan de travail".
+        client.assert(response.body.ingredientGroups[0].ingredients[1].quantity === null,
+            "Expected a null quantity to survive");
+    });
+%}
+
+### 7. List recipes with no credentials -> 200 OK, a page of summaries
+### Summaries are thin on purpose: a list page must not cost one full recipe load per row. Fetch
+### coverMediaId as /media/{id}?variant=thumbnail - that variant exists for exactly this page.
+GET {{baseUrl}}/recipes?page=0&size=20
+
+> {%
+    client.test("Returns a page of summaries", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.content[0].steps === undefined,
+            "A summary must not carry steps");
+    });
+%}
+
+### 8. Filter by category -> the recipe appears exactly ONCE
+### The duplicate-row bug this query shape avoids: a join onto a to-many collection returns one
+### row per matching category, and a derived COUNT then counts those duplicates. Add a second
+### category to the recipe (request 11) and re-run this to see it stay at one.
+GET {{baseUrl}}/recipes?categoryId={{categoryId}}
+
+> {%
+    client.test("Counts each recipe once", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        const matches = response.body.content.filter(r => r.id === client.global.get("recipeId"));
+        client.assert(matches.length === 1, "Expected exactly one row, got " + matches.length);
+    });
+%}
+
+### 9. Search by title fragment, case-insensitively -> 200 OK
+GET {{baseUrl}}/recipes?q=POMMES
+
+> {%
+    client.test("Finds it regardless of case", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 10. Update ONLY the title -> 200 OK, categories untouched
+### Absent means "don't touch". Half of a pair with request 12 - a suite asserting only one of
+### them will not notice if the rule inverts.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte aux pommes de mamie"
+}
+
+> {%
+    client.test("Returns 200 and keeps the categories", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.categories.length > 0, "Categories were wiped by an absent field");
+        client.assert(response.body.steps.length === 5, "Steps were wiped by an absent field");
+    });
+%}
+
+### 11. Replace the whole step list -> 200 OK
+### A present collection replaces it wholesale. That is what makes reordering free.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "steps": [
+    {"instruction": "Tout mélanger"},
+    {"instruction": "Cuire 45 min"}
+  ]
+}
+
+> {%
+    client.test("Returns 200 with exactly the new steps", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.steps.length === 2, "Expected the list to be replaced");
+        client.assert(response.body.steps[0].instruction === "Tout mélanger", "Wrong order");
+    });
+%}
+
+### 12. Update with an EMPTY category list -> 400 Bad Request
+### Empty is a different request from absent, and it is refused: a recipe may not lose its last
+### category, or it stops being browsable. Compare with request 13, where clearing every tag is
+### fine - same Optional<List<String>> shape, deliberately different rule.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "categoryIds": []
+}
+
+> {%
+    client.test("Returns 400 and changes nothing", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 13. Clear every tag -> 200 OK
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "tagIds": []
+}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 14. Create a recipe referencing an id that does not exist -> 400 Bad Request
+### 400 and not 404: /recipes is perfectly reachable, it is the payload that is wrong. The detail
+### names the field AND every missing id, so a client with a stale list does not fix one per
+### round trip.
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Recette fantôme",
+  "categoryIds": ["00000000-0000-0000-0000-000000000000", "11111111-1111-1111-1111-111111111111"]
+}
+
+> {%
+    client.test("Returns 400 naming every missing id", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+        client.assert(response.body.detail.includes("categoryIds"), "Expected the field to be named");
+    });
+%}
+
+### 15. Create a recipe with no category -> 400 Bad Request
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Sans catégorie",
+  "categoryIds": []
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 16. Create a recipe with a blank step instruction -> 400 Bad Request
+### Guarded by @NotBlank on the child record. Without it this reaches
+### recipe_steps.instruction NOT NULL and surfaces as a generic 500.
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Étape vide",
+  "categoryIds": ["{{categoryId}}"],
+  "steps": [{"instruction": "   "}]
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 17. Create a recipe with no token -> 401 Unauthorized
+### 401 and not 403 - the regression the explicit AuthenticationEntryPoint guards.
+POST {{baseUrl}}/recipes
+Content-Type: application/json
+
+{
+  "title": "Anonyme",
+  "categoryIds": ["{{categoryId}}"]
+}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 18. Edit someone else's recipe as a different plain user -> 403 Forbidden
+### Authenticated, but not the author. This is the rule that depends on a database row.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{otherToken}}
+Content-Type: application/json
+
+{
+  "title": "Détournée"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 19. Edit the same recipe as an ADMIN -> 200 OK
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte aux pommes (corrigée par un admin)"
+}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 20. Delete someone else's recipe as a plain user -> 403 Forbidden
+DELETE {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 21. Delete it as its author -> 204 No Content
+### Cascades to steps, groups, ingredient lines and picture links; merely dereferences the
+### ingredients, tags, categories and media, which all survive.
+DELETE {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 22. Fetch the deleted recipe -> 404 Not Found
+GET {{baseUrl}}/recipes/{{recipeId}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 23. A recipe with pictures -> 201 Created
+### Upload two images via media.http first and paste their ids below. Media is uploaded
+### independently and referenced by id; the array order decides which cover is the thumbnail
+### shown in a listing.
+@coverMediaId = paste-a-media-id-from-media-http
+@stepMediaId = paste-another-media-id-from-media-http
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte illustrée",
+  "categoryIds": ["{{categoryId}}"],
+  "coverPictures": [
+    {"mediaId": "{{coverMediaId}}", "altText": "La tarte sortie du four"}
+  ],
+  "steps": [
+    {
+      "instruction": "Disposer les pommes",
+      "pictures": [{"mediaId": "{{stepMediaId}}", "altText": "Rosace de pommes"}]
+    }
+  ]
+}
+
+> {%
+    client.test("Returns 201 with the pictures attached", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("illustratedRecipeId", response.body.id);
+    });
+%}
+
+### 24. The listing exposes the FIRST cover as the thumbnail -> 200 OK
+GET {{baseUrl}}/recipes?q=illustr
+
+> {%
+    client.test("Summary carries coverMediaId", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        const row = response.body.content.find(r => r.id === client.global.get("illustratedRecipeId"));
+        client.assert(row.coverMediaId !== null, "Expected a cover media id");
+    });
+%}
+
+### 25. Clean up
+DELETE {{baseUrl}}/recipes/{{illustratedRecipeId}}
+Authorization: Bearer {{authorToken}}
