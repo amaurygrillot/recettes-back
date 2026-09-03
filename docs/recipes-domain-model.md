@@ -1,7 +1,7 @@
 # Recipes — domain model and API design
 
-Status: **design only**, nothing implemented yet. This document is the specification the implementation session works
-from. Companion documents: [media-storage.md](media-storage.md) (images),
+Status: **implemented**. This document is the specification the implementation session worked
+from, updated in place where the implementation proved a decision wrong. Companion documents: [media-storage.md](media-storage.md) (images),
 [api-error-handling.md](api-error-handling.md) (status codes and exception mapping),
 [optional-authentication.md](optional-authentication.md) (how public reads coexist with JWT auth).
 
@@ -252,7 +252,7 @@ single-class packages that answer no question.
 
 `AuditableEntity` stays at the `entities` root for the same reason — it is the shared supertype, owned by no domain.
 
-### The `services` conflict — needs your call
+### The `services` conflict — resolved: grouped, and `CLAUDE.md` amended
 
 The root `CLAUDE.md` currently says, verbatim:
 
@@ -280,9 +280,9 @@ classes. At 14 files across four unrelated domains that trade-off has inverted �
 *same four domain names* used everywhere else, not per-feature packages invented ad hoc, which is what the rule was
 actually guarding against.
 
-**Until you say otherwise, the implementation session should keep `services` flat and follow `CLAUDE.md`.** If you agree
-with the recommendation, `CLAUDE.md` line 103 needs updating in the same commit — a design doc must not be the only
-place a convention is recorded.
+**Decided: group by domain.** `CLAUDE.md`'s Architecture section was rewritten in the same commit as the package move
+— a design doc must not be the only place a convention is recorded — and now states the domain-sub-package rule
+directly, with the superseded flat-`services` rule kept as an explicit note so the change is not mistaken for drift.
 
 ### Moving the existing classes
 
@@ -339,6 +339,20 @@ size where the Criteria API costs more in ceremony than it returns. If filters k
 
 `LIKE '%q%'` cannot use a B-tree index, so title search is a sequential scan. Fine for hundreds of recipes; if it ever
 is not, the fix is a `pg_trgm` GIN index or PostgreSQL full-text search, not a different query shape.
+
+**`:q` needs an explicit `CAST`.** As first written, this query failed on every request that did not filter by title —
+which is the most common request the endpoint will ever serve:
+
+```
+ERROR: function lower(bytea) does not exist
+```
+
+A bare null parameter gives PostgreSQL nothing to infer a type from inside `CONCAT`, so it plans the argument as
+`bytea`. `CAST(:q AS string)`, in both the null check and the comparison, fixes it. The other three parameters are
+compared with `=` against a text column and take their type from that.
+
+This is the clearest argument for the `@DataJpaTest` requirement below: the bug is invisible to a mocked repository,
+and it breaks the endpoint's default behaviour completely.
 
 #### Detail — `GET /recipes/{id}`
 
@@ -492,6 +506,10 @@ five services each remembering to set `updated_at` is precisely the duplication 
   (`@CreatedBy`), `updatedAt` (`@LastModifiedDate`) and `updatedBy` (`@LastModifiedBy`). Recipes and the reference
   entities extend it, and it is annotated `@EntityListeners(AuditingEntityListener.class)` — without that listener the
   annotations are inert and every column silently stays null.
+- **Correction to the `recipes` table above:** `updated_by_id` is *not* null until the first update. Spring Data's
+  `AuditingHandler` stamps both pairs on insert, so a freshly created row has `updated_at == created_at` and
+  `updated_by_id == created_by_id`. That is the behaviour that keeps `updated_at` safely `NOT NULL`, and it is not
+  worth switching off — "never updated" is readable as `updated_at == created_at`.
 - **`@CreatedBy` is not optional here.** `ingredients.created_by_id` in
   the [reference tables](#reference-tables-shared-unique-values)
   above and `media.uploaded_by_id` both need it, and `ingredients` needs it precisely because ingredient creation is
@@ -653,7 +671,39 @@ public record UpdateRecipeRequest(
 
 The constraint is a **type-use annotation on the type argument** — the Bean Validation 2.0 container-element form, and
 exactly how the existing `UpdateUserRequest` already writes it (`Optional<@Size(min = 3, max = 50) String> username`).
-That form is known to work in this codebase, which is reason enough to copy it.
+
+> ### Correction: this recommendation was wrong, and the suggested test is what proved it
+>
+> The three-line test suggested below was written first, and it failed — **for the recommended form**.
+>
+> Hibernate Validator's `OptionalValueExtractor` is `@UnwrapByDefault` and extracts `Optional.orElse(null)`. So an
+> **absent** field arrives at the constraint as `null`, and `@NotEmpty` rejects `null`. Every partial update that did
+> not mention categories would answer **400** — precisely the outcome the `Optional` was chosen to prevent.
+> `@NotBlank` on `title` broke identically. This is the "quiet" failure mode the section below feared, except it
+> afflicts the form the section recommended.
+>
+> `UpdateUserRequest` is **not** a precedent: `@Size` is null-tolerant by specification, so it passes the absent case
+> by accident rather than by design. That is why the existing code has never shown the problem.
+>
+> The fix is a small custom constraint, `@NotEmptyIfPresent`, that says what is actually meant — absent is fine,
+> supplied-but-empty is not — applied to the `Optional` itself:
+>
+> ```java
+> public record UpdateRecipeRequest(
+>         @NotEmptyIfPresent Optional<@Size(max = 200) String> title,
+>         @NotEmptyIfPresent Optional<List<String>> categoryIds,
+>         Optional<List<String>> tagIds,
+>         Optional<List<@Valid RecipeStepRequest>> steps,
+>         ...
+> ) {}
+> ```
+>
+> Null-tolerant constraints such as `@Size` still belong inside the diamond and are used there. Cascading with
+> `@Valid` also works inside the diamond, through both containers, and is asserted.
+>
+> The lesson generalises past this field: **inside an `Optional`, a constraint that implies non-null fires on the
+> absent case.** `@Size`, `@Pattern`, `@Min` and friends are safe there; `@NotNull`, `@NotBlank` and `@NotEmpty` are
+> not.
 
 Writing it in front of the field instead — `@NotEmpty Optional<List<String>> categoryIds` — looks equivalent and is not.
 `@NotEmpty` lists `TYPE_USE` among its targets, so the compiler binds it to the `Optional` type rather than to the
@@ -663,14 +713,11 @@ to `null`, which `@NotEmpty` rejects, turning every untouched-categories update 
 Validator internal — whether `OptionalValueExtractor` is declared `@UnwrapByDefault` — that is **not worth relying on
 either way**. Both outcomes are wrong and neither is what the table above asks for.
 
-> Unverified: which of those two failures actually occurs was not confirmed against the Hibernate Validator version on
-> this classpath. The recommendation does not depend on it — but if you want certainty before writing the code, a
-> three-line unit test that validates both record shapes against `Optional.empty()` settles it in one run, and is worth
-> keeping as documentation of the rule.
+> Resolved: it fails **quietly**, and so does the form recommended above — see the correction box. The test suggested
+> here is `UpdateRecipeRequestValidationTest`, and writing it before the code is what caught this.
 
-The rule generalises to every constrained field in every `Optional`-based request record: **the annotation belongs
-inside the diamond.** On the create side there is no `Optional` and no ambiguity — `CreateRecipeRequest.categoryIds`
-is a plain `@NotEmpty List<String>`.
+On the create side there is no `Optional` and no ambiguity — `CreateRecipeRequest.categoryIds` is a plain
+`@NotEmpty List<String>`.
 
 The alternative — per-element patching with client-supplied child ids and add/update/remove intent — is a much more
 complex contract that buys nothing here: the editing UI is a form holding the entire recipe, so it always knows the
@@ -750,16 +797,31 @@ The first one is worth spelling out because it is the easiest to write uselessly
 set or a size. `assertThat(response.steps()).extracting(Step::instruction).containsExactly(...)` fails on a shuffle;
 `containsExactlyInAnyOrder` does not, and neither does a count.
 
-## Open points to confirm
+## Open points — as resolved
 
-1. **`services` packaging** — grouping it by domain contradicts `CLAUDE.md` line 103. Recommendation above is to group
-   and amend the rule; until you say so, the implementation keeps `services` flat.
-2. **Moving existing classes** into the new domain folders — recommended, as its own commit.
-3. `DELETE /recipes/{id}` — not in your requirements; designed above unless you cut it.
-4. Ingredient **edit/delete** restricted to `ADMIN` while **create** is open to every authenticated user.
-5. `units` administered by `ADMIN`, like categories and tags.
-6. **Categories vs tags** are now structurally identical; the difference is convention plus the `@NotEmpty`. Kept as two
-   tables because you asked for both — flagged so the eventual convergence is recognisable.
-7. No `servings` / prep-time / cook-time fields — you did not list them, so they are out. All three are additive
-   later, but `servings` in particular is what makes the numeric quantities scalable, so it is worth deciding now
-   rather than after recipes exist.
+1. **`services` packaging** — resolved: grouped by domain, and `CLAUDE.md`'s Architecture section rewritten in the same
+   commit so the convention is not recorded only here.
+2. **Moving existing classes** into the new domain folders — done, as its own commit.
+3. `DELETE /recipes/{id}` — kept and implemented, with the same author-or-admin rule as update.
+4. Ingredient **edit/delete** restricted to `ADMIN` while **create** is open to every authenticated user — implemented,
+   and asserted end to end in `ReferenceEndpointsIntegrationTest`.
+5. `units` administered by `ADMIN`, like categories and tags — implemented.
+6. **Categories vs tags** are structurally identical; the difference is a product decision plus the emptiness rule on
+   categories. Kept as two tables — flagged so the eventual convergence stays recognisable.
+7. No `servings` / prep-time / cook-time fields — still out. `servings` in particular is what would make the numeric
+   quantities scalable, and it remains the most obvious next addition.
+
+## Still open after implementation
+
+- **No orphan-media cleanup job.** `MediaRepository.findOrphans` exists and is not scheduled; nothing deletes media
+  that was uploaded and never attached.
+- **No per-user upload quota.** `totalBytesUploadedBy` exists and is not called. See
+  [media-storage.md](media-storage.md).
+- **No rate limiting** anywhere, which is the gap `password-reset.md` already recorded.
+- **`ddl-auto=update` with no migration tool.** Unchanged by this work and still the thing most likely to hurt on the
+  VPS: it cannot drop or rename anything, it silently skips changes it cannot make, and nothing records what a given
+  database has had applied. Adding Flyway deserves its own session before the first real deployment.
+- **Three pre-existing defects in the users mapping** — `user_roles` mapped both as a `@ManyToMany` join table and as
+  an entity, `RoleEntity`'s self-referential `roles` collection, and `RolesRepository`/`UserRolesRepository` declaring
+  `UUID` id types for `String`-id entities. All out of scope here, all load-bearing for anything creating users or
+  roles. See [optional-authentication.md](optional-authentication.md#pre-existing-warts-the-tests-had-to-work-around).

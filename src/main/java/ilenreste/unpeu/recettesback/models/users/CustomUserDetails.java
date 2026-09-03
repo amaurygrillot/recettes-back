@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.models.users;
 
-import ilenreste.unpeu.recettesback.entities.UserEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import lombok.Getter;
 import lombok.NonNull;
 import org.springframework.security.core.GrantedAuthority;

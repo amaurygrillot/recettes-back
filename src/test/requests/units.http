@@ -1,0 +1,156 @@
+### Units of measure
+### Covers: GET /units, GET /units/{id}, POST /units, PUT /units/{id}, DELETE /units/{id}
+###
+### Admin-curated, by analogy with categories and tags: a small closed set that shapes how every
+### recipe reads, and not something a user legitimately needs to extend mid-recipe. Same status
+### codes as categories.http, which explains the reasoning; the addition here is `abbreviation`.
+###
+### A starter set (g, kg, ml, l, c. a s., c. a c., pincee) is inserted by ReferenceDataSeeder at
+### startup, so request 2 should never come back empty on a working install.
+
+@baseUrl = http://localhost:8080
+@adminUsername = jane
+@adminPassword = Password123
+
+### 1. Log in as an admin -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{adminUsername}}",
+  "password": "{{adminPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("adminToken", response.body);
+    });
+%}
+
+### 2. List units with no credentials -> 200 OK, including the seeded ones
+GET {{baseUrl}}/units
+
+> {%
+    client.test("Returns 200 and the seeded units", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.length >= 7,
+            "Expected the seeded starter units; got " + response.body.length);
+    });
+%}
+
+### 3. Create a unit with an abbreviation -> 201 Created
+### The abbreviation is what a recipe line renders with: "200 g de farine", not
+### "200 gramme de farine".
+POST {{baseUrl}}/units
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "décilitre",
+  "abbreviation": "dl"
+}
+
+> {%
+    client.test("Returns 201 with the abbreviation", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.abbreviation === "dl", "Expected the abbreviation to round-trip");
+        client.global.set("unitId", response.body.id);
+    });
+%}
+
+### 4. Create a unit with no abbreviation -> 201 Created
+### Optional on purpose: not every unit has a sensible short form ("pincée" is already short).
+POST {{baseUrl}}/units
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "sachet"
+}
+
+> {%
+    client.test("Returns 201", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("sachetId", response.body.id);
+    });
+%}
+
+### 5. Create a duplicate of a seeded unit -> 409 Conflict
+POST {{baseUrl}}/units
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "GRAMME"
+}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}
+
+### 6. Create a unit with no token -> 401 Unauthorized
+POST {{baseUrl}}/units
+Content-Type: application/json
+
+{
+  "name": "once"
+}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 7. Update a unit's abbreviation -> 200 OK
+PUT {{baseUrl}}/units/{{unitId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "décilitre",
+  "abbreviation": "dL"
+}
+
+> {%
+    client.test("Returns 200 with the new abbreviation", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.abbreviation === "dL", "Expected the abbreviation to change");
+    });
+%}
+
+### 8. Clean up: delete the two units created above -> 204 No Content
+DELETE {{baseUrl}}/units/{{unitId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+###
+DELETE {{baseUrl}}/units/{{sachetId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 9. Delete a unit a recipe still uses -> 409 Conflict
+### Any ingredient line referencing it counts. Create a recipe with a quantity in grammes
+### (recipes.http), then paste the gramme unit id here.
+@usedUnitId = paste-a-unit-id-that-a-recipe-line-references
+DELETE {{baseUrl}}/units/{{usedUnitId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}

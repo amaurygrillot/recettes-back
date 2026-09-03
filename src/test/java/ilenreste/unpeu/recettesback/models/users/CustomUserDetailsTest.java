@@ -1,7 +1,7 @@
 package ilenreste.unpeu.recettesback.models.users;
 
-import ilenreste.unpeu.recettesback.entities.RoleEntity;
-import ilenreste.unpeu.recettesback.entities.UserEntity;
+import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
+import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.core.GrantedAuthority;
 

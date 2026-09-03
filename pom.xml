@@ -79,6 +79,20 @@
         </dependency>
 
 
+        <!--
+            EXIF orientation only. Stock ImageIO exposes the JPEG APP1/Exif segment as an
+            unparsed "unknown" marker segment with no accessor for the orientation tag, so
+            re-encoding a phone photo - which strips all metadata by design - would silently
+            publish it sideways. Decoding still uses stock ImageIO alone: widening the format
+            allowlist would mean more third-party parsers running on attacker-controlled bytes,
+            which is the surface docs/media-storage.md exists to minimise.
+        -->
+        <dependency>
+            <groupId>com.drewnoakes</groupId>
+            <artifactId>metadata-extractor</artifactId>
+            <version>2.19.0</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-devtools</artifactId>

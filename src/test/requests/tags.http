@@ -1,0 +1,132 @@
+### Tags
+### Covers: GET /tags, GET /tags/{id}, POST /tags, PUT /tags/{id}, DELETE /tags/{id}
+###
+### Tags are open-ended facets (vegetarien, sans gluten, rapide, Noel). Structurally identical
+### to categories - same admin-only writes, same normalized-name conflict rule, same 409 on
+### deleting one still in use. The reasoning behind each status is spelled out once in
+### categories.http; this file walks the flow with tag-shaped data.
+###
+### The only real difference is a product decision: a recipe must have at least one category
+### and may have no tags at all.
+
+@baseUrl = http://localhost:8080
+@adminUsername = jane
+@adminPassword = Password123
+
+### 1. Log in as an admin -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{adminUsername}}",
+  "password": "{{adminPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("adminToken", response.body);
+    });
+%}
+
+### 2. List tags with no credentials -> 200 OK
+GET {{baseUrl}}/tags
+
+> {%
+    client.test("Returns 200 without authentication", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 3. Create a tag -> 201 Created
+POST {{baseUrl}}/tags
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Végétarien"
+}
+
+> {%
+    client.test("Returns 201", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("tagId", response.body.id);
+    });
+%}
+
+### 4. Create the same tag without the accent -> 409 Conflict
+### "Végétarien" and "vegetarien" normalize to the same value: accents are stripped, which is
+### also what makes typing without them find the row.
+POST {{baseUrl}}/tags
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "vegetarien"
+}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}
+
+### 5. Create a tag with no token -> 401 Unauthorized
+POST {{baseUrl}}/tags
+Content-Type: application/json
+
+{
+  "name": "Noël"
+}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 6. Rename a tag -> 200 OK
+PUT {{baseUrl}}/tags/{{tagId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Végétarien strict"
+}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 7. Fetch a tag that does not exist -> 404 Not Found
+GET {{baseUrl}}/tags/00000000-0000-0000-0000-000000000000
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 8. Delete an unused tag -> 204 No Content
+DELETE {{baseUrl}}/tags/{{tagId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 9. Delete a tag a recipe still uses -> 409 Conflict
+### Create a recipe carrying a tag first (recipes.http), then paste that tag id here.
+@usedTagId = paste-a-tag-id-that-a-recipe-references
+DELETE {{baseUrl}}/tags/{{usedTagId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}
