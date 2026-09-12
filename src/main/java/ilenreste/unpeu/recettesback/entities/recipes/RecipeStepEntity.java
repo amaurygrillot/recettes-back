@@ -32,6 +32,30 @@ import java.util.Set;
  * The {@code UNIQUE (recipe_id, position)} constraint also provides the index
  * for looking steps up by recipe, which is the direction those lookups go — so
  * no separate {@code recipe_id} index is needed.
+ *
+ * <h2>{@code instruction} holds WYSIWYG markup, and its type says so</h2>
+ * {@code columnDefinition = "text"} is not decoration and must not be
+ * "simplified" to a bare {@code @Column}. Hibernate's default for a
+ * {@code String} is {@code varchar(255)}, and 255 characters is roughly two
+ * sentences — a step like "préchauffer le four à 180 °C, beurrer un moule de 24 cm
+ * et le fariner…" already spends a third of that in plain prose, and this field is
+ * authored in a rich-text editor, so it arrives wrapped in markup that spends the
+ * rest. The failure is also the worst kind: it appears only once a user writes a
+ * long step, and surfaces as a {@code DataIntegrityViolationException} mapped to a
+ * generic 500, with their text lost.
+ * <p>
+ * {@code text} rather than {@code @Lob}: in PostgreSQL {@code text} and
+ * {@code varchar} are the same storage with the same performance, minus the length
+ * check, so unbounded costs nothing. {@code @Lob} on the other hand maps to a
+ * large object with a separate handle, which needs its own transaction semantics
+ * to read and is the wrong tool for a string that is at most a few kilobytes.
+ * {@code recipes.recommendations} and {@code recipe_introductions.text} are
+ * declared the same way for the same reason.
+ * <p>
+ * Storing markup means it must be <strong>escaped or sanitised where it is
+ * rendered</strong>. Nothing here strips it: this API records what the author
+ * wrote, and a sanitiser that silently rewrote their formatting would be its own
+ * bug. See {@code docs/recipes-domain-model.md}.
  */
 @Getter
 @Setter

@@ -1,0 +1,71 @@
+package ilenreste.unpeu.recettesback.repositories.reference;
+
+import ilenreste.unpeu.recettesback.entities.reference.CategoryRelationEntity;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * The category tree's edges.
+ * <p>
+ * Note what is <strong>not</strong> here: no {@code findChildrenOf}, no
+ * {@code findDescendantsOf}. Every hierarchy read loads the whole edge list once
+ * with {@link #findAllEdges()} and walks it in memory, because the alternative —
+ * one query per level — is an N+1 whose depth is chosen by the data. Categories
+ * are a closed set of tens of rows read on every navigation render, so a single
+ * two-column scan is both cheaper and simpler than a recursive query. See
+ * {@code CategoryEntity} for the size at which that stops being true.
+ */
+public interface CategoryRelationsRepository extends JpaRepository<CategoryRelationEntity, String> {
+
+    /**
+     * Every edge as a {@code (categoryId, superiorCategoryId)} pair, without
+     * hydrating a single {@code CategoryEntity}.
+     * <p>
+     * Returning the entities instead would make {@code getSuperiorCategory()}
+     * either a lazy proxy per row or a fetch join pulling the full category twice
+     * over, to answer a question that only ever needs two ids.
+     */
+    @Query("SELECT r.categoryId, r.superiorCategory.id FROM CategoryRelationEntity r")
+    List<Object[]> findAllEdges();
+
+    /**
+     * The edge list as {@code categoryId -> superiorCategoryId}, with the roots'
+     * self-references <strong>dropped</strong> rather than carried through.
+     * <p>
+     * This is the one place that translation happens. Inside the schema a root
+     * points at itself, which is what keeps {@code superior_category_id}
+     * {@code NOT NULL} and makes "no relation row" unambiguously a bug; outside
+     * it, a root simply has no superior. Letting the self-reference escape would
+     * put an {@code id.equals(superiorId)} check in every caller, and the first
+     * one to forget it would render a category as its own parent — or loop.
+     */
+    default Map<String, String> superiorIdsByCategoryId() {
+        Map<String, String> superiors = new LinkedHashMap<>();
+        for (Object[] edge : findAllEdges()) {
+            String categoryId = (String) edge[0];
+            String superiorId = (String) edge[1];
+            if (!categoryId.equals(superiorId)) {
+                superiors.put(categoryId, superiorId);
+            }
+        }
+        return superiors;
+    }
+
+    /**
+     * Whether anything hangs off this category — the guard that stops a delete
+     * orphaning a subtree.
+     * <p>
+     * The {@code <>} is load-bearing: a main category is its own superior, so
+     * without it every root would report having children and could never be
+     * deleted.
+     */
+    @Query("""
+            SELECT COUNT(r) > 0 FROM CategoryRelationEntity r
+            WHERE r.superiorCategory.id = :categoryId AND r.categoryId <> :categoryId
+            """)
+    boolean hasSubcategories(String categoryId);
+}

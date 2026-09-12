@@ -1,11 +1,10 @@
 package ilenreste.unpeu.recettesback.controllers.reference;
 
-import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
-import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.reference.requests.IngredientRequest;
 import ilenreste.unpeu.recettesback.models.reference.responses.IngredientResponse;
 import ilenreste.unpeu.recettesback.services.reference.IngredientService;
 import jakarta.validation.Valid;
+import lombok.extern.log4j.Log4j2;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -31,52 +30,63 @@ import java.net.URI;
  * Unlike the other three reference endpoints this one is paginated: ingredients
  * are the table that grows, and returning all of them to power an autocomplete
  * gets worse every week.
+ * <p>
+ * No {@code try/catch} and no result checking: {@code IngredientService} returns
+ * a response record or throws, and {@code ApiExceptionHandler} turns each typed
+ * exception into its status — 404 for an unknown id, 409 for a duplicate name or
+ * an ingredient a recipe still uses, 400 for an {@code iconMediaId} naming no
+ * media row.
  */
+@Log4j2
 @RequestMapping("/ingredients")
 @RestController
 public class IngredientController {
 
     private final IngredientService ingredientService;
-    private final ReferenceMapper mapper;
 
-    public IngredientController(IngredientService ingredientService, ReferenceMapper mapper) {
+    public IngredientController(IngredientService ingredientService) {
         this.ingredientService = ingredientService;
-        this.mapper = mapper;
     }
 
     /**
-     * @param q optional prefix, matched against the normalized name — which is
-     *          what makes typing {@code oeuf} find {@code Œuf}. A prefix and not
-     *          a substring, because a trailing wildcard can use the index and a
-     *          leading one cannot
+     * @param namePrefix what the user has typed so far, matched against the
+     *                   normalized name — which is what makes typing {@code oeuf}
+     *                   find {@code Œuf}. A prefix and not a substring, because a
+     *                   trailing wildcard can use the index and a leading one
+     *                   cannot; the parameter is named for that, since {@code q}
+     *                   said nothing about either what is matched or how. Absent
+     *                   or blank returns everything, name-sorted
      */
     @GetMapping
     public ResponseEntity<Page<IngredientResponse>> search(
-            @RequestParam(required = false) String q,
+            @RequestParam(required = false) String namePrefix,
             @PageableDefault(size = 20, sort = "name", direction = Sort.Direction.ASC) Pageable pageable) {
-        return ResponseEntity.ok(ingredientService.search(q, pageable).map(mapper::toResponse));
+        return ResponseEntity.ok(ingredientService.search(namePrefix, pageable));
     }
 
     @GetMapping("/{id}")
     public ResponseEntity<IngredientResponse> get(@PathVariable String id) {
-        return ResponseEntity.ok(mapper.toResponse(ingredientService.findById(id)));
+        return ResponseEntity.ok(ingredientService.get(id));
     }
 
     @PostMapping
     public ResponseEntity<IngredientResponse> create(@Valid @RequestBody IngredientRequest request) {
-        IngredientEntity created = ingredientService.createIngredient(request);
-        return ResponseEntity.created(URI.create("/ingredients/" + created.getId()))
-                .body(mapper.toResponse(created));
+        log.info("Creating an ingredient");
+        IngredientResponse created = ingredientService.createIngredient(request);
+        return ResponseEntity.created(URI.create("/ingredients/" + created.id())).body(created);
     }
 
     @PutMapping("/{id}")
     public ResponseEntity<IngredientResponse> update(@PathVariable String id,
                                                      @Valid @RequestBody IngredientRequest request) {
-        return ResponseEntity.ok(mapper.toResponse(ingredientService.updateIngredient(id, request)));
+        log.info("Updating ingredient {}", id);
+        return ResponseEntity.ok(ingredientService.updateIngredient(id, request));
     }
 
+    /** 409 rather than a cascade if any recipe still uses it. */
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(@PathVariable String id) {
+        log.info("Deleting ingredient {}", id);
         ingredientService.delete(id);
         return ResponseEntity.noContent().build();
     }

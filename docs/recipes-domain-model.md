@@ -1,9 +1,13 @@
 # Recipes — domain model and API design
 
 Status: **implemented**. This document is the specification the implementation session worked
-from, updated in place where the implementation proved a decision wrong. Companion documents: [media-storage.md](media-storage.md) (images),
+from, updated in place where the implementation proved a decision wrong — and again after the PR review, which added a
+category hierarchy, an introduction section, and named filters on the listing. Companion documents:
+[media-storage.md](media-storage.md) (images),
 [api-error-handling.md](api-error-handling.md) (status codes and exception mapping),
-[optional-authentication.md](optional-authentication.md) (how public reads coexist with JWT auth).
+[optional-authentication.md](optional-authentication.md) (how public reads coexist with JWT auth),
+[category-hierarchy.md](category-hierarchy.md) (main categories and subcategories),
+[service-controller-contract.md](service-controller-contract.md) (what a controller may assume from a service).
 
 ## What the feature is
 
@@ -102,7 +106,10 @@ A recipe belongs to **one or more** categories, through a `recipe_categories` jo
 | `recipe_tags`       | `recipe_id`, `tag_id` — composite PK      |
 
 **At least one category is required.** `CreateRecipeRequest.categoryIds` is `@NotEmpty`; the "one or more" is enforced
-at the API layer, not by the schema, since a join table cannot express a minimum cardinality. This keeps the original
+at the API layer, not by the schema, since a join table cannot express a minimum cardinality. `ingredientGroups` and
+`steps` carry the same rule, for a different reason: a recipe with no ingredients or no steps is not a recipe somebody
+has not finished writing, it is one nobody can cook, and accepting it only moves the failure to the reader. All three
+rules hold on update too (`@NotEmptyIfPresent`), or an edit would be a back door around what a create forbids. This keeps the original
 intent (every recipe is classified and therefore browsable) while allowing the tarte that is honestly both a dessert and
 a goûter.
 
@@ -123,6 +130,68 @@ categories — nothing in the schema stops the two from converging into "two lis
 because you asked for both tables. **If in six months the category list has grown to twenty entries and recipes carry
 five each, that is the signal they have merged in practice and one of them should go.** Recorded here so that is a
 recognisable outcome rather than a surprise.
+
+> **Resolved by the PR review: they are no longer structurally identical.** Categories now form a hierarchy — a
+> `category_type` column and a `categories_relation` table giving every category exactly one direct parent — and tags
+> stay flat. Containment is the difference, and it is now in the schema rather than in convention.
+> See [category-hierarchy.md](category-hierarchy.md).
+
+### The introduction — a section, not a field
+
+`recipe_introductions` holds the block rendered above everything else on a recipe: the "here is what this dish is and
+where it comes from" paragraph, before the ingredients and the steps. Optional.
+
+| Table                   | Columns                                                    |
+|-------------------------|-------------------------------------------------------------|
+| `recipe_introductions`  | `recipe_id` (**PK**, FK to `recipes`), `text` (text, not null) |
+
+**Its own table rather than a column on `recipes`**, and the distinction is worth stating because `recommendations`
+went the other way. A recipe has two blocks of prose and they are not the same kind of thing:
+
+- `recommendations` is a **field**: a note rendered beside the recipe, never addressed on its own. A nullable `text`
+  column on `recipes` is exactly right for it.
+- The introduction is a **section**, in the same sense as a step or an ingredient group: an addressable block of
+  content with an id of its own, which is what lets an editor or a comment anchor refer to it. The response exposes
+  that id.
+
+Keeping the two shapes apart is also what stops "add another column to `recipes`" from being the answer to every
+future block of prose.
+
+The primary key is the recipe's own id (`@MapsId`), so "one introduction per recipe" is the primary key rather than a
+unique constraint bolted on beside a surrogate one. `orphanRemoval` is what makes removal work: setting the association
+to null has to DELETE the row, not detach it and leave an orphan the next read still finds.
+
+#### Blank text removes the section, and it has to
+
+`RecipeIntroductionRequest.text` is deliberately **not** `@NotBlank`. Blank — null, empty or whitespace — means "this
+recipe has no introduction", and on an update it deletes the row.
+
+That convention is not a shortcut; without it the section could be added but never removed. Jackson deserialises a
+*missing* property and an explicit `"introduction": null` to the **same** `Optional.empty()`, so `Optional` alone
+cannot distinguish "leave it alone" from "delete it". Whichever meaning `Optional.empty()` were given, the other would
+be unexpressible: either every partial update that does not mention the introduction wipes it, or nothing can ever
+remove one. Sending the object with blank text is the one spelling that says "delete" and cannot be confused with
+silence.
+
+`UpdateRecipeRequestValidationTest` pins this down, and `recipes.http` requests 12c and 12d walk the three states.
+
+### WYSIWYG text columns
+
+`recipe_steps.instruction`, `recipe_introductions.text` and `recipes.recommendations` are all declared
+`columnDefinition = "text"`. That is load-bearing and must not be "simplified" to a bare `@Column`: Hibernate's default
+for a `String` is `varchar(255)`, and these fields are authored in a rich-text editor, so they arrive wrapped in markup
+that spends most of that budget before the prose does. The failure mode is the worst kind — it appears only once a user
+writes a long step, and surfaces as a `DataIntegrityViolationException` reported as a generic 500, with their text
+lost.
+
+`text` rather than `@Lob`: in PostgreSQL `text` and `varchar` are the same storage with the same performance minus the
+length check, so unbounded costs nothing, while `@Lob` maps to a large object with a separate handle and its own
+transaction semantics — the wrong tool for a string that is at most a few kilobytes.
+
+Storing markup means it must be **escaped or sanitised where it is rendered**. Nothing here strips it: this API records
+what the author wrote, and a sanitiser that silently rewrote their formatting would be its own bug. The authors are
+authenticated friends and family, so the exposure is small, but it is a real stored-XSS surface and the frontend is
+where it has to be closed.
 
 ### Ordered child tables
 
@@ -204,10 +273,14 @@ classes" or "all the repositories".
 
 ```
 ilenreste.unpeu.recettesback
-├── configuration/           unchanged, flat (cross-cutting, not domain-owned)
+├── configuration/           flat, cross-cutting — and ONLY things that configure:
+│                            SecurityFilterConfig, SecurityBeansConfig, RsaKeyConfig,
+│                            JwtIssuerConfig, JpaAuditingConfig
+├── properties/              flat — @ConfigurationProperties records (MediaProperties)
+├── bootstrap/               flat — ApplicationRunners (ReferenceDataSeeder)
 ├── filters/                 unchanged, flat
-├── exceptions/              ResourceNotFoundException, InvalidReferenceException,
-│                            ResourceConflictException, ForbiddenOperationException
+├── exceptions/              the exception types, the two advices (ApiExceptionHandler,
+│                            UserExceptionHandler) and ProblemDetailErrorResponder
 ├── entities/
 │   ├── AuditableEntity      @MappedSuperclass, shared — stays at the root
 │   ├── recipes/             RecipeEntity, RecipeStepEntity, RecipeStepPictureEntity,
@@ -246,9 +319,24 @@ ilenreste.unpeu.recettesback
 `models` already works this way (`models/auth`, `models/users`), so this generalises a convention the codebase has
 rather than inventing one.
 
-`configuration`, `filters` and `exceptions` stay flat. They are cross-cutting: `SecurityFilterConfig` is not a recipes
-class or a users class, and `ResourceNotFoundException` is thrown by every domain. Subdividing them would produce
-single-class packages that answer no question.
+`configuration`, `properties`, `bootstrap`, `filters` and `exceptions` stay flat. They are cross-cutting:
+`SecurityFilterConfig` is not a recipes class or a users class, and `ResourceNotFoundException` is thrown by every
+domain. Subdividing *them* would produce single-class packages that answer no question.
+
+#### `configuration` means "configures something" — three classes that did not
+
+The PR review caught `configuration` being used as a drawer for anything that was neither a controller, a service nor
+an entity. Three classes moved out, and the test for each is the same: *does it declare a bean or wire something?*
+
+| Class                        | Was            | Now         | Why                                                                                          |
+|------------------------------|----------------|-------------|-----------------------------------------------------------------------------------------------|
+| `MediaProperties`            | `configuration`| `properties`| Bound data, not wiring. No bean, no logic; picked up by `@ConfigurationPropertiesScan`. Not `models` either — those records cross the HTTP boundary and this one never leaves the server |
+| `ReferenceDataSeeder`        | `configuration`| `bootstrap` | An `ApplicationRunner`: behaviour that runs once the context is up. Configures nothing         |
+| `ProblemDetailErrorResponder`| `configuration`| `exceptions`| The half of exception-to-`problem+json` mapping that runs *above* the `DispatcherServlet`, where an `@ExceptionHandler` cannot reach. It belongs next to `ApiExceptionHandler`; `SecurityFilterConfig` is the configuration that wires it |
+
+`UserExceptionHandler` moved the same way, out of `controllers/users` into `exceptions`. It is not a controller and
+maps no route — it is a `@RestControllerAdvice`, and the pair of advices only makes sense read together, since the
+`@Order` on each is what decides which wins. That is impossible to notice when they live in different packages.
 
 `AuditableEntity` stays at the `entities` root for the same reason — it is the shared supertype, owned by no domain.
 
@@ -565,17 +653,49 @@ separate schema change to their tables with no bearing on recipes.
 
 ### Recipes — `/recipes`
 
-| Method | Path            | Auth              | Success | Notes                                                               |
-|--------|-----------------|-------------------|---------|---------------------------------------------------------------------|
-| GET    | `/recipes`      | public            | 200     | paginated summaries; filters `categoryId`, `tagId`, `authorId`, `q` |
-| GET    | `/recipes/{id}` | public            | 200     | full recipe                                                         |
-| POST   | `/recipes`      | `USER`            | 201     | `Location` header; body is the created recipe                       |
-| PUT    | `/recipes/{id}` | author or `ADMIN` | 200     | partial update, see below                                           |
-| DELETE | `/recipes/{id}` | author or `ADMIN` | 204     | **not in your requirements — flagged below**                        |
+| Method | Path            | Auth              | Success | Notes                                          |
+|--------|-----------------|-------------------|---------|-------------------------------------------------|
+| GET    | `/recipes`      | public            | 200     | paginated summaries; criteria below             |
+| GET    | `/recipes/{id}` | public            | 200     | full recipe                                     |
+| POST   | `/recipes`      | `USER`            | 201     | `Location` header; body is the created recipe   |
+| PUT    | `/recipes/{id}` | author or `ADMIN` | 200     | partial update, see below                       |
+| DELETE | `/recipes/{id}` | author or `ADMIN` | 204     | **not in your requirements — flagged below**    |
+
+### The listing's criteria
+
+Bound from the query string into `RecipeSearchRequest` — a record, not nine `@RequestParam` arguments, so the criteria
+have one place to be named, documented and validated. The wire format is unchanged.
+
+| Parameter      | Matches                                                           |
+|----------------|--------------------------------------------------------------------|
+| `title`        | substring of the recipe title, case-insensitive                     |
+| `authorId`     | exactly that author                                                 |
+| `authorName`   | substring of the author's username, case-insensitive                |
+| `categoryId`   | exactly that category                                               |
+| `categoryName` | substring of a category's *normalized* name — `entrees` finds `Entrées` |
+| `tagId`        | exactly that tag                                                    |
+| `tagName`      | substring of a tag's *normalized* name                              |
+| `sortBy`       | `CREATED_AT` (default), `UPDATED_AT` or `TITLE`                     |
+| `direction`    | `ASC` or `DESC` (default)                                           |
+
+**Every criterion is optional, including all of them at once.** An unfiltered `GET /recipes` is the home page and
+returns the newest recipes, paginated. Requiring at least one filter would leave the application with no way to browse.
+
+**The name filters are not redundant with the id filters.** The original design had only ids, which assumed the caller
+already knew a UUID for the author, category or tag they wanted — true of a dropdown the UI just rendered, false of a
+search box and false of a hand-written link. Both are kept: names are the friendly path, ids are the exact one.
+
+**`sortBy` is a closed enum, and that is a bug fix rather than a style choice.** Spring Data's `Pageable` binding takes
+a free-text `sort` property and appends it to the query — and this listing pages over hand-written JPQL. `?sort=bogus`
+therefore failed to resolve and threw a `SemanticException`: a **500 on a public endpoint, caused by a typo in a query
+string**. `?sort=author.password` would have ordered by a column no response exposes. The enum makes an unknown value a
+400 and puts the set of sortable columns in one place; the direction is independent, so "oldest first" and "reverse
+alphabetical" were already expressible and needed nothing new.
 
 `categoryId` stays a single-value filter (match recipes carrying *that* category) even though a recipe now has several.
 Multi-category filtering — "desserts AND rapide" — needs an AND-vs-OR decision and a different query shape; out of scope
-until there is a UI asking for it.
+until there is a UI asking for it. It also matches that category **exactly** and does not include its subcategories —
+see [category-hierarchy.md](category-hierarchy.md#known-limitation-filtering-recipes-by-a-main-category-does-not-include-its-subcategories).
 
 `DELETE` was not in your list. A library with no way to remove a mistaken entry is awkward, and its permission rule is
 identical to update, so it is designed here — but say the word and it comes out. If it stays, deletion cascades to
@@ -586,14 +706,21 @@ categories.
 
 | Method | Path                | Auth              | Success | Failure notes                                    |
 |--------|---------------------|-------------------|---------|--------------------------------------------------|
-| GET    | `/ingredients`      | public            | 200     | paginated, `?q=` prefix search for the edit form |
+| GET    | `/ingredients`      | public            | 200     | paginated, `?namePrefix=` prefix search for the edit form |
 | POST   | `/ingredients`      | any authenticated | 201     | 409 if the normalized name exists                |
 | PUT    | `/ingredients/{id}` | `ADMIN`           | 200     | rename / change icon                             |
 | DELETE | `/ingredients/{id}` | `ADMIN`           | 204     | **409 if any recipe still references it**        |
-| GET    | `/categories`       | public            | 200     |                                                  |
-| POST   | `/categories`       | `ADMIN`           | 201     | 409 on duplicate                                 |
-| PUT    | `/categories/{id}`  | `ADMIN`           | 200     |                                                  |
-| DELETE | `/categories/{id}`  | `ADMIN`           | 204     | 409 if in use                                    |
+| GET    | `/categories`       | public            | 200     | flat, every level                                |
+| POST   | `/categories`       | `ADMIN`           | 201     | 409 on duplicate, 400 on an unknown parent       |
+| PUT    | `/categories/{id}`  | `ADMIN`           | 200     | 400 on a cycle                                   |
+| DELETE | `/categories/{id}`  | `ADMIN`           | 204     | 409 if in use **or** if it still has children    |
+
+Categories carry three further read routes — `/categories/hierarchy`, `/categories/{id}/subcategories` and
+`/categories/{id}/superior-categories` — documented in [category-hierarchy.md](category-hierarchy.md).
+
+`?q=` on `/ingredients` was renamed `?namePrefix=`: `q` said nothing about what was matched or how, and the answer was
+not guessable — it is a prefix, against the normalized name, so a trailing wildcard can use the index and a leading one
+cannot.
 | GET    | `/tags`             | public            | 200     |                                                  |
 | POST   | `/tags`             | `ADMIN`           | 201     | 409 on duplicate                                 |
 | PUT    | `/tags/{id}`        | `ADMIN`           | 200     |                                                  |
@@ -808,6 +935,8 @@ set or a size. `assertThat(response.steps()).extracting(Step::instruction).conta
 5. `units` administered by `ADMIN`, like categories and tags — implemented.
 6. **Categories vs tags** are structurally identical; the difference is a product decision plus the emptiness rule on
    categories. Kept as two tables — flagged so the eventual convergence stays recognisable.
+   **Resolved by the PR review:** categories gained a hierarchy, tags did not, so the two are no longer structurally
+   identical and the convergence is off the table. See [category-hierarchy.md](category-hierarchy.md).
 7. No `servings` / prep-time / cook-time fields — still out. `servings` in particular is what would make the numeric
    quantities scalable, and it remains the most obvious next addition.
 
@@ -821,6 +950,9 @@ set or a size. `assertThat(response.steps()).extracting(Step::instruction).conta
 - **`ddl-auto=update` with no migration tool.** Unchanged by this work and still the thing most likely to hurt on the
   VPS: it cannot drop or rename anything, it silently skips changes it cannot make, and nothing records what a given
   database has had applied. Adding Flyway deserves its own session before the first real deployment.
+- **Filtering recipes by a main category does not reach its subcategories.** `?categoryId=<desserts>` matches that
+  exact category, so a recipe filed only under "Tartes" does not appear. Deferred deliberately rather than overlooked;
+  see [category-hierarchy.md](category-hierarchy.md#known-limitation-filtering-recipes-by-a-main-category-does-not-include-its-subcategories).
 - **Three pre-existing defects in the users mapping** — `user_roles` mapped both as a `@ManyToMany` join table and as
   an entity, `RoleEntity`'s self-referential `roles` collection, and `RolesRepository`/`UserRolesRepository` declaring
   `UUID` id types for `String`-id entities. All out of scope here, all load-bearing for anything creating users or

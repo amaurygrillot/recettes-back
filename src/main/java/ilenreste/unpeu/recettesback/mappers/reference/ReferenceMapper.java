@@ -22,8 +22,21 @@ import java.util.List;
 @Component
 public class ReferenceMapper {
 
-    public CategoryResponse toResponse(CategoryEntity category) {
-        return new CategoryResponse(category.getId(), category.getName());
+    /**
+     * The parent id is passed in rather than read off the entity, because the
+     * entity does not carry it: a category's parent lives in
+     * {@code categories_relation}, and only {@code CategoryService} — which holds
+     * the whole edge list — can say whether a given row is a root. Giving this
+     * mapper a repository so it could look the edge up itself would turn every
+     * category in a list into its own query.
+     *
+     * @param superiorCategoryId the directly superior category, or null for a main
+     *                           category. Null and not the stored self-reference:
+     *                           see {@link CategoryResponse}
+     */
+    public CategoryResponse toResponse(CategoryEntity category, String superiorCategoryId) {
+        return new CategoryResponse(category.getId(), category.getName(),
+                category.getCategoryType(), superiorCategoryId);
     }
 
     public TagResponse toResponse(TagEntity tag) {
@@ -42,10 +55,6 @@ public class ReferenceMapper {
     public IngredientResponse toResponse(IngredientEntity ingredient) {
         return new IngredientResponse(ingredient.getId(), ingredient.getName(),
                 ingredient.getIcon() == null ? null : ingredient.getIcon().getId());
-    }
-
-    public List<CategoryResponse> toCategoryResponses(List<CategoryEntity> categories) {
-        return categories.stream().map(this::toResponse).toList();
     }
 
     public List<TagResponse> toTagResponses(List<TagEntity> tags) {

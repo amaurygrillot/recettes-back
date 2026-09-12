@@ -17,10 +17,10 @@ import java.util.Optional;
  *
  * <h2>Absent and empty are different requests</h2>
  * {@code Optional} answers "was this field supplied?"; {@code @NotEmpty} answers
- * "is the supplied value usable?". Those are different questions, and
- * {@code categoryIds} is the field where both need answering:
+ * "is the supplied value usable?". Those are different questions, and three
+ * fields here need both answering:
  * <table>
- *   <caption>The three states the JSON can express</caption>
+ *   <caption>The three states the JSON can express, for {@code categoryIds}</caption>
  *   <tr><th>Body</th><th>Means</th><th>Outcome</th></tr>
  *   <tr><td>field omitted</td><td>don't touch categories</td><td>200, unchanged</td></tr>
  *   <tr><td>{@code "categoryIds": []}</td><td>set categories to none</td><td><strong>400</strong></td></tr>
@@ -29,12 +29,22 @@ import java.util.Optional;
  * Drop the constraint and the middle row silently succeeds, leaving the recipe
  * uncategorised and breaking the invariant everything else leans on.
  * {@link CreateRecipeRequest} enforces it at creation; an update must not be a
- * back door around it.
+ * back door around it. The same holds for {@code ingredientGroups} and
+ * {@code steps}: an edit is not allowed to turn a working recipe into one nobody
+ * can cook, which a create is already forbidden from producing.
  * <p>
- * The contrast with {@code tagIds} directly below is the point: same
- * {@code Optional<List<String>>} shape, no constraint, because clearing every tag
- * is a legitimate edit. Same type, deliberately different rule, and the
- * annotation is the only thing expressing the difference.
+ * The contrast with {@code tagIds} and {@code coverPictures} is the point: same
+ * {@code Optional<List<...>>} shape, no constraint, because clearing every tag or
+ * removing the last photograph are both legitimate edits. Same type, deliberately
+ * different rule, and the annotation is the only thing expressing the difference.
+ * <p>
+ * {@code introduction} needs a third state the others do not — "remove this
+ * section" — and {@code Optional} cannot express it, because Jackson maps both a
+ * missing property and an explicit {@code "introduction": null} to the same
+ * {@code Optional.empty()}. So the delete instruction is the object with blank
+ * text, {@code {"introduction": {"text": ""}}}; see
+ * {@link RecipeIntroductionRequest}. Omitting the field leaves the introduction
+ * alone, as with everything else here.
  *
  * <h2>Why the rule is {@link NotEmptyIfPresent} and not {@code @NotEmpty}</h2>
  * The obvious spelling, {@code Optional<@NotEmpty List<String>> categoryIds},
@@ -61,6 +71,8 @@ public record UpdateRecipeRequest(
         @NotEmptyIfPresent
         Optional<@Size(max = 200) String> title,
 
+        Optional<RecipeIntroductionRequest> introduction,
+
         Optional<String> recommendations,
 
         @NotEmptyIfPresent
@@ -70,8 +82,10 @@ public record UpdateRecipeRequest(
 
         Optional<List<@Valid RecipePictureRequest>> coverPictures,
 
+        @NotEmptyIfPresent
         Optional<List<@Valid RecipeIngredientGroupRequest>> ingredientGroups,
 
+        @NotEmptyIfPresent
         Optional<List<@Valid RecipeStepRequest>> steps
 ) {
 }

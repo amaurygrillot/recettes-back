@@ -103,6 +103,11 @@ class RecipesRepositoryTest {
         SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt, List.of()));
     }
 
+    /**
+     * The normalized name gets a random suffix so repeated runs against the shared development
+     * database do not collide on the unique constraint - and the name filters below search for
+     * that same suffix, so they cannot match a row left behind by another test.
+     */
     private CategoryEntity category(String name) {
         CategoryEntity entity = new CategoryEntity();
         entity.setName(name);
@@ -156,7 +161,8 @@ class RecipesRepositoryTest {
         CategoryEntity dessert = category("dessert");
         recipe("Tarte aux pommes", List.of(dessert, category("gouter"), category("automne")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(null, dessert.getId(), null, null, firstPage());
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, dessert.getId(), null, null, null, firstPage());
 
         assertThat(page.getTotalElements()).isEqualTo(1);
         assertThat(page.getContent()).hasSize(1);
@@ -167,7 +173,8 @@ class RecipesRepositoryTest {
         recipe("Tarte", List.of(category("dessert")), List.of());
         recipe("Soupe", List.of(category("entree")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(null, null, null, null, firstPage());
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, null, null, null, null, firstPage());
 
         assertThat(page.getTotalElements()).isGreaterThanOrEqualTo(2);
     }
@@ -178,7 +185,8 @@ class RecipesRepositoryTest {
         RecipeEntity tarte = recipe("Tarte", List.of(dessert), List.of());
         recipe("Soupe", List.of(category("entree")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(null, dessert.getId(), null, null, firstPage());
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, dessert.getId(), null, null, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(tarte.getId());
     }
@@ -189,7 +197,8 @@ class RecipesRepositoryTest {
         RecipeEntity soupe = recipe("Soupe", List.of(category("entree")), List.of(vegetarien));
         recipe("Steak", List.of(category("plat")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(null, null, vegetarien.getId(), null, firstPage());
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, null, null, vegetarien.getId(), null, firstPage());
 
         assertThat(page.getContent()).containsExactly(soupe.getId());
     }
@@ -200,7 +209,8 @@ class RecipesRepositoryTest {
         authenticateAs(otherAuthor);
         recipe("Theirs", List.of(category("plat")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(author.getId(), null, null, null, firstPage());
+        Page<String> page = recipesRepository.searchIds(
+                null, author.getId(), null, null, null, null, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(mine.getId());
     }
@@ -210,7 +220,8 @@ class RecipesRepositoryTest {
         RecipeEntity tarte = recipe("Tarte aux POMMES", List.of(category("dessert")), List.of());
         recipe("Soupe a l'oignon", List.of(category("entree")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(null, null, null, "pommes", firstPage());
+        Page<String> page = recipesRepository.searchIds(
+                "pommes", null, null, null, null, null, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(tarte.getId());
     }
@@ -224,9 +235,86 @@ class RecipesRepositoryTest {
         recipe("Autre rapide", List.of(category("plat")), List.of(rapide));
 
         Page<String> page = recipesRepository.searchIds(
-                author.getId(), dessert.getId(), rapide.getId(), "tarte", firstPage());
+                "tarte", author.getId(), null, dessert.getId(), null, rapide.getId(), null, firstPage());
 
         assertThat(page.getContent()).containsExactly(wanted.getId());
+    }
+
+    /**
+     * The name filters exist because a user typing into a search box does not know a UUID. They
+     * match normalized_name, which is what makes an unaccented, lower-case term find the stored
+     * spelling - and which is why the caller has to normalize the term the same way.
+     */
+    @Test
+    void filtersByCategoryName_againstTheNormalizedColumn() {
+        CategoryEntity dessert = category("dessert");
+        RecipeEntity tarte = recipe("Tarte", List.of(dessert), List.of());
+        recipe("Soupe", List.of(category("entree")), List.of());
+
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, null, dessert.getNormalizedName(), null, null, firstPage());
+
+        assertThat(page.getContent()).containsExactly(tarte.getId());
+    }
+
+    @Test
+    void filtersByTagName_againstTheNormalizedColumn() {
+        TagEntity rapide = tag("rapide");
+        RecipeEntity soupe = recipe("Soupe", List.of(category("entree")), List.of(rapide));
+        recipe("Steak", List.of(category("plat")), List.of());
+
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, null, null, null, rapide.getNormalizedName(), firstPage());
+
+        assertThat(page.getContent()).containsExactly(soupe.getId());
+    }
+
+    @Test
+    void filtersByAuthorName_caseInsensitively() {
+        RecipeEntity mine = recipe("Mine", List.of(category("plat")), List.of());
+        authenticateAs(otherAuthor);
+        recipe("Theirs", List.of(category("plat")), List.of());
+
+        Page<String> page = recipesRepository.searchIds(
+                null, null, author.getUsername().toUpperCase(java.util.Locale.ROOT), null, null,
+                null, null, firstPage());
+
+        assertThat(page.getContent()).contains(mine.getId());
+    }
+
+    /**
+     * A recipe carrying two categories whose names both match must still appear once. This is the
+     * same duplicate-row trap the id filters have, made likelier by names not being unique across
+     * the LIKE.
+     */
+    @Test
+    void countsARecipeOnce_evenWhenSeveralOfItsCategoryNamesMatch() {
+        String shared = "noel" + UUID.randomUUID().toString().replace("-", "");
+        CategoryEntity first = category(shared + "a");
+        CategoryEntity second = category(shared + "b");
+        recipe("Buche", List.of(first, second), List.of());
+
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, null, shared, null, null, firstPage());
+
+        assertThat(page.getTotalElements()).isEqualTo(1);
+    }
+
+    /**
+     * Title ascending is one of the orderings RecipeSortField allows, and the sort is appended to
+     * this hand-written projection by Spring - so it has to actually resolve against the entity.
+     */
+    @Test
+    void ordersByAnyWhitelistedColumn() {
+        CategoryEntity dessert = category("dessert");
+        String prefix = "zz" + UUID.randomUUID().toString().substring(0, 8);
+        RecipeEntity b = recipe(prefix + "-B", List.of(dessert), List.of());
+        RecipeEntity a = recipe(prefix + "-A", List.of(dessert), List.of());
+
+        Page<String> page = recipesRepository.searchIds(prefix, null, null, null, null, null, null,
+                PageRequest.of(0, 20, Sort.by(Sort.Direction.ASC, "title")));
+
+        assertThat(page.getContent()).containsExactly(a.getId(), b.getId());
     }
 
     @Test

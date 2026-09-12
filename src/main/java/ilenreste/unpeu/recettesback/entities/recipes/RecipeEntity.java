@@ -17,6 +17,7 @@ import jakarta.persistence.JoinTable;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
+import jakarta.persistence.OneToOne;
 import jakarta.persistence.OrderBy;
 import jakarta.persistence.Table;
 import lombok.Getter;
@@ -49,7 +50,11 @@ import java.util.Set;
  * <p>
  * {@code recommendations} is a single text field rather than a list, because it
  * is rendered as one block beside the recipe. Markdown in this field covers
- * bullets later without a schema change.
+ * bullets later without a schema change. Note that it is <em>not</em> the same
+ * thing as {@code introduction}: recommendations sit beside the recipe as an
+ * aside, the introduction sits above it as the opening of the piece, and only the
+ * second is an addressable section with an id of its own — see
+ * {@link RecipeIntroductionEntity}.
  * <p>
  * <strong>Every ordered collection carries {@code @OrderBy("position")}.</strong>
  * Rejecting {@code @OrderColumn} means nothing re-applies the order on the read
@@ -130,6 +135,18 @@ public class RecipeEntity {
             indexes = @Index(name = "idx_recipe_tags_tag_id", columnList = "tag_id")
     )
     private Set<TagEntity> tags = new LinkedHashSet<>();
+
+    /**
+     * The block rendered above everything else, or null when the author did not
+     * write one.
+     * <p>
+     * {@code orphanRemoval} is what makes "clear the introduction" work: setting
+     * this to null on an update has to delete the row, not merely detach it and
+     * leave an orphan the next read would still find.
+     */
+    @OneToOne(mappedBy = "recipe", cascade = CascadeType.ALL, orphanRemoval = true,
+            fetch = FetchType.LAZY, optional = true)
+    private RecipeIntroductionEntity introduction;
 
     @OneToMany(mappedBy = "recipe", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @OrderBy("position")

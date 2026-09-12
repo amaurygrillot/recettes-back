@@ -10,16 +10,22 @@ import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.mappers.recipes.RecipeMapper;
 import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.recipes.requests.CreateRecipeRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeIntroductionRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.RecipePictureRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSearchRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSortField;
 import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeStepRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.UpdateRecipeRequest;
+import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeResponse;
 import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeSummaryResponse;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.CategoriesRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.CategoryRelationsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.TagsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
+import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,9 +34,11 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -38,6 +46,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -49,6 +58,7 @@ class RecipeServiceTest {
     private CurrentUserService currentUserService;
     private CategoriesRepository categoriesRepository;
     private MediaRepository mediaRepository;
+    private CategoryRelationsRepository categoryRelationsRepository;
     private RecipeService recipeService;
 
     @BeforeEach
@@ -57,11 +67,13 @@ class RecipeServiceTest {
         currentUserService = mock(CurrentUserService.class);
         categoriesRepository = mock(CategoriesRepository.class);
         mediaRepository = mock(MediaRepository.class);
+        categoryRelationsRepository = mock(CategoryRelationsRepository.class);
+        when(categoryRelationsRepository.superiorIdsByCategoryId()).thenReturn(Map.of());
         recipeService = new RecipeService(recipesRepository,
-                categoriesRepository, mock(TagsRepository.class),
+                categoriesRepository, categoryRelationsRepository, mock(TagsRepository.class),
                 mock(IngredientsRepository.class), mock(UnitsRepository.class),
-                mediaRepository, new ReferenceResolver(), currentUserService,
-                new RecipeMapper(new ReferenceMapper()));
+                mediaRepository, new ReferenceResolver(), new ReferenceNameNormalizer(),
+                currentUserService, new RecipeMapper(new ReferenceMapper()));
     }
 
     private RecipeEntity recipe(String id, String authorId, String title) {
@@ -77,7 +89,13 @@ class RecipeServiceTest {
 
     private UpdateRecipeRequest titleOnly(String title) {
         return new UpdateRecipeRequest(Optional.of(title), Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty());
+    }
+
+    /** Every criterion absent: the home-page request, which must stay legal. */
+    private static RecipeSearchRequest noFilters() {
+        return new RecipeSearchRequest(null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -91,7 +109,7 @@ class RecipeServiceTest {
     void reordersLoadedRecipesToMatchThePageOfIds() {
         Pageable pageable = PageRequest.of(0, 20);
         List<String> pageOfIds = List.of("r-1", "r-2", "r-3");
-        when(recipesRepository.searchIds(any(), any(), any(), any(), any()))
+        when(recipesRepository.searchIds(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new PageImpl<>(pageOfIds, pageable, 3));
         // Deliberately shuffled, the way a database is free to return them.
         when(recipesRepository.findAllForSummary(pageOfIds)).thenReturn(List.of(
@@ -99,7 +117,7 @@ class RecipeServiceTest {
                 recipe("r-1", "u-1", "First"),
                 recipe("r-2", "u-1", "Second")));
 
-        Page<RecipeSummaryResponse> page = recipeService.search(null, null, null, null, pageable);
+        Page<RecipeSummaryResponse> page = recipeService.search(noFilters(), pageable);
 
         assertThat(page.getContent()).extracting(RecipeSummaryResponse::id)
                 .containsExactly("r-1", "r-2", "r-3");
@@ -108,22 +126,77 @@ class RecipeServiceTest {
 
     @Test
     void treatsBlankFiltersAsNoFilter_ratherThanAsAnEmptyStringToMatch() {
+        // A form that submits its untouched fields sends ?title=, and that must not silently
+        // become a filter matching nothing.
         Pageable pageable = PageRequest.of(0, 20);
-        when(recipesRepository.searchIds(any(), any(), any(), any(), any()))
+        when(recipesRepository.searchIds(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Page.empty(pageable));
 
-        recipeService.search("  ", "", null, "   ", pageable);
+        recipeService.search(new RecipeSearchRequest("  ", "", null, "   ", "", null, "  ", null, null),
+                pageable);
 
-        verify(recipesRepository).searchIds(null, null, null, null, pageable);
+        verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(null), eq(null),
+                eq(null), eq(null), any(Pageable.class));
+    }
+
+    @Test
+    void normalizesTheCategoryAndTagNameFilters_soAccentsAndCaseDoNotMatter() {
+        // The columns being matched are normalized_name, so the term has to be normalized the same
+        // way or typing "entrees" would never find "Entrees" stored as "Entrees" with accents.
+        Pageable pageable = PageRequest.of(0, 20);
+        when(recipesRepository.searchIds(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Page.empty(pageable));
+
+        recipeService.search(
+                new RecipeSearchRequest(null, null, null, null, "  \u00c9NTREES ", null, "Rapide", null, null),
+                pageable);
+
+        verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(null), eq("entrees"),
+                eq(null), eq("rapide"), any(Pageable.class));
+    }
+
+    @Test
+    void takesTheSortFromTheRequestRatherThanFromTheIncomingPageable() {
+        // The listing pages over a hand-written JPQL projection, and Spring appends whatever
+        // property a Pageable names straight into it - so ?sort=bogus would be a 500 and
+        // ?sort=author.password would order by a column no response exposes.
+        Pageable pageable = PageRequest.of(2, 5, Sort.by("somethingElse"));
+        when(recipesRepository.searchIds(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Page.empty(pageable));
+
+        recipeService.search(new RecipeSearchRequest(null, null, null, null, null, null, null,
+                RecipeSortField.TITLE, Sort.Direction.ASC), pageable);
+
+        ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
+        verify(recipesRepository).searchIds(any(), any(), any(), any(), any(), any(), any(),
+                used.capture());
+        assertThat(used.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.ASC, "title"));
+        // Page number and size still come from the Pageable; only the ordering is taken over.
+        assertThat(used.getValue().getPageNumber()).isEqualTo(2);
+        assertThat(used.getValue().getPageSize()).isEqualTo(5);
+    }
+
+    @Test
+    void defaultsToNewestFirstWhenNoOrderingIsAskedFor() {
+        Pageable pageable = PageRequest.of(0, 20);
+        when(recipesRepository.searchIds(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Page.empty(pageable));
+
+        recipeService.search(noFilters(), pageable);
+
+        ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
+        verify(recipesRepository).searchIds(any(), any(), any(), any(), any(), any(), any(),
+                used.capture());
+        assertThat(used.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.DESC, "createdAt"));
     }
 
     @Test
     void skipsTheSecondQueryEntirelyWhenThePageIsEmpty() {
         Pageable pageable = PageRequest.of(0, 20);
-        when(recipesRepository.searchIds(any(), any(), any(), any(), any()))
+        when(recipesRepository.searchIds(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Page.empty(pageable));
 
-        assertThat(recipeService.search(null, null, null, null, pageable)).isEmpty();
+        assertThat(recipeService.search(noFilters(), pageable)).isEmpty();
 
         verify(recipesRepository, never()).findAllForSummary(any());
     }
@@ -241,6 +314,7 @@ class RecipeServiceTest {
         UserEntity author = new UserEntity();
         author.setId("u-1");
         author.setUsername("jane");
+        when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
         when(recipesRepository.save(any())).thenAnswer(invocation -> {
             RecipeEntity saved = invocation.getArgument(0);
             // Auditing would normally stamp these; nothing is running here to do it.
@@ -249,7 +323,7 @@ class RecipeServiceTest {
             return saved;
         });
 
-        CreateRecipeRequest request = new CreateRecipeRequest("Tarte", null,
+        CreateRecipeRequest request = new CreateRecipeRequest("Tarte", null, null,
                 List.of("cat-1"), List.of(),
                 List.of(new RecipePictureRequest("media-2", "second"),
                         new RecipePictureRequest("media-1", "first")),
@@ -283,8 +357,9 @@ class RecipeServiceTest {
         category.setName("Dessert");
         when(categoriesRepository.findAllById(any())).thenReturn(List.of(category));
         when(mediaRepository.findAllById(any())).thenReturn(List.of());
+        when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
 
-        CreateRecipeRequest request = new CreateRecipeRequest("Tarte", null,
+        CreateRecipeRequest request = new CreateRecipeRequest("Tarte", null, null,
                 List.of("cat-1"), List.of(),
                 List.of(new RecipePictureRequest("ghost", null)), List.of(), List.of());
 
@@ -294,6 +369,98 @@ class RecipeServiceTest {
                 .hasMessageContaining("ghost");
 
         verify(recipesRepository, never()).save(any());
+    }
+
+    /**
+     * Without this, auditing resolves no author for a request with no security context, and
+     * recipes.author_id is NOT NULL - so "you are not signed in" would surface as an opaque 500
+     * from a constraint violation.
+     */
+    @Test
+    void refusesToCreateARecipeWithNoAuthenticatedCaller() {
+        when(currentUserService.currentUserId()).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> recipeService.create(new CreateRecipeRequest("Tarte", null, null,
+                List.of("cat-1"), List.of(), List.of(), List.of(), List.of())))
+                .isInstanceOf(ForbiddenOperationException.class)
+                .hasMessageContaining("signed in");
+
+        verify(recipesRepository, never()).save(any());
+    }
+
+    @Test
+    void storesAnIntroductionWhenOneIsGiven_andNoneWhenItIsBlank() {
+        when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
+        when(categoriesRepository.findAllById(any())).thenReturn(List.of(category("cat-1")));
+        when(recipesRepository.save(any())).thenAnswer(invocation -> stamped(invocation.getArgument(0)));
+
+        RecipeResponse withIntro = recipeService.create(new CreateRecipeRequest("Tarte",
+                new RecipeIntroductionRequest("Une tarte de famille."), null,
+                List.of("cat-1"), List.of(), List.of(), List.of(), List.of()));
+        assertThat(withIntro.introduction()).isNotNull();
+        assertThat(withIntro.introduction().text()).isEqualTo("Une tarte de famille.");
+
+        RecipeResponse blank = recipeService.create(new CreateRecipeRequest("Tarte",
+                new RecipeIntroductionRequest("   "), null,
+                List.of("cat-1"), List.of(), List.of(), List.of(), List.of()));
+        // Null, not an object with empty text: a client renders the block if the field is there.
+        assertThat(blank.introduction()).isNull();
+    }
+
+    @Test
+    void removesTheIntroductionWhenAnUpdateSendsBlankText() {
+        // The only spelling that can mean "delete": Jackson maps both a missing property and an
+        // explicit null to the same Optional.empty(), which has to keep meaning "leave it alone".
+        RecipeEntity existing = recipe("r-1", "u-1", "Tarte");
+        ilenreste.unpeu.recettesback.entities.recipes.RecipeIntroductionEntity introduction =
+                new ilenreste.unpeu.recettesback.entities.recipes.RecipeIntroductionEntity();
+        introduction.setRecipe(existing);
+        introduction.setText("Une tarte de famille.");
+        existing.setIntroduction(introduction);
+        when(recipesRepository.findById("r-1")).thenReturn(Optional.of(existing));
+        when(recipesRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
+
+        recipeService.update("r-1", new UpdateRecipeRequest(Optional.empty(),
+                Optional.of(new RecipeIntroductionRequest("")), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()));
+
+        // Set to null so orphanRemoval turns it into a DELETE, rather than left as an empty block.
+        assertThat(existing.getIntroduction()).isNull();
+    }
+
+    @Test
+    void leavesTheIntroductionAloneWhenAnUpdateDoesNotMentionIt() {
+        RecipeEntity existing = recipe("r-1", "u-1", "Tarte");
+        ilenreste.unpeu.recettesback.entities.recipes.RecipeIntroductionEntity introduction =
+                new ilenreste.unpeu.recettesback.entities.recipes.RecipeIntroductionEntity();
+        introduction.setRecipe(existing);
+        introduction.setText("Une tarte de famille.");
+        existing.setIntroduction(introduction);
+        when(recipesRepository.findById("r-1")).thenReturn(Optional.of(existing));
+        when(recipesRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
+
+        recipeService.update("r-1", titleOnly("Tarte aux pommes"));
+
+        assertThat(existing.getIntroduction()).isNotNull();
+    }
+
+    private CategoryEntity category(String id) {
+        CategoryEntity category = new CategoryEntity();
+        category.setId(id);
+        category.setName("Dessert");
+        return category;
+    }
+
+    /** Stands in for the auditing listener, which is not running in a unit test. */
+    private RecipeEntity stamped(RecipeEntity recipe) {
+        UserEntity author = new UserEntity();
+        author.setId("u-1");
+        author.setUsername("jane");
+        recipe.setId("r-1");
+        recipe.setAuthor(author);
+        return recipe;
     }
 
     private MediaEntity media(String id) {

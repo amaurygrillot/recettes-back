@@ -4,6 +4,7 @@ import ilenreste.unpeu.recettesback.entities.recipes.RecipeEntity;
 import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.CategoriesRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.CategoryRelationsRepository;
 import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UserRolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
@@ -53,6 +54,8 @@ class ReferenceEndpointsIntegrationTest {
     @Autowired
     private CategoriesRepository categoriesRepository;
     @Autowired
+    private CategoryRelationsRepository categoryRelationsRepository;
+    @Autowired
     private RecipesRepository recipesRepository;
     @Autowired
     private PasswordEncoder passwordEncoder;
@@ -79,7 +82,12 @@ class ReferenceEndpointsIntegrationTest {
     void tearDown() {
         SecurityContextHolder.clearContext();
         createdRecipeIds.forEach(recipesRepository::deleteById);
-        createdCategoryIds.forEach(categoriesRepository::deleteById);
+        // The relation row first: every category has one, a main category's points at itself, so
+        // the foreign key outlives the category unless it is cleared by hand.
+        createdCategoryIds.forEach(id -> {
+            categoryRelationsRepository.deleteById(id);
+            categoriesRepository.deleteById(id);
+        });
         user.close();
         admin.close();
     }
@@ -103,12 +111,21 @@ class ReferenceEndpointsIntegrationTest {
     }
 
     private String createCategoryAsAdmin(String name) {
+        return createCategoryAsAdmin(name, null);
+    }
+
+    private String createCategoryAsAdmin(String name, String superiorCategoryId) {
+        String json = superiorCategoryId == null
+                ? "{\"name\":\"%s\"}".formatted(name)
+                : "{\"name\":\"%s\",\"superiorCategoryId\":\"%s\"}".formatted(name, superiorCategoryId);
         ResponseEntity<String> response = restTemplate.postForEntity("/categories",
-                body("{\"name\":\"%s\"}".formatted(name), adminToken), String.class);
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+                body(json, adminToken), String.class);
+        assertThat(response.getStatusCode())
+                .as("POST /categories -> %s", response.getBody()).isEqualTo(HttpStatus.CREATED);
 
         String id = idOf(response.getBody());
-        createdCategoryIds.add(id);
+        // Children first on the way out, or the delete trips the relation foreign key.
+        createdCategoryIds.addFirst(id);
         return id;
     }
 
@@ -205,6 +222,116 @@ class ReferenceEndpointsIntegrationTest {
         createdRecipeIds.add(recipesRepository.saveAndFlush(recipe).getId());
     }
 
+    @Test
+    void placesACategoryUnderAnotherOneAndReadsTheTreeBackBothWays() {
+        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
+        String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
+        String tartesAuxPommes = createCategoryAsAdmin(uniqueName("tartes-aux-pommes"), tartes);
+
+        // A root reports MAIN and no superior - never the self-reference the schema actually holds.
+        assertThat(restTemplate.getForObject("/categories/" + desserts, String.class))
+                .contains("\"categoryType\":\"MAIN\"")
+                .contains("\"superiorCategoryId\":null");
+        assertThat(restTemplate.getForObject("/categories/" + tartes, String.class))
+                .contains("\"categoryType\":\"SUB\"")
+                .contains(desserts);
+
+        // Everything below, at any depth - not just the direct children.
+        assertThat(restTemplate.getForObject("/categories/" + desserts + "/subcategories", String.class))
+                .contains(tartes)
+                .contains(tartesAuxPommes);
+
+        // The ancestor chain, nearest first: breadcrumb order reversed.
+        String superiors = restTemplate.getForObject(
+                "/categories/" + tartesAuxPommes + "/superior-categories", String.class);
+        assertThat(superiors.indexOf(tartes)).isLessThan(superiors.indexOf(desserts));
+        assertThat(restTemplate.getForObject(
+                "/categories/" + desserts + "/superior-categories", String.class)).isEqualTo("[]");
+
+        // Nested, so a navigation menu is one call.
+        assertThat(restTemplate.getForObject("/categories/hierarchy", String.class))
+                .contains(desserts)
+                .contains(tartes);
+    }
+
+    /** Reads stay public all the way down the hierarchy routes; writes stay admin-only. */
+    @Test
+    void hierarchyReadsArePublic() {
+        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
+
+        assertThat(restTemplate.getForEntity("/categories/hierarchy", String.class).getStatusCode())
+                .isEqualTo(HttpStatus.OK);
+        assertThat(restTemplate.getForEntity("/categories/" + desserts + "/subcategories", String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(restTemplate.getForEntity("/categories/" + desserts + "/superior-categories", String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    /**
+     * "This category has nothing under it" and "there is no such category" are different answers,
+     * and an empty list for the second would hide a broken link on the client.
+     */
+    @Test
+    void hierarchyReadsAnswer404ForAnUnknownCategory() {
+        assertThat(restTemplate.getForEntity("/categories/no-such-id/subcategories", String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(restTemplate.getForEntity("/categories/no-such-id/superior-categories", String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    @Test
+    void rejectsASuperiorCategoryThatDoesNotExist() {
+        // 400 and not 404: /categories is perfectly reachable, it is the payload that is wrong.
+        ResponseEntity<String> response = restTemplate.postForEntity("/categories",
+                body("{\"name\":\"%s\",\"superiorCategoryId\":\"00000000-0000-0000-0000-000000000000\"}"
+                        .formatted(uniqueName("tartes")), adminToken), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains("superiorCategoryId");
+    }
+
+    @Test
+    void refusesToCloseACycleInTheHierarchy() {
+        // A cycle makes every walk below non-terminating - a hang, not an error.
+        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
+        String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
+
+        ResponseEntity<String> response = restTemplate.exchange("/categories/" + desserts,
+                HttpMethod.PUT,
+                body("{\"name\":\"desserts-%s\",\"superiorCategoryId\":\"%s\"}"
+                        .formatted(UUID.randomUUID().toString().substring(0, 8), tartes), adminToken),
+                String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void refusesToDeleteACategoryThatStillHasSubcategories() {
+        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
+        createCategoryAsAdmin(uniqueName("tartes"), desserts);
+
+        ResponseEntity<String> response = restTemplate.exchange("/categories/" + desserts,
+                HttpMethod.DELETE, body(null, adminToken), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).contains("subcategories");
+    }
+
+    /** An update is a full replacement, so dropping the field promotes the category to a root. */
+    @Test
+    void promotesASubcategoryToARootWhenTheSuperiorIsOmitted() {
+        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
+        String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
+
+        ResponseEntity<String> response = restTemplate.exchange("/categories/" + tartes, HttpMethod.PUT,
+                body("{\"name\":\"%s\"}".formatted(uniqueName("tartes")), adminToken), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains("\"categoryType\":\"MAIN\"");
+        assertThat(restTemplate.getForObject("/categories/" + desserts + "/subcategories", String.class))
+                .isEqualTo("[]");
+    }
+
     /**
      * The asymmetry the design calls out: a recipe cannot be written without the ingredients it
      * uses, so adding one is open to everybody - but renaming a shared row silently rewrites every
@@ -239,10 +366,17 @@ class ReferenceEndpointsIntegrationTest {
 
         try {
             // Typed without the accent, and still finds it - which is what the normalized column is for.
-            ResponseEntity<String> found = restTemplate.getForEntity("/ingredients?q=creme", String.class);
+            ResponseEntity<String> found = restTemplate.getForEntity(
+                    "/ingredients?namePrefix=creme", String.class);
 
             assertThat(found.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(found.getBody()).contains(id);
+
+            // A prefix, not a substring: a trailing wildcard can use the index on normalized_name
+            // and a leading one cannot. Also the half that proves the filter is applied at all -
+            // an unfiltered listing would contain the row either way.
+            assertThat(restTemplate.getForObject("/ingredients?namePrefix=eme", String.class))
+                    .doesNotContain(id);
         } finally {
             restTemplate.exchange("/ingredients/" + id, HttpMethod.DELETE, body(null, adminToken), String.class);
         }

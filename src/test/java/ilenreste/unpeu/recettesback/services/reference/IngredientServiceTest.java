@@ -3,12 +3,15 @@ package ilenreste.unpeu.recettesback.services.reference;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
 import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
+import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.reference.requests.IngredientRequest;
+import ilenreste.unpeu.recettesback.models.reference.responses.IngredientResponse;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -38,7 +41,7 @@ class IngredientServiceTest {
         recipesRepository = mock(RecipesRepository.class);
         mediaRepository = mock(MediaRepository.class);
         ingredientService = new IngredientService(ingredientsRepository, recipesRepository,
-                mediaRepository, new ReferenceNameNormalizer());
+                mediaRepository, new ReferenceNameNormalizer(), new ReferenceMapper());
     }
 
     @Test
@@ -48,10 +51,9 @@ class IngredientServiceTest {
         MediaEntity icon = new MediaEntity();
         when(mediaRepository.findById("media-1")).thenReturn(Optional.of(icon));
 
-        IngredientEntity created = ingredientService.createIngredient(
-                new IngredientRequest("Farine", "media-1"));
+        ingredientService.createIngredient(new IngredientRequest("Farine", "media-1"));
 
-        assertThat(created.getIcon()).isSameAs(icon);
+        assertThat(savedIngredient().getIcon()).isSameAs(icon);
     }
 
     @Test
@@ -73,8 +75,10 @@ class IngredientServiceTest {
         when(ingredientsRepository.findByNormalizedName(anyString())).thenReturn(Optional.empty());
         when(ingredientsRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        assertThat(ingredientService.createIngredient(new IngredientRequest("Sel", null)).getIcon()).isNull();
-        assertThat(ingredientService.createIngredient(new IngredientRequest("Poivre", "  ")).getIcon()).isNull();
+        assertThat(ingredientService.createIngredient(new IngredientRequest("Sel", null)).iconMediaId())
+                .isNull();
+        assertThat(ingredientService.createIngredient(new IngredientRequest("Poivre", "  ")).iconMediaId())
+                .isNull();
         verify(mediaRepository, never()).findById(anyString());
     }
 
@@ -89,11 +93,34 @@ class IngredientServiceTest {
         when(ingredientsRepository.findById("ing-1")).thenReturn(Optional.of(existing));
         when(ingredientsRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        IngredientEntity updated = ingredientService.updateIngredient("ing-1",
+        IngredientResponse updated = ingredientService.updateIngredient("ing-1",
                 new IngredientRequest("Farine T55", null));
 
-        assertThat(updated.getIcon()).isNull();
-        assertThat(updated.getName()).isEqualTo("Farine T55");
+        assertThat(updated.iconMediaId()).isNull();
+        assertThat(updated.name()).isEqualTo("Farine T55");
+    }
+
+    /** The entity handed to {@code save}, which is what actually reached the database. */
+    private IngredientEntity savedIngredient() {
+        ArgumentCaptor<IngredientEntity> saved = ArgumentCaptor.forClass(IngredientEntity.class);
+        verify(ingredientsRepository).save(saved.capture());
+        return saved.getValue();
+    }
+
+    @Test
+    void setsTheIconBeforeTheInsert_notByDirtyCheckingAfterwards() {
+        // The previous version saved the bare name first and mutated the row afterwards, relying on
+        // the flush to notice. It worked only because icon_media_id is nullable; the first NOT NULL
+        // column added this way would have failed on insert from code that reads as if it works.
+        when(ingredientsRepository.findByNormalizedName(anyString())).thenReturn(Optional.empty());
+        when(ingredientsRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        MediaEntity icon = new MediaEntity();
+        when(mediaRepository.findById("media-1")).thenReturn(Optional.of(icon));
+
+        ingredientService.createIngredient(new IngredientRequest("Farine", "media-1"));
+
+        // One save, carrying everything - not an insert followed by an update.
+        assertThat(savedIngredient().getIcon()).isSameAs(icon);
     }
 
     @Test

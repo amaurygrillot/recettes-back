@@ -50,9 +50,28 @@ class UpdateRecipeRequestValidationTest {
         factory.close();
     }
 
+    /** Every field absent: the shape a partial update that touches nothing takes. */
+    private static UpdateRecipeRequest nothing() {
+        return new UpdateRecipeRequest(Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty());
+    }
+
     private UpdateRecipeRequest withCategoryIds(Optional<List<String>> categoryIds) {
-        return new UpdateRecipeRequest(Optional.empty(), Optional.empty(), categoryIds,
-                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        return new UpdateRecipeRequest(Optional.empty(), Optional.empty(), Optional.empty(),
+                categoryIds, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    private UpdateRecipeRequest withIngredientGroups(
+            Optional<List<RecipeIngredientGroupRequest>> ingredientGroups) {
+        return new UpdateRecipeRequest(Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), ingredientGroups,
+                Optional.empty());
+    }
+
+    private UpdateRecipeRequest withSteps(Optional<List<RecipeStepRequest>> steps) {
+        return new UpdateRecipeRequest(Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), steps);
     }
 
     @Test
@@ -84,8 +103,8 @@ class UpdateRecipeRequestValidationTest {
         // Same Optional<List<String>> type, deliberately different rule. The annotation is the only
         // thing expressing the difference, which is why both halves are asserted.
         UpdateRecipeRequest clearingTags = new UpdateRecipeRequest(Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.of(List.of()), Optional.empty(), Optional.empty(),
-                Optional.empty());
+                Optional.empty(), Optional.empty(), Optional.of(List.of()), Optional.empty(),
+                Optional.empty(), Optional.empty());
 
         assertThat(validator.validate(clearingTags)).isEmpty();
     }
@@ -93,7 +112,8 @@ class UpdateRecipeRequestValidationTest {
     @Test
     void aBlankTitleIsRejected_butAnOmittedOneIsNot() {
         UpdateRecipeRequest blank = new UpdateRecipeRequest(Optional.of("   "), Optional.empty(),
-                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty());
 
         assertThat(validator.validate(blank)).hasSize(1);
         assertThat(validator.validate(withCategoryIds(Optional.empty()))).isEmpty();
@@ -106,9 +126,8 @@ class UpdateRecipeRequestValidationTest {
      */
     @Test
     void validationCascadesIntoNestedStepRecords() {
-        UpdateRecipeRequest blankInstruction = new UpdateRecipeRequest(Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
-                Optional.of(List.of(new RecipeStepRequest("  ", List.of()))));
+        UpdateRecipeRequest blankInstruction =
+                withSteps(Optional.of(List.of(new RecipeStepRequest("  ", List.of()))));
 
         Set<ConstraintViolation<UpdateRecipeRequest>> violations = validator.validate(blankInstruction);
 
@@ -119,22 +138,47 @@ class UpdateRecipeRequestValidationTest {
 
     @Test
     void validationCascadesIntoIngredientLines() {
-        UpdateRecipeRequest badLine = new UpdateRecipeRequest(Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.empty(), Optional.empty(),
+        UpdateRecipeRequest badLine = withIngredientGroups(
                 Optional.of(List.of(new RecipeIngredientGroupRequest(null,
-                        List.of(new RecipeIngredientRequest("", null, null, null))))),
-                Optional.empty());
+                        List.of(new RecipeIngredientRequest("", null, null, null))))));
 
         assertThat(validator.validate(badLine)).hasSize(1);
     }
 
     @Test
     void anEmptyIngredientGroupIsRejected_becauseAHeadingWithNothingUnderItIsNeverIntended() {
-        UpdateRecipeRequest emptyGroup = new UpdateRecipeRequest(Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.empty(), Optional.empty(),
-                Optional.of(List.of(new RecipeIngredientGroupRequest("Pour la pate", List.of()))),
-                Optional.empty());
+        UpdateRecipeRequest emptyGroup = withIngredientGroups(
+                Optional.of(List.of(new RecipeIngredientGroupRequest("Pour la pate", List.of()))));
 
         assertThat(validator.validate(emptyGroup)).hasSize(1);
+    }
+
+    /**
+     * The same rule as categoryIds, for the same reason: an edit must not be able to turn a
+     * working recipe into one nobody can cook, which a create is already forbidden from producing.
+     * Absent still means "leave them alone".
+     */
+    @Test
+    void anEmptyIngredientGroupsOrStepsListIsRejected_butAnOmittedOneIsNot() {
+        assertThat(validator.validate(withIngredientGroups(Optional.of(List.of())))).hasSize(1);
+        assertThat(validator.validate(withSteps(Optional.of(List.of())))).hasSize(1);
+
+        assertThat(validator.validate(withIngredientGroups(Optional.empty()))).isEmpty();
+        assertThat(validator.validate(withSteps(Optional.empty()))).isEmpty();
+    }
+
+    /**
+     * The introduction is the one field where the empty case is the useful one. Jackson maps both
+     * a missing property and an explicit null to Optional.empty(), so "delete this section" has to
+     * be spelled as the object with blank text - which means no constraint may reject it.
+     */
+    @Test
+    void aBlankIntroductionIsValid_becauseThatIsHowTheSectionIsRemoved() {
+        UpdateRecipeRequest removing = new UpdateRecipeRequest(Optional.empty(),
+                Optional.of(new RecipeIntroductionRequest("")), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+
+        assertThat(validator.validate(removing)).isEmpty();
+        assertThat(validator.validate(nothing())).isEmpty();
     }
 }

@@ -2,6 +2,7 @@ package ilenreste.unpeu.recettesback.controllers.recipes;
 
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.CategoriesRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.CategoryRelationsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.TagsRepository;
 import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
@@ -48,6 +49,8 @@ class RecipesIntegrationTest {
     @Autowired
     private CategoriesRepository categoriesRepository;
     @Autowired
+    private CategoryRelationsRepository categoryRelationsRepository;
+    @Autowired
     private TagsRepository tagsRepository;
     @Autowired
     private IngredientsRepository ingredientsRepository;
@@ -64,8 +67,10 @@ class RecipesIntegrationTest {
     private String adminToken;
 
     private String categoryId;
+    private String categoryName;
     private String secondCategoryId;
     private String tagId;
+    private String tagName;
     private String ingredientId;
     private final List<String> createdRecipeIds = new ArrayList<>();
 
@@ -81,11 +86,13 @@ class RecipesIntegrationTest {
         otherToken = otherUser.bearerToken(restTemplate);
         adminToken = admin.bearerToken(restTemplate);
 
-        categoryId = idOf(post("/categories", "{\"name\":\"%s\"}".formatted(unique("dessert")), adminToken,
+        categoryName = unique("dessert");
+        categoryId = idOf(post("/categories", "{\"name\":\"%s\"}".formatted(categoryName), adminToken,
                 HttpStatus.CREATED));
         secondCategoryId = idOf(post("/categories", "{\"name\":\"%s\"}".formatted(unique("gouter")), adminToken,
                 HttpStatus.CREATED));
-        tagId = idOf(post("/tags", "{\"name\":\"%s\"}".formatted(unique("rapide")), adminToken,
+        tagName = unique("rapide");
+        tagId = idOf(post("/tags", "{\"name\":\"%s\"}".formatted(tagName), adminToken,
                 HttpStatus.CREATED));
         ingredientId = idOf(post("/ingredients", "{\"name\":\"%s\"}".formatted(unique("farine")), authorToken,
                 HttpStatus.CREATED));
@@ -97,11 +104,19 @@ class RecipesIntegrationTest {
                 .ifPresent(recipesRepository::delete));
         ingredientsRepository.deleteById(ingredientId);
         tagsRepository.deleteById(tagId);
-        categoriesRepository.deleteById(categoryId);
-        categoriesRepository.deleteById(secondCategoryId);
+        // The relation row has to go first: every category has one, and a main category's points
+        // at itself, so the foreign key outlives the category unless it is cleared by hand. The
+        // endpoint does this in CategoryService.beforeDelete; a repository delete does not.
+        deleteCategory(categoryId);
+        deleteCategory(secondCategoryId);
         admin.close();
         otherUser.close();
         author.close();
+    }
+
+    private void deleteCategory(String id) {
+        categoryRelationsRepository.deleteById(id);
+        categoriesRepository.deleteById(id);
     }
 
     private String unique(String prefix) {
@@ -189,9 +204,12 @@ class RecipesIntegrationTest {
                 {
                   "title": "Tarte",
                   "categoryIds": ["%s"],
+                  "ingredientGroups": [
+                    {"ingredients": [{"ingredientId": "%s", "quantity": 200.5}]}
+                  ],
                   "steps": [%s]
                 }
-                """.formatted(categoryId, steps), authorToken);
+                """.formatted(categoryId, ingredientId, steps), authorToken);
 
         String read = restTemplate.getForObject("/recipes/" + id, String.class);
 
@@ -251,9 +269,18 @@ class RecipesIntegrationTest {
     void rejectsABodyReferencingSomethingThatDoesNotExist() {
         // 400 and not 404: /recipes is perfectly reachable, it is the payload that is wrong. The
         // detail names the field and the missing id so the client can act on it.
+        // The body is otherwise complete, so this reaches reference resolution rather than being
+        // turned away by bean validation first - which would prove nothing about the 400 under test.
         ResponseEntity<String> response = restTemplate.postForEntity("/recipes", body("""
-                {"title": "Tarte", "categoryIds": ["00000000-0000-0000-0000-000000000000"]}
-                """, authorToken), String.class);
+                {
+                  "title": "Tarte",
+                  "categoryIds": ["00000000-0000-0000-0000-000000000000"],
+                  "ingredientGroups": [
+                    {"ingredients": [{"ingredientId": "%s", "quantity": 200.5}]}
+                  ],
+                  "steps": [{"instruction": "Melanger"}]
+                }
+                """.formatted(ingredientId), authorToken), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody()).contains("categoryIds");
@@ -319,8 +346,15 @@ class RecipesIntegrationTest {
     @Test
     void filtersTheListingAndCountsEachRecipeOnce() {
         String id = createRecipe("""
-                {"title": "%s", "categoryIds": ["%s", "%s"]}
-                """.formatted(unique("Tarte"), categoryId, secondCategoryId), authorToken);
+                {
+                  "title": "%s",
+                  "categoryIds": ["%s", "%s"],
+                  "ingredientGroups": [
+                    {"ingredients": [{"ingredientId": "%s", "quantity": 200.5}]}
+                  ],
+                  "steps": [{"instruction": "Melanger"}]
+                }
+                """.formatted(unique("Tarte"), categoryId, secondCategoryId, ingredientId), authorToken);
 
         ResponseEntity<String> response = restTemplate.getForEntity(
                 "/recipes?categoryId=" + categoryId, String.class);
@@ -331,17 +365,128 @@ class RecipesIntegrationTest {
         assertThat(countOccurrences(response.getBody(), id)).isEqualTo(1);
     }
 
+    /**
+     * Also the proof that {@code RecipeSearchRequest} binds at all.
+     * <p>
+     * It is a record with no no-arg constructor, bound from the query string by name rather than
+     * through {@code @RequestParam}. If that binding silently produced an all-null request, every
+     * filter would quietly become "no filter" - and a test that only asserts the wanted recipe is
+     * <em>present</em> would still pass, because an unfiltered listing contains it too. Hence the
+     * negative assertions: they are the half that can actually fail.
+     */
     @Test
     void filtersByAuthorAndByTitleFragment() {
         String title = unique("Tarte aux poires");
         String id = createRecipe(minimalRecipeJson(title), authorToken);
+        String otherId = createRecipe(minimalRecipeJson(unique("Soupe a l'oignon")), authorToken);
 
         assertThat(restTemplate.getForObject("/recipes?authorId=" + author.id(), String.class))
                 .contains(id);
-        assertThat(restTemplate.getForObject("/recipes?q=" + title.toUpperCase(), String.class))
-                .contains(id);
+        assertThat(restTemplate.getForObject("/recipes?title=" + title.toUpperCase(), String.class))
+                .contains(id)
+                .doesNotContain(otherId);
         assertThat(restTemplate.getForObject("/recipes?authorId=" + otherUser.id(), String.class))
                 .doesNotContain(id);
+    }
+
+    /**
+     * The filters a user can actually type. Only the id filters existed before, which assumed the
+     * caller already knew a UUID for the author, category or tag they wanted - true of a dropdown,
+     * false of a search box.
+     */
+    @Test
+    void filtersByAuthorCategoryAndTagName_notJustById() {
+        String id = createRecipe(minimalRecipeJson(unique("Tarte aux prunes")), authorToken);
+
+        assertThat(restTemplate.getForObject("/recipes?authorName=" + author.username(), String.class))
+                .contains(id);
+        assertThat(restTemplate.getForObject("/recipes?categoryName=" + categoryName, String.class))
+                .contains(id);
+        assertThat(restTemplate.getForObject("/recipes?tagName=" + tagName, String.class))
+                .contains(id);
+        assertThat(restTemplate.getForObject("/recipes?categoryName=" + unique("inexistante"), String.class))
+                .doesNotContain(id);
+    }
+
+    /**
+     * Ordering is chosen from an enum, not from a free-text {@code sort} property appended to a
+     * hand-written JPQL projection. An unknown value has to be a 400 naming what is accepted, not
+     * the 500 a SemanticException would produce from a typo in a query string.
+     */
+    @Test
+    void ordersByAWhitelistedFieldAndRejectsAnythingElse() {
+        String prefix = unique("zzz");
+        String first = createRecipe(minimalRecipeJson(prefix + "-a"), authorToken);
+        String second = createRecipe(minimalRecipeJson(prefix + "-b"), authorToken);
+
+        String ascending = restTemplate.getForObject(
+                "/recipes?title=" + prefix + "&sortBy=TITLE&direction=ASC", String.class);
+        assertThat(ascending.indexOf(first)).isLessThan(ascending.indexOf(second));
+
+        String descending = restTemplate.getForObject(
+                "/recipes?title=" + prefix + "&sortBy=TITLE&direction=DESC", String.class);
+        assertThat(descending.indexOf(second)).isLessThan(descending.indexOf(first));
+
+        assertThat(restTemplate.getForEntity("/recipes?sortBy=bogus", String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    /** The home page: no criteria at all is a valid request, not a 400. */
+    @Test
+    void listsRecipesWithNoCriteriaAtAll() {
+        String id = createRecipe(minimalRecipeJson(unique("Tarte sans filtre")), authorToken);
+
+        ResponseEntity<String> response = restTemplate.getForEntity("/recipes", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains(id);
+    }
+
+    /**
+     * The introduction round-trips as its own section, and blank text removes it - the only
+     * spelling that can, since Jackson cannot tell an explicit null from a missing property.
+     */
+    @Test
+    void carriesAnIntroductionThroughCreateReadAndRemoval() {
+        String id = createRecipe("""
+                {
+                  "title": "%s",
+                  "introduction": {"text": "<p>Une tarte de famille.</p>"},
+                  "categoryIds": ["%s"],
+                  "ingredientGroups": [
+                    {"ingredients": [{"ingredientId": "%s", "quantity": 200.5}]}
+                  ],
+                  "steps": [{"instruction": "Melanger"}]
+                }
+                """.formatted(unique("Tarte"), categoryId, ingredientId), authorToken);
+
+        assertThat(restTemplate.getForObject("/recipes/" + id, String.class))
+                .contains("Une tarte de famille.");
+
+        // Omitting the field leaves it alone.
+        put("/recipes/" + id, "{\"title\": \"Tarte revisitee\"}", authorToken);
+        assertThat(restTemplate.getForObject("/recipes/" + id, String.class))
+                .contains("Une tarte de famille.");
+
+        put("/recipes/" + id, "{\"introduction\": {\"text\": \"\"}}", authorToken);
+        assertThat(restTemplate.getForObject("/recipes/" + id, String.class))
+                .doesNotContain("Une tarte de famille.");
+    }
+
+    /** A recipe nobody can cook is not a half-finished recipe; it is a broken one. */
+    @Test
+    void rejectsARecipeWithNoStepsOrNoIngredients() {
+        assertThat(restTemplate.postForEntity("/recipes", body("""
+                {"title": "Tarte", "categoryIds": ["%s"], "ingredientGroups": [],
+                 "steps": [{"instruction": "Melanger"}]}
+                """.formatted(categoryId), authorToken), String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+
+        assertThat(restTemplate.postForEntity("/recipes", body("""
+                {"title": "Tarte", "categoryIds": ["%s"],
+                 "ingredientGroups": [{"ingredients": [{"ingredientId": "%s"}]}], "steps": []}
+                """.formatted(categoryId, ingredientId), authorToken), String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     @Test

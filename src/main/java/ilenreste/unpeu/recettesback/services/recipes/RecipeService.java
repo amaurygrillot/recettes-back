@@ -5,6 +5,7 @@ import ilenreste.unpeu.recettesback.entities.recipes.RecipeCoverPictureEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientGroupEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeIntroductionEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeStepEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeStepPictureEntity;
 import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
@@ -17,7 +18,9 @@ import ilenreste.unpeu.recettesback.mappers.recipes.RecipeMapper;
 import ilenreste.unpeu.recettesback.models.recipes.requests.CreateRecipeRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeIngredientGroupRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeIngredientRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeIntroductionRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.RecipePictureRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSearchRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeStepRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.UpdateRecipeRequest;
 import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeResponse;
@@ -25,13 +28,16 @@ import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeSummaryRespon
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.CategoriesRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.CategoryRelationsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.TagsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
+import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -49,26 +55,31 @@ public class RecipeService {
 
     private final RecipesRepository recipesRepository;
     private final CategoriesRepository categoriesRepository;
+    private final CategoryRelationsRepository categoryRelationsRepository;
     private final TagsRepository tagsRepository;
     private final IngredientsRepository ingredientsRepository;
     private final UnitsRepository unitsRepository;
     private final MediaRepository mediaRepository;
     private final ReferenceResolver referenceResolver;
+    private final ReferenceNameNormalizer normalizer;
     private final CurrentUserService currentUserService;
     private final RecipeMapper mapper;
 
     public RecipeService(RecipesRepository recipesRepository, CategoriesRepository categoriesRepository,
+                         CategoryRelationsRepository categoryRelationsRepository,
                          TagsRepository tagsRepository, IngredientsRepository ingredientsRepository,
                          UnitsRepository unitsRepository, MediaRepository mediaRepository,
-                         ReferenceResolver referenceResolver, CurrentUserService currentUserService,
-                         RecipeMapper mapper) {
+                         ReferenceResolver referenceResolver, ReferenceNameNormalizer normalizer,
+                         CurrentUserService currentUserService, RecipeMapper mapper) {
         this.recipesRepository = recipesRepository;
         this.categoriesRepository = categoriesRepository;
+        this.categoryRelationsRepository = categoryRelationsRepository;
         this.tagsRepository = tagsRepository;
         this.ingredientsRepository = ingredientsRepository;
         this.unitsRepository = unitsRepository;
         this.mediaRepository = mediaRepository;
         this.referenceResolver = referenceResolver;
+        this.normalizer = normalizer;
         this.currentUserService = currentUserService;
         this.mapper = mapper;
     }
@@ -82,40 +93,74 @@ public class RecipeService {
      * discards the sort the caller asked for — and the page still has the right
      * rows and the right count, so nothing looks wrong until someone notices the
      * "newest first" list is not.
+     * <p>
+     * The sort is taken from {@link RecipeSearchRequest#sort()} and applied to a
+     * fresh {@link PageRequest} rather than being carried in by the incoming
+     * {@code Pageable}. That is what keeps a query string from naming an arbitrary
+     * entity property: the {@code Pageable} contributes the page number and size,
+     * the request contributes an ordering chosen from a closed enum. See
+     * {@code RecipeSortField}.
+     * <p>
+     * The two name filters are normalized the same way the reference tables
+     * normalize what they store, which is what makes {@code ?categoryName=entrees}
+     * find {@code Entrées}. Doing it here rather than in the query is what lets the
+     * comparison stay a plain {@code LIKE} against an ordinary column.
      */
     @Transactional(readOnly = true)
-    public Page<RecipeSummaryResponse> search(String authorId, String categoryId, String tagId,
-                                              String q, Pageable pageable) {
+    public Page<RecipeSummaryResponse> search(RecipeSearchRequest request, Pageable pageable) {
+        Pageable sorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), request.sort());
         Page<String> idPage = recipesRepository.searchIds(
-                blankToNull(authorId), blankToNull(categoryId), blankToNull(tagId), blankToNull(q), pageable);
+                blankToNull(request.title()),
+                blankToNull(request.authorId()),
+                blankToNull(request.authorName()),
+                blankToNull(request.categoryId()),
+                normalizedOrNull(request.categoryName()),
+                blankToNull(request.tagId()),
+                normalizedOrNull(request.tagName()),
+                sorted);
         if (idPage.isEmpty()) {
-            return Page.empty(pageable);
+            return Page.empty(sorted);
         }
 
         Map<String, RecipeEntity> byId = recipesRepository.findAllForSummary(idPage.getContent()).stream()
                 .collect(java.util.stream.Collectors.toMap(RecipeEntity::getId, Function.identity()));
+        Map<String, String> categorySuperiorIds = categoryRelationsRepository.superiorIdsByCategoryId();
 
         List<RecipeSummaryResponse> ordered = idPage.getContent().stream()
                 .map(byId::get)
                 .filter(Objects::nonNull)
-                .map(mapper::toSummary)
+                .map(recipe -> mapper.toSummary(recipe, categorySuperiorIds))
                 .toList();
 
-        return new PageImpl<>(ordered, pageable, idPage.getTotalElements());
+        return new PageImpl<>(ordered, sorted, idPage.getTotalElements());
     }
 
     @Transactional(readOnly = true)
     public RecipeResponse findById(String id) {
-        return mapper.toResponse(loadRecipe(id));
+        return toResponse(loadRecipe(id));
     }
 
+    /**
+     * The author is never taken from the body — it is stamped by JPA auditing from
+     * the security context, so a recipe cannot be posted under someone else's name.
+     * <p>
+     * That stamping is checked here rather than left to the database. Auditing
+     * resolves an empty author for a request carrying no {@code JwtAuthenticationToken},
+     * and {@code recipes.author_id} is {@code NOT NULL}, so the insert would fail as a
+     * {@code DataIntegrityViolationException} reported as an opaque 500 — for what is
+     * in truth "you are not signed in". The URL rules already require
+     * {@code ROLE_USER} on {@code POST /recipes}, so this only fires if that rule is
+     * ever relaxed, which is precisely when a clear failure matters.
+     */
     @Transactional
     public RecipeResponse create(CreateRecipeRequest request) {
+        currentUserService.currentUserId().orElseThrow(() -> new ForbiddenOperationException(
+                "You must be signed in to create a recipe."));
+
         RecipeEntity recipe = new RecipeEntity();
         recipe.setTitle(request.title().trim());
         recipe.setRecommendations(request.recommendations());
-        // The author is not taken from the body - it is stamped by JPA auditing from the security
-        // context, so a recipe cannot be posted under someone else's name.
+        replaceIntroduction(recipe, request.introduction());
 
         recipe.getCategories().addAll(resolveCategories(request.categoryIds()));
         recipe.getTags().addAll(resolveTags(request.tagIds()));
@@ -124,8 +169,9 @@ public class RecipeService {
         replaceSteps(recipe, request.steps());
 
         RecipeEntity saved = recipesRepository.save(recipe);
-        log.info("Created recipe {}", saved.getId());
-        return mapper.toResponse(saved);
+        log.info("Created recipe {} with {} step(s) and {} ingredient group(s)",
+                saved.getId(), saved.getSteps().size(), saved.getIngredientGroups().size());
+        return toResponse(saved);
     }
 
     /**
@@ -138,6 +184,7 @@ public class RecipeService {
         requireAuthorOrAdmin(recipe.getAuthor().getId(), id);
 
         request.title().ifPresent(title -> recipe.setTitle(title.trim()));
+        request.introduction().ifPresent(introduction -> replaceIntroduction(recipe, introduction));
         request.recommendations().ifPresent(recipe::setRecommendations);
         request.categoryIds().ifPresent(ids -> replaceAll(recipe.getCategories(), resolveCategories(ids)));
         request.tagIds().ifPresent(ids -> replaceAll(recipe.getTags(), resolveTags(ids)));
@@ -147,7 +194,7 @@ public class RecipeService {
 
         RecipeEntity saved = recipesRepository.save(recipe);
         log.info("Updated recipe {}", id);
-        return mapper.toResponse(saved);
+        return toResponse(saved);
     }
 
     /**
@@ -309,8 +356,53 @@ public class RecipeService {
                 mediaRepository::findAllById, MediaEntity::getId);
     }
 
+    /**
+     * Sets, replaces or removes the introduction block.
+     * <p>
+     * Blank text removes it, which is the only way a client can — see
+     * {@link RecipeIntroductionRequest} for why the API needs that spelling.
+     * Setting the association to null is what {@code orphanRemoval} turns into a
+     * DELETE; clearing the text of the existing row instead would leave an empty
+     * block rendered at the top of the recipe.
+     */
+    private void replaceIntroduction(RecipeEntity recipe, RecipeIntroductionRequest request) {
+        if (request == null || request.isBlank()) {
+            if (recipe.getIntroduction() != null) {
+                log.debug("Removing the introduction of recipe {}", recipe.getId());
+            }
+            recipe.setIntroduction(null);
+            return;
+        }
+        RecipeIntroductionEntity introduction = recipe.getIntroduction();
+        if (introduction == null) {
+            introduction = new RecipeIntroductionEntity();
+            introduction.setRecipe(recipe);
+            recipe.setIntroduction(introduction);
+        }
+        introduction.setText(request.text());
+    }
+
+    /**
+     * One extra two-column query per recipe read, so that a category can report
+     * its superior. See {@code RecipeMapper} for why the edges are not read once
+     * per category instead.
+     */
+    private RecipeResponse toResponse(RecipeEntity recipe) {
+        return mapper.toResponse(recipe, categoryRelationsRepository.superiorIdsByCategoryId());
+    }
+
     /** A blank query parameter means "no filter", not "match the empty string". */
     private String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
+    }
+
+    /**
+     * Normalizes a name filter the same way the reference tables normalize what
+     * they store, so {@code entrees} matches {@code Entrées}. Null for a blank
+     * filter, which means "no filter".
+     */
+    private String normalizedOrNull(String value) {
+        String trimmed = blankToNull(value);
+        return trimmed == null ? null : normalizer.normalize(trimmed);
     }
 }

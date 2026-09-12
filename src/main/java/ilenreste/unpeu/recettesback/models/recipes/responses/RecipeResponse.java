@@ -15,10 +15,17 @@ import java.util.List;
  * or re-derives. {@code categories} and {@code tags} have no position and are
  * sorted by name instead, so the output is at least stable between two identical
  * requests.
+ * <p>
+ * {@code introduction} is null when the author wrote none, and {@code recommendations}
+ * is a plain string: the two are different things rendered in different places — the
+ * introduction opens the recipe, the recommendations sit beside it — and only the
+ * introduction is an addressable section with an id. See
+ * {@link RecipeIntroductionResponse}.
  */
 public record RecipeResponse(
         String id,
         String title,
+        RecipeIntroductionResponse introduction,
         String recommendations,
         RecipeAuthorResponse author,
         List<CategoryResponse> categories,

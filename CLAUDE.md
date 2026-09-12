@@ -31,6 +31,21 @@ In particular, avoid collapsing every error into 400/500 — pick the code that 
 When adding or touching an endpoint, check that its error branches map to the specific status that matches what actually
 happened, rather than reusing a generic catch-all.
 
+### Query parameters
+
+Name a parameter for what goes in it. `q` is not a name — it says nothing about what is matched or how, and on this API
+the answer was not guessable either way (`/recipes?q=` matched the title only, `/ingredients?q=` was a prefix against
+the normalized name). They are `title` and `namePrefix` now.
+
+**Never let a query string choose a sort property against a hand-written `@Query`.** Spring Data's `Pageable` binding
+appends whatever property it is given, so `?sort=bogus` throws a `SemanticException` — a 500 on a public endpoint from
+a typo — and `?sort=some.private.column` orders by something no response exposes. Bind an enum instead, as
+`RecipeSortField` does; an unknown value is then a 400 and the sortable set has one place to live.
+
+Once an endpoint's criteria outgrow three or four `@RequestParam`s, bind them into a request **record** instead.
+Spring binds a non-annotated object from the query string by name, so the wire format is unchanged, and the criteria
+gain a place to be named, documented and validated together — see `RecipeSearchRequest`.
+
 ### Documentation
 
 There is no external wiki (no Confluence) for this project — all product and architectural knowledge has to live in the
@@ -119,6 +134,17 @@ Layered structure under `ilenreste.unpeu.recettesback`, with each layer **subdiv
 - `models` — DTOs (`requests`/`responses` sub-packages where a domain has both).
 - `mappers` — entity ↔ DTO translation.
 
+**A service returns DTOs, never entities, and a controller never holds a mapper.** An entity handed upwards is a handle
+on the whole object graph, and `spring.jpa.open-in-view=false` means the transaction is already closed by the time the
+controller runs, so touching any lazy association there is a `LazyInitializationException` — a 500 — with nothing in
+the controller to warn you which associations those are. Map inside the transaction that loaded the row.
+
+**Every service method returns a usable value or throws.** No `null` to mean failure, no boolean for the caller to
+test, every write transactional so a failure leaves nothing half-written. That contract is what lets controllers hold
+no `if (result == null)` branches without being optimistic about it; it is stated in full, with the reasoning and the
+four places the codebase did not honour it, in
+[docs/service-controller-contract.md](docs/service-controller-contract.md).
+
 ### Domain sub-packages
 
 `controllers`, `services`, `repositories`, `entities`, `models` and `mappers` each split into **the same domain
@@ -134,9 +160,25 @@ their only caller.
 > domains, while every other layer is grouped. The trade-off inverted — see
 > [docs/recipes-domain-model.md](docs/recipes-domain-model.md#package-layout).
 
-`configuration`, `filters` and `exceptions` stay **flat**. They are cross-cutting — `SecurityFilterConfig` is not a
-recipes class or a users class, and `ResourceNotFoundException` is thrown by every domain. Subdividing them would
-produce single-class packages that answer no question.
+`configuration`, `properties`, `bootstrap`, `filters` and `exceptions` stay **flat**. They are cross-cutting —
+`SecurityFilterConfig` is not a recipes class or a users class, and `ResourceNotFoundException` is thrown by every
+domain. Subdividing *them* would produce single-class packages that answer no question.
+
+Each of those five holds one kind of thing, and `configuration` is the one that attracts strays. The test is **does
+this class declare a bean or wire something?** If not, it is not configuration:
+
+- `configuration` — `@Configuration` classes and nothing else: `SecurityFilterConfig`, `SecurityBeansConfig`,
+  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`.
+- `properties` — `@ConfigurationProperties` records. Bound data, no logic, no beans; picked up by the
+  `@ConfigurationPropertiesScan` on the application class. Not `models`, which is for records that cross the HTTP
+  boundary.
+- `bootstrap` — `ApplicationRunner`s and anything else whose job is "put the rows in place that the rest of the code
+  assumes exist". `ReferenceDataSeeder` lives here; it is not optional and not a spent migration — it is the only thing
+  that populates an empty database, which happens on every fresh clone, every CI run and every VPS rebuild.
+- `exceptions` — the exception types, **both** `@RestControllerAdvice` classes, and `ProblemDetailErrorResponder`.
+  Keeping the advices together is not tidiness: which one wins is decided by the `@Order` on each, and that
+  relationship is invisible when they sit in different packages.
+- `filters` — servlet filters.
 
 ### Authentication flow
 

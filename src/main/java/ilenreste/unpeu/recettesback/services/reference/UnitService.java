@@ -1,23 +1,38 @@
 package ilenreste.unpeu.recettesback.services.reference;
 
 import ilenreste.unpeu.recettesback.entities.reference.UnitEntity;
+import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.reference.requests.UnitRequest;
+import ilenreste.unpeu.recettesback.models.reference.responses.UnitResponse;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
+
+/**
+ * Units of measure. Admin-curated by analogy with categories and tags: a small
+ * closed set that shapes how every recipe reads, and not something a user
+ * legitimately needs to extend mid-recipe.
+ * <p>
+ * {@code abbreviation} is set through the customizer the base class runs
+ * <em>before</em> the insert, not by mutating the row afterwards and trusting
+ * dirty checking to notice. The difference only shows the day somebody marks the
+ * column {@code NOT NULL}, and then it shows as a constraint violation from code
+ * that reads as if it works.
+ */
 @Service
 public class UnitService extends AbstractReferenceService<UnitEntity> {
 
-    private final UnitsRepository unitsRepository;
     private final RecipesRepository recipesRepository;
+    private final ReferenceMapper mapper;
 
     public UnitService(UnitsRepository unitsRepository, RecipesRepository recipesRepository,
-                       ReferenceNameNormalizer normalizer) {
+                       ReferenceNameNormalizer normalizer, ReferenceMapper mapper) {
         super(unitsRepository, normalizer);
-        this.unitsRepository = unitsRepository;
         this.recipesRepository = recipesRepository;
+        this.mapper = mapper;
     }
 
     @Override
@@ -35,17 +50,25 @@ public class UnitService extends AbstractReferenceService<UnitEntity> {
         return recipesRepository.isUnitUsed(id);
     }
 
-    @Transactional
-    public UnitEntity createUnit(UnitRequest request) {
-        UnitEntity unit = create(request.name());
-        unit.setAbbreviation(request.abbreviation());
-        return unit;
+    @Transactional(readOnly = true)
+    public List<UnitResponse> list() {
+        return mapper.toUnitResponses(findAll());
+    }
+
+    @Transactional(readOnly = true)
+    public UnitResponse get(String id) {
+        return mapper.toResponse(findById(id));
     }
 
     @Transactional
-    public UnitEntity updateUnit(String id, UnitRequest request) {
-        UnitEntity unit = rename(findById(id), request.name());
-        unit.setAbbreviation(request.abbreviation());
-        return unitsRepository.save(unit);
+    public UnitResponse createUnit(UnitRequest request) {
+        return mapper.toResponse(
+                create(request.name(), unit -> unit.setAbbreviation(request.abbreviation())));
+    }
+
+    @Transactional
+    public UnitResponse updateUnit(String id, UnitRequest request) {
+        return mapper.toResponse(
+                update(id, request.name(), unit -> unit.setAbbreviation(request.abbreviation())));
     }
 }

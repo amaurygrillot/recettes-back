@@ -3,7 +3,9 @@ package ilenreste.unpeu.recettesback.services.reference;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
 import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
+import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.reference.requests.IngredientRequest;
+import ilenreste.unpeu.recettesback.models.reference.responses.IngredientResponse;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
@@ -22,6 +24,9 @@ import java.util.List;
  * {@code SecurityFilterConfig}): renaming a shared row silently rewrites every
  * recipe referencing it, and deleting one would orphan them. That is a different
  * kind of power from adding a missing row.
+ * <p>
+ * Returns response records rather than entities, for the reason spelled out on
+ * {@code CategoryService}.
  */
 @Service
 public class IngredientService extends AbstractReferenceService<IngredientEntity> {
@@ -29,13 +34,16 @@ public class IngredientService extends AbstractReferenceService<IngredientEntity
     private final IngredientsRepository ingredientsRepository;
     private final RecipesRepository recipesRepository;
     private final MediaRepository mediaRepository;
+    private final ReferenceMapper mapper;
 
     public IngredientService(IngredientsRepository ingredientsRepository, RecipesRepository recipesRepository,
-                             MediaRepository mediaRepository, ReferenceNameNormalizer normalizer) {
+                             MediaRepository mediaRepository, ReferenceNameNormalizer normalizer,
+                             ReferenceMapper mapper) {
         super(ingredientsRepository, normalizer);
         this.ingredientsRepository = ingredientsRepository;
         this.recipesRepository = recipesRepository;
         this.mediaRepository = mediaRepository;
+        this.mapper = mapper;
     }
 
     @Override
@@ -54,34 +62,40 @@ public class IngredientService extends AbstractReferenceService<IngredientEntity
     }
 
     /**
-     * Prefix search for the recipe editor's autocomplete, or everything when
-     * {@code q} is absent.
+     * Prefix search for the recipe editor's autocomplete, or everything when no
+     * prefix is given.
      * <p>
      * The search runs against {@code normalized_name}, which is what makes typing
      * {@code oeuf} find {@code Œuf}. Results are name-sorted for a stable list.
+     *
+     * @param namePrefix what the user has typed so far, or null/blank for no filter
      */
-    public Page<IngredientEntity> search(String q, Pageable pageable) {
-        if (q == null || q.isBlank()) {
-            return ingredientsRepository.findAll(pageable);
-        }
-        return ingredientsRepository.findByNormalizedNameStartingWithOrderByName(
-                normalizer.normalize(q), pageable);
+    @Transactional(readOnly = true)
+    public Page<IngredientResponse> search(String namePrefix, Pageable pageable) {
+        Page<IngredientEntity> page = namePrefix == null || namePrefix.isBlank()
+                ? ingredientsRepository.findAll(pageable)
+                : ingredientsRepository.findByNormalizedNameStartingWithOrderByName(
+                        normalizer.normalize(namePrefix), pageable);
+        return page.map(mapper::toResponse);
+    }
+
+    @Transactional(readOnly = true)
+    public IngredientResponse get(String id) {
+        return mapper.toResponse(findById(id));
     }
 
     @Transactional
-    public IngredientEntity createIngredient(IngredientRequest request) {
-        IngredientEntity ingredient = create(request.name());
-        ingredient.setIcon(resolveIcon(request.iconMediaId()));
-        return ingredient;
+    public IngredientResponse createIngredient(IngredientRequest request) {
+        return mapper.toResponse(create(request.name(),
+                ingredient -> ingredient.setIcon(resolveIcon(request.iconMediaId()))));
     }
 
     @Transactional
-    public IngredientEntity updateIngredient(String id, IngredientRequest request) {
-        IngredientEntity ingredient = rename(findById(id), request.name());
+    public IngredientResponse updateIngredient(String id, IngredientRequest request) {
         // A null id clears the icon: this is a full update, not a patch, so an absent icon means
         // "no icon" rather than "leave it alone".
-        ingredient.setIcon(resolveIcon(request.iconMediaId()));
-        return ingredientsRepository.save(ingredient);
+        return mapper.toResponse(update(id, request.name(),
+                ingredient -> ingredient.setIcon(resolveIcon(request.iconMediaId()))));
     }
 
     /**

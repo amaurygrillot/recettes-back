@@ -1,6 +1,10 @@
 ### Recipes
 ### Covers: GET /recipes, GET /recipes/{id}, POST /recipes, PUT /recipes/{id}, DELETE /recipes/{id}
 ###
+### GET /recipes takes its criteria as a request object bound from the query string: title,
+### authorId, authorName, categoryId, categoryName, tagId, tagName, sortBy, direction - plus the
+### usual page and size. Every one is optional, including all of them at once.
+###
 ### Reads are public. Writing needs a login; editing or deleting needs to be the AUTHOR or an
 ### ADMIN - a rule that depends on a row in the database, so no URL matcher expresses it and
 ### RecipeService performs it after loading the recipe.
@@ -108,12 +112,18 @@ Content-Type: application/json
 ### JPA auditing. Accepting one here would let anyone post under someone else's name.
 ### Note also that no element carries a "position": the ORDER OF EACH ARRAY is the contract, and
 ### the service renumbers 0..n-1 from it.
+### "introduction" is the block rendered above everything else. It is optional and has an id of
+### its own, which is what makes it a SECTION rather than another field on the recipe - contrast
+### "recommendations" below, a plain string rendered beside the recipe.
+### ingredientGroups and steps must each hold at least one entry: a recipe with neither is not an
+### unfinished recipe, it is one nobody can cook.
 POST {{baseUrl}}/recipes
 Authorization: Bearer {{authorToken}}
 Content-Type: application/json
 
 {
   "title": "Tarte aux pommes",
+  "introduction": {"text": "<p>La tarte de ma grand-mère, en plus simple.</p>"},
   "recommendations": "Se déguste tiède, avec une boule de glace vanille.",
   "categoryIds": ["{{categoryId}}"],
   "tagIds": [],
@@ -148,6 +158,10 @@ Content-Type: application/json
         const steps = response.body.steps.map(s => s.instruction);
         client.assert(steps[0].startsWith("Préchauffer") && steps[4].startsWith("Enfourner"),
             "Step order was not preserved: " + JSON.stringify(steps));
+        client.assert(response.body.introduction.text.includes("grand-mère"),
+            "Expected the introduction to come back as its own section");
+        client.assert(response.body.introduction.id !== undefined,
+            "The introduction is addressable and carries an id");
     });
 %}
 
@@ -197,11 +211,59 @@ GET {{baseUrl}}/recipes?categoryId={{categoryId}}
 %}
 
 ### 9. Search by title fragment, case-insensitively -> 200 OK
-GET {{baseUrl}}/recipes?q=POMMES
+### The parameter is "title", not "q". "q" said nothing about what it searched, and the answer
+### was not obvious: it never matched an author or a category, only the title.
+GET {{baseUrl}}/recipes?title=POMMES
 
 > {%
     client.test("Finds it regardless of case", function () {
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9b. Search by the names a user actually knows -> 200 OK
+### Nobody types a UUID into a search box. The id filters are for a UI that just showed the user
+### a list to pick from; these are for a user typing. Category and tag names are matched against
+### normalized_name, so an unaccented lower-case term finds the accented stored spelling.
+GET {{baseUrl}}/recipes?categoryName=dessert&authorName={{authorUsername}}
+
+> {%
+    client.test("Finds the recipe by names rather than ids", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9c. An unfiltered listing -> 200 OK
+### Every criterion is optional and so is all of them: this is the home page, not a 400.
+GET {{baseUrl}}/recipes
+
+> {%
+    client.test("Returns the newest recipes", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9d. Sort explicitly -> 200 OK
+### sortBy is a closed enum (CREATED_AT, UPDATED_AT, TITLE) and direction is independent of it,
+### so "oldest first" and "reverse alphabetical" are both already expressible. The default is
+### CREATED_AT + DESC.
+GET {{baseUrl}}/recipes?sortBy=TITLE&direction=ASC
+
+> {%
+    client.test("Orders by title ascending", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9e. Sort by something that is not on the list -> 400 Bad Request
+### NOT a 500. The listing pages over hand-written JPQL and Spring would append whatever property
+### a free-text sort named straight into it - so ?sort=bogus used to be a SemanticException, and
+### ?sort=author.password would have ordered by a column no response exposes.
+GET {{baseUrl}}/recipes?sortBy=bogus
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
     });
 %}
 
@@ -263,6 +325,60 @@ Content-Type: application/json
     });
 %}
 
+### 12b. Update with an EMPTY step list -> 400 Bad Request
+### Same rule as the categories above, for the same reason: an edit must not be able to turn a
+### working recipe into one nobody can cook, which a create is already forbidden from producing.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "steps": []
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 12c. Remove the introduction -> 200 OK, introduction is now null
+### Blank text is the delete instruction, and it has to be: Jackson maps a missing property and
+### an explicit "introduction": null to the SAME Optional.empty(), so neither of those can mean
+### "delete" without also meaning "leave it alone" on every partial update that omits the field.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "introduction": {"text": ""}
+}
+
+> {%
+    client.test("Returns 200 and the section is gone", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.introduction === null,
+            "Expected null, not an object with empty text");
+    });
+%}
+
+### 12d. Update without mentioning the introduction -> 200 OK, still absent
+### Omission means "leave it alone", here as everywhere else in this payload.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte aux pommes de ma grand-mère"
+}
+
+> {%
+    client.test("Returns 200 and does not resurrect the introduction", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.introduction === null, "Expected it to stay removed");
+    });
+%}
+
 ### 13. Clear every tag -> 200 OK
 PUT {{baseUrl}}/recipes/{{recipeId}}
 Authorization: Bearer {{authorToken}}
@@ -306,6 +422,44 @@ Content-Type: application/json
 {
   "title": "Sans catégorie",
   "categoryIds": []
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 15b. Create a recipe with no ingredients at all -> 400 Bad Request
+### A recipe nobody can cook is not a half-finished recipe; accepting one only moves the failure
+### to the reader.
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte",
+  "categoryIds": ["{{categoryId}}"],
+  "ingredientGroups": [],
+  "steps": [{"instruction": "Mélanger"}]
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 15c. Create a recipe with no steps at all -> 400 Bad Request
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte",
+  "categoryIds": ["{{categoryId}}"],
+  "ingredientGroups": [{"ingredients": [{"ingredientId": "{{ingredientId}}"}]}],
+  "steps": []
 }
 
 > {%
@@ -443,7 +597,7 @@ Content-Type: application/json
 %}
 
 ### 24. The listing exposes the FIRST cover as the thumbnail -> 200 OK
-GET {{baseUrl}}/recipes?q=illustr
+GET {{baseUrl}}/recipes?title=illustr
 
 > {%
     client.test("Summary carries coverMediaId", function () {

@@ -1,13 +1,21 @@
 ### Categories
-### Covers: GET /categories, GET /categories/{id}, POST /categories,
-###         PUT /categories/{id}, DELETE /categories/{id}
+### Covers: GET /categories, GET /categories/hierarchy, GET /categories/{id},
+###         GET /categories/{id}/subcategories, GET /categories/{id}/superior-categories,
+###         POST /categories, PUT /categories/{id}, DELETE /categories/{id}
 ###
 ### Categories are the taxonomy that drives navigation: reads are public, every write is
 ### admin-only. Requests 1-2 set up the token. You need an account with the ADMIN role -
 ### set app.bootstrap.admin-username to an existing username and restart, or insert the
 ### user_roles row by hand.
 ###
-### tags.http and units.http follow the same rules; the rationale is only spelled out here.
+### Unlike tags, categories form a HIERARCHY. Every category has exactly one row in
+### categories_relation: a subcategory's points at its directly superior category, a main
+### category's points at ITSELF. That self-reference is a schema device and never leaves the
+### server - the API reports superiorCategoryId: null for a main category, and categoryType
+### tells the two apart without anyone comparing ids. Requests 14-21 walk that flow.
+###
+### tags.http and units.http follow the same permission and conflict rules; the rationale for
+### those is only spelled out here.
 
 @baseUrl = http://localhost:8080
 @adminUsername = jane
@@ -48,7 +56,7 @@ Content-Type: application/json
 %}
 
 ### 3. List categories with no credentials at all -> 200 OK
-### Recipes are public, so the taxonomy that navigates them has to be too.
+### Recipes are public, so the taxonomy that navigates them has to be too. Flat, every level.
 GET {{baseUrl}}/categories
 
 > {%
@@ -57,7 +65,9 @@ GET {{baseUrl}}/categories
     });
 %}
 
-### 4. Create a category as an admin -> 201 Created, with a Location header
+### 4. Create a main category as an admin -> 201 Created, with a Location header
+### No superiorCategoryId means "this is a root". The response carries the stored name - which
+### is trimmed, so it is not simply an echo of what was sent.
 POST {{baseUrl}}/categories
 Authorization: Bearer {{adminToken}}
 Content-Type: application/json
@@ -67,8 +77,11 @@ Content-Type: application/json
 }
 
 > {%
-    client.test("Returns 201", function () {
+    client.test("Returns 201 as a MAIN category with no superior", function () {
         client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.categoryType === "MAIN", "Expected MAIN");
+        client.assert(response.body.superiorCategoryId === null,
+            "A root must report null, never its own id");
         client.global.set("categoryId", response.body.id);
     });
 %}
@@ -175,7 +188,207 @@ Content-Type: application/json
     });
 %}
 
-### 12. Delete an unused category -> 204 No Content
+###############################################################################
+### The hierarchy. Requests 12-19 build Dessert > Tartes > Tartes aux pommes,
+### read it back three ways, and check the two refusals that keep it a tree.
+###############################################################################
+
+### 12. Create a subcategory under the one from #4 -> 201 Created
+### superiorCategoryId names the DIRECTLY superior category. The response reports SUB and
+### carries that id back.
+POST {{baseUrl}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Tartes",
+  "superiorCategoryId": "{{categoryId}}"
+}
+
+> {%
+    client.test("Returns 201 as a SUB category", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.categoryType === "SUB", "Expected SUB");
+        client.global.set("subCategoryId", response.body.id);
+    });
+%}
+
+### 13. Create a third level -> 201 Created
+### Depth is not limited. Only the direct parent is stored; ancestors and descendants are
+### walked from those edges.
+POST {{baseUrl}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Tartes aux pommes",
+  "superiorCategoryId": "{{subCategoryId}}"
+}
+
+> {%
+    client.test("Returns 201", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("leafCategoryId", response.body.id);
+    });
+%}
+
+### 14. Create a category under one that does not exist -> 400 Bad Request
+### 400 and not 404: /categories is perfectly reachable, it is the payload that is wrong. The
+### detail names the field so the client can act on it.
+POST {{baseUrl}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Orpheline",
+  "superiorCategoryId": "00000000-0000-0000-0000-000000000000"
+}
+
+> {%
+    client.test("Returns 400 naming superiorCategoryId", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+        client.assert(response.body.detail.includes("superiorCategoryId"), "Expected the field name");
+    });
+%}
+
+### 15. Everything under a main category -> 200 OK
+### Descendants at ANY depth, parents before their children, name-sorted within each level.
+### The category itself is not included - it is not below itself.
+GET {{baseUrl}}/categories/{{categoryId}}/subcategories
+
+> {%
+    client.test("Returns both levels below, public", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        const ids = response.body.map(c => c.id);
+        client.assert(ids.includes(client.global.get("subCategoryId")), "Expected the direct child");
+        client.assert(ids.includes(client.global.get("leafCategoryId")), "Expected the grandchild");
+        client.assert(!ids.includes(client.global.get("categoryId")), "Must not include itself");
+    });
+%}
+
+### 16. The ancestor chain of a leaf -> 200 OK
+### NEAREST FIRST, up to the main category: a breadcrumb reversed. Empty for a main category.
+GET {{baseUrl}}/categories/{{leafCategoryId}}/superior-categories
+
+> {%
+    client.test("Returns the chain nearest first", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body[0].id === client.global.get("subCategoryId"),
+            "The direct parent comes first");
+        client.assert(response.body[1].id === client.global.get("categoryId"),
+            "Then the root");
+    });
+%}
+
+### 17. The ancestor chain of a main category -> 200 OK, empty
+### A root has no superior but itself, and the self-reference never crosses the wire.
+GET {{baseUrl}}/categories/{{categoryId}}/superior-categories
+
+> {%
+    client.test("Returns an empty array", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.length === 0, "Expected nothing above a root");
+    });
+%}
+
+### 18. Hierarchy reads for a category that does not exist -> 404 Not Found
+### Not an empty list: "this category has nothing under it" and "there is no such category"
+### are different answers, and the second must not look like the first.
+GET {{baseUrl}}/categories/00000000-0000-0000-0000-000000000000/subcategories
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 19. The whole taxonomy, nested -> 200 OK
+### One call for a navigation menu. Roots at the top level, children nested inside them, name
+### sorted at every level. No superiorCategoryId here: nesting already says who the parent is.
+GET {{baseUrl}}/categories/hierarchy
+
+> {%
+    client.test("Returns a nested forest", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        const root = response.body.find(c => c.id === client.global.get("categoryId"));
+        client.assert(root !== undefined, "Expected our root");
+        client.assert(root.subcategories.length >= 1, "Expected it to carry its children nested");
+    });
+%}
+
+### 20. File a category under its own descendant -> 400 Bad Request
+### A cycle would make every walk below it non-terminating - a hang, not an error - and would
+### detach the whole subtree from any root.
+PUT {{baseUrl}}/categories/{{categoryId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "dessert",
+  "superiorCategoryId": "{{leafCategoryId}}"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 21. Delete a category that still has subcategories -> 409 Conflict
+### Never a cascade: deleting a node its children point at would leave a subtree unreachable
+### from any root and invisible to every hierarchy query. Move or delete the children first.
+DELETE {{baseUrl}}/categories/{{categoryId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+        client.assert(response.body.detail.includes("subcategories"), "Expected a useful detail");
+    });
+%}
+
+### 22. Promote a subcategory back to a root -> 200 OK
+### PUT is a full replacement, not a patch: omitting superiorCategoryId means "this is a main
+### category now", not "leave its parent alone". Re-parenting and promoting are both ordinary
+### edits, so neither needs its own endpoint.
+PUT {{baseUrl}}/categories/{{subCategoryId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Tartes"
+}
+
+> {%
+    client.test("Returns 200 and the category is now MAIN", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.categoryType === "MAIN", "Expected MAIN");
+        client.assert(response.body.superiorCategoryId === null, "Expected no superior");
+    });
+%}
+
+### 23. Delete the leaf, then its now-childless former parents -> 204 No Content each
+### Bottom-up, because #21 refuses any other order.
+DELETE {{baseUrl}}/categories/{{leafCategoryId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 24. Delete the promoted subcategory -> 204 No Content
+DELETE {{baseUrl}}/categories/{{subCategoryId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 25. Delete the now-empty main category -> 204 No Content
 DELETE {{baseUrl}}/categories/{{categoryId}}
 Authorization: Bearer {{adminToken}}
 
@@ -185,10 +398,10 @@ Authorization: Bearer {{adminToken}}
     });
 %}
 
-### 13. Delete a category a recipe still uses -> 409 Conflict
+### 26. Delete a category a recipe still uses -> 409 Conflict
 ### Needs a recipe first: run recipes.http through creating one, then put its category id below.
 ### Never a cascade - an admin tidying the category list must not silently gut other people's
-### recipes.
+### recipes. Same status as #21, different cause.
 @usedCategoryId = paste-a-category-id-that-a-recipe-references
 DELETE {{baseUrl}}/categories/{{usedCategoryId}}
 Authorization: Bearer {{adminToken}}

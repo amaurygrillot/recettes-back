@@ -130,13 +130,25 @@ Content-Type: application/json
 ### 9. Search without the accent -> finds it anyway
 ### The search runs against normalized_name, which is exactly what that column is for. Note it is
 ### a PREFIX search: "creme" finds it, "fraiche" does not - a trailing wildcard can use the index
-### and a leading one cannot.
-GET {{baseUrl}}/ingredients?q=creme
+### and a leading one cannot. The parameter is named namePrefix for that reason: "q" said nothing
+### about what was matched or how, and a caller had to read the source to find out.
+GET {{baseUrl}}/ingredients?namePrefix=creme
 
 > {%
     client.test("Finds the accented ingredient by its unaccented prefix", function () {
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         client.assert(response.body.totalElements >= 1, "Expected at least one match");
+    });
+%}
+
+### 9b. Search with a blank prefix -> everything, name-sorted
+### Blank means "no filter", not "match the empty string" - a form submitting its untouched
+### fields sends this, and it must not silently become a filter that matches nothing.
+GET {{baseUrl}}/ingredients?namePrefix=
+
+> {%
+    client.test("Returns the unfiltered page", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
     });
 %}
 
