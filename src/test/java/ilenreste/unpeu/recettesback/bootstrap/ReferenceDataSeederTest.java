@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.configuration;
+package ilenreste.unpeu.recettesback.bootstrap;
 
 import ilenreste.unpeu.recettesback.entities.reference.UnitEntity;
 import ilenreste.unpeu.recettesback.entities.users.RoleEntity;

@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.controllers.users;
 
+import ilenreste.unpeu.recettesback.exceptions.UserExceptionHandler;
 import ilenreste.unpeu.recettesback.models.users.requests.CreateUserRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.ResetPasswordRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;

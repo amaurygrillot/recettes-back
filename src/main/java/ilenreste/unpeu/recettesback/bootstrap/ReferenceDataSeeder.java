@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.configuration;
+package ilenreste.unpeu.recettesback.bootstrap;
 
 import ilenreste.unpeu.recettesback.entities.reference.UnitEntity;
 import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
@@ -22,15 +22,34 @@ import java.util.Map;
 /**
  * Makes a fresh database usable without hand-written SQL.
  * <p>
+ * Lives in {@code bootstrap} rather than {@code configuration}: it declares no
+ * bean and configures nothing. It is an {@link ApplicationRunner} — behaviour
+ * that runs once the context is up — and the only thing in the application whose
+ * job is "put the rows in place that the rest of the code assumes already exist".
+ * <p>
  * Without this the application has a four-level bootstrap trap:
  * {@code POST /recipes} needs a category, no category can be created without an
  * {@code ADMIN}, no account exists without a {@code USER} role row, and
  * {@code UserService.createUser} looks that role up rather than creating it. The
  * same trap already existed for {@code POST /users/create} and was documented as
  * "insert a row by hand".
+ *
+ * <h2>Why it is not a one-shot script</h2>
+ * It is tempting to read this as a migration that has already run and could now
+ * be deleted. It is not. There is <strong>no</strong> migration tool in this
+ * project — {@code ddl-auto=update} builds the schema from the entities and
+ * inserts no data — so this class is the only thing that populates an empty
+ * database, and an empty database happens more often than "once, in production":
+ * every fresh clone on a new machine, every CI run, every restore of a
+ * schema-only dump, and every VPS rebuild. It is also what the
+ * {@code @SpringBootTest} suites rely on for the {@code USER} role row rather
+ * than each seeding it themselves.
  * <p>
  * Everything here is <strong>idempotent</strong>: it inserts only what is
- * missing, so it is safe on every startup rather than only the first.
+ * missing, so it is safe on every startup rather than only the first. On a
+ * database that is already populated it costs a handful of indexed lookups and
+ * writes nothing. That is the whole reason it can be left switched on forever
+ * instead of being a script somebody has to remember to run.
  * <p>
  * Categories and tags stay empty. Those are product choices — what this
  * particular recipe library is organised by — not defaults an application can

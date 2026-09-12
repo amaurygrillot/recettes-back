@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
-import ilenreste.unpeu.recettesback.configuration.MediaProperties;
+import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;

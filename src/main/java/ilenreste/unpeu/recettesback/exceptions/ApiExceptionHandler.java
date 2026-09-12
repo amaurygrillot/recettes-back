@@ -157,7 +157,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * Rethrowing is the supported idiom: {@code ExceptionHandlerExceptionResolver} treats a handler
      * that throws the original exception as "not resolved" and lets it continue up the chain to
      * {@code ExceptionTranslationFilter}, which invokes
-     * {@link ilenreste.unpeu.recettesback.configuration.ProblemDetailErrorResponder}.
+     * {@link ilenreste.unpeu.recettesback.exceptions.ProblemDetailErrorResponder}.
      */
     @ExceptionHandler({AuthenticationException.class, AccessDeniedException.class})
     ResponseEntity<ProblemDetail> rethrowSecurityException(RuntimeException exception) {

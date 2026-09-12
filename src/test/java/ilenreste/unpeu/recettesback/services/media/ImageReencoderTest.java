@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
-import ilenreste.unpeu.recettesback.configuration.MediaProperties;
+import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

@@ -1,6 +1,6 @@
-package ilenreste.unpeu.recettesback.controllers.users;
+package ilenreste.unpeu.recettesback.exceptions;
 
-import ilenreste.unpeu.recettesback.exceptions.ApiExceptionHandler;
+import ilenreste.unpeu.recettesback.controllers.users.UserController;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.Ordered;
@@ -24,8 +24,14 @@ import java.net.URI;
  * <p>
  * This advice earns its place precisely because it does something the global
  * one must not — deliberately collapse four distinguishable failures into one
- * indistinguishable response — and that decision belongs next to the endpoint
- * whose security property depends on it.
+ * indistinguishable response.
+ * <p>
+ * It sits in {@code exceptions} next to {@link ApiExceptionHandler}, not in
+ * {@code controllers}. It is not a controller and maps no route: it is a
+ * {@code @RestControllerAdvice}, one of the two halves of this application's
+ * exception-to-status mapping, and the pair only makes sense read together —
+ * the {@code @Order} on each is what decides which of them wins, and that is
+ * impossible to notice when they live in different packages.
  * <p>
  * {@link Ordered#HIGHEST_PRECEDENCE} is load-bearing. Spring takes the first
  * advice in {@code @Order} sequence that has a matching handler method;
@@ -38,7 +44,7 @@ import java.net.URI;
 @RestControllerAdvice(assignableTypes = UserController.class)
 public class UserExceptionHandler {
 
-    static final String RESET_FAILED_DETAIL = "Invalid password reset request.";
+    public static final String RESET_FAILED_DETAIL = "Invalid password reset request.";
 
     /**
      * {@code UserController}'s other endpoints throw typed exceptions, so in

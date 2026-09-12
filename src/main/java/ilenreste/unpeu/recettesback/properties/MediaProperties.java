@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.configuration;
+package ilenreste.unpeu.recettesback.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -7,6 +7,13 @@ import java.time.Duration;
 
 /**
  * Everything tunable about the media pipeline, in one place.
+ * <p>
+ * Lives in {@code properties} rather than {@code configuration}: it is bound
+ * data, not wiring. It declares no bean, holds no logic and is picked up by the
+ * {@code @ConfigurationPropertiesScan} on the application class, which is why
+ * nothing in {@code configuration} has to know it exists. It is not in
+ * {@code models} either — those records cross the HTTP boundary as request or
+ * response bodies, and this one never leaves the server.
  * <p>
  * There is deliberately no {@code app.media.max-file-size} mirroring
  * {@code spring.servlet.multipart.max-file-size}: the servlet container rejects

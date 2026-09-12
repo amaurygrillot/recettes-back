@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
-import ilenreste.unpeu.recettesback.configuration.MediaProperties;
+import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;

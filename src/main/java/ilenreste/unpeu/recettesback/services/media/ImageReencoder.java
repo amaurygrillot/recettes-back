@@ -3,7 +3,7 @@ package ilenreste.unpeu.recettesback.services.media;
 import com.drew.imaging.ImageMetadataReader;
 import com.drew.metadata.Metadata;
 import com.drew.metadata.exif.ExifIFD0Directory;
-import ilenreste.unpeu.recettesback.configuration.MediaProperties;
+import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
