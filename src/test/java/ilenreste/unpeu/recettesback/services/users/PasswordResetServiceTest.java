@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.users;
 
+import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.models.users.requests.ResetPasswordRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;
@@ -84,7 +85,7 @@ class PasswordResetServiceTest {
         ResetPasswordRequest request = new ResetPasswordRequest("ghost@example.com", "raw-token", "NewPassword123");
 
         assertThatThrownBy(() -> passwordResetService.resetPassword(request))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(PasswordResetFailedException.class);
 
         verifyNoInteractions(tokenService, userService);
     }
@@ -95,13 +96,13 @@ class PasswordResetServiceTest {
         user.setId("user-1");
         user.setEmail("jane@example.com");
         when(usersRepository.findByEmail("jane@example.com")).thenReturn(Optional.of(user));
-        doThrow(new IllegalStateException("Invalid or expired password reset token"))
+        doThrow(new PasswordResetFailedException("Invalid or expired password reset token"))
                 .when(tokenService).consumeToken(user, "bad-token");
 
         ResetPasswordRequest request = new ResetPasswordRequest("jane@example.com", "bad-token", "NewPassword123");
 
         assertThatThrownBy(() -> passwordResetService.resetPassword(request))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(PasswordResetFailedException.class);
 
         verifyNoInteractions(userService);
     }

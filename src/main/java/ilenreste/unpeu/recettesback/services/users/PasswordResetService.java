@@ -1,6 +1,7 @@
 package ilenreste.unpeu.recettesback.services.users;
 
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import ilenreste.unpeu.recettesback.models.users.requests.ResetPasswordRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
@@ -57,7 +58,7 @@ public class PasswordResetService {
     @Transactional
     public void resetPassword(ResetPasswordRequest request) {
         UserEntity user = usersRepository.findByEmail(request.email())
-                .orElseThrow(() -> new IllegalStateException("Invalid password reset request"));
+                .orElseThrow(() -> new PasswordResetFailedException("Invalid password reset request"));
 
         tokenService.consumeToken(user, request.token());
 

@@ -50,6 +50,16 @@ unknown (see `PasswordResetService.requestReset`) — trades a bit of literal ac
 token issued to a different account all map to the same `400 Bad Request`, so a caller can't distinguish "wrong
 password" from "wrong email" from "expired link".
 
+All four are one exception type, `PasswordResetFailedException`, caught by `UserExceptionHandler`. **One type, not
+four**, and deliberately so: being able to throw them apart would be the first step towards someone accidentally
+reporting them apart, which is the whole property this endpoint is protecting.
+
+It used to be a bare `IllegalStateException`, and that was a real defect rather than a stylistic one. The advice
+applies to the whole of `UserController`, so every unrelated `IllegalStateException` under it — a missing `USER` role
+row on registration, a JVM without SHA-256 — also came back as `400 Invalid password reset request`, hiding genuine
+server errors behind this endpoint's deliberately uninformative response. See
+[api-error-handling.md](api-error-handling.md).
+
 ## Configuration
 
 | Property                                  | Meaning                                                                       | Default                                |

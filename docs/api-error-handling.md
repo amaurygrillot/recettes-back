@@ -7,6 +7,10 @@ document covers the servlet-container plumbing, this one covers the application'
 
 ## The problem this solves
 
+> **Status: implemented.** Companion document:
+> [service-controller-contract.md](service-controller-contract.md), which states the other half — what a controller may
+> assume from a service, so that no controller needs a `try/catch` or a null check in the first place.
+
 Today every controller method wraps its service call in its own `try/catch` and maps `IllegalStateException → 400`,
 `Exception → 500`. That is workable when a request has exactly two outcomes. Recipes have at least five distinct
 failure modes:
@@ -114,9 +118,16 @@ nesting changes — the failure mode being that the create-race 409 quietly stop
 provokes the happy path notices. The loop is also guarded against a self-referencing cause, which some drivers
 produce.
 
-Where the handler classes live: the global `ApiExceptionHandler` sits in the flat, cross-cutting `exceptions` package
-next to the exception types it maps; a targeted advice sits next to the controller it serves (`UserExceptionHandler`
-in `controllers/users`), because it is meaningless without that controller.
+Where the handler classes live: **both advices sit in the flat, cross-cutting `exceptions` package**, next to the
+exception types they map.
+
+The targeted `UserExceptionHandler` originally lived beside the controller it serves, in `controllers/users`, on the
+grounds that it is meaningless without it. The PR review moved it, and that is the better call: it is not a controller
+and it maps no route, and — more to the point — the two advices only make sense **read together**. Which of them wins
+is decided by the `@Order` on each, `HIGHEST_PRECEDENCE` against `LOWEST_PRECEDENCE`, and that relationship is
+impossible to notice when they are two packages apart. `ProblemDetailErrorResponder` joined them for the same reason:
+it is the third piece of the same mechanism, the one that runs above the `DispatcherServlet` where an
+`@ExceptionHandler` cannot reach.
 
 The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
 `media.created_at NOT NULL` trap in [recipes-domain-model.md](recipes-domain-model.md#auditing) and any missed
@@ -210,5 +221,19 @@ token and a token issued to another account all keep mapping to the same flat 40
 an oversight — it is the anti-enumeration guarantee documented in [password-reset.md](password-reset.md), and it must
 survive this refactor. A targeted advice on `UserController` is the right place to enforce it, and the test asserting
 it should say why.
+
+### That advice caught far too much, and the PR review fixed it
+
+As first written it caught `IllegalStateException`, because that is what the reset flow threw. But
+`@RestControllerAdvice(assignableTypes = UserController.class)` applies to the **whole controller**, so *any*
+`IllegalStateException` raised anywhere beneath it came back as `400 Invalid password reset request`: a missing `USER`
+role row on registration, a JVM without SHA-256, an ordinary bug in unrelated code. Wrong status, wrong endpoint, and a
+message that sends whoever is debugging it to the wrong flow — while quietly hiding a genuine 500 behind a plausible
+400.
+
+The reset flow now throws a dedicated `PasswordResetFailedException` and the advice catches only that. One type for all
+four failures, because all four must stay indistinguishable in the response; being able to *throw* them apart would be
+the first step towards accidentally *reporting* them apart. Everything else keeps the 500 it deserves — which is what
+made it safe for `UserService` to fail loudly when the `USER` role has not been seeded.
 
 `UserControllerTest` and `AuthenticationControllerTest` need their expected statuses updated accordingly.

@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.users;
 
+import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import ilenreste.unpeu.recettesback.entities.users.PasswordResetTokenEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.repositories.users.PasswordResetTokenRepository;
@@ -78,7 +79,7 @@ class PasswordResetTokenServiceTest {
         when(tokenRepository.findByTokenHash(anyString())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> tokenService.consumeToken(user, "not-a-real-token"))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(PasswordResetFailedException.class);
 
         verify(tokenRepository, never()).delete(any());
     }
@@ -98,7 +99,7 @@ class PasswordResetTokenServiceTest {
         when(tokenRepository.findByTokenHash(anyString())).thenReturn(Optional.of(expired));
 
         assertThatThrownBy(() -> tokenService.consumeToken(user, "some-token"))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(PasswordResetFailedException.class);
 
         // Single-use even on a failed (expired) attempt: the row must not survive to be retried.
         verify(tokenRepository).delete(expired);
@@ -120,7 +121,7 @@ class PasswordResetTokenServiceTest {
         when(tokenRepository.findByTokenHash(anyString())).thenReturn(Optional.of(entity));
 
         assertThatThrownBy(() -> tokenService.consumeToken(someoneElse, "some-token"))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(PasswordResetFailedException.class);
 
         verify(tokenRepository, never()).delete(any());
     }

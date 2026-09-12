@@ -2,6 +2,7 @@ package ilenreste.unpeu.recettesback.services.users;
 
 import ilenreste.unpeu.recettesback.entities.users.PasswordResetTokenEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import ilenreste.unpeu.recettesback.repositories.users.PasswordResetTokenRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -69,19 +70,19 @@ public class PasswordResetTokenService {
      * Validates a raw token for the given user and consumes it (it cannot be
      * used again after this call, whether or not it was valid).
      *
-     * @throws IllegalStateException if the token is unknown, belongs to a
+     * @throws PasswordResetFailedException if the token is unknown, belongs to a
      *                               different user, or has expired
      */
     @Transactional
     public void consumeToken(UserEntity user, String rawToken) {
         PasswordResetTokenEntity entity = tokenRepository.findByTokenHash(hash(rawToken))
                 .filter(t -> t.getUser().getId().equals(user.getId()))
-                .orElseThrow(() -> new IllegalStateException("Invalid or expired password reset token"));
+                .orElseThrow(() -> new PasswordResetFailedException("Invalid or expired password reset token"));
 
         tokenRepository.delete(entity);
 
         if (entity.getExpiresAt().isBefore(Instant.now())) {
-            throw new IllegalStateException("Invalid or expired password reset token");
+            throw new PasswordResetFailedException("Invalid or expired password reset token");
         }
     }
 

@@ -4,9 +4,11 @@ import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
+import ilenreste.unpeu.recettesback.mappers.users.UserMapper;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.models.users.requests.CreateUserRequest;
 import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;
+import ilenreste.unpeu.recettesback.models.users.responses.UserResponse;
 import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UserRolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
@@ -40,7 +42,8 @@ class UserServiceTest {
 
     @BeforeEach
     void setUp() {
-        userService = new UserService(usersRepository, rolesRepository, userRolesRepository, passwordEncoder);
+        userService = new UserService(usersRepository, rolesRepository, userRolesRepository,
+                passwordEncoder, new UserMapper());
     }
 
     @Test
@@ -69,7 +72,12 @@ class UserServiceTest {
         userRole.setName("USER");
         when(rolesRepository.findByNameEqualsIgnoreCase("USER")).thenReturn(userRole);
 
-        userService.createUser(request);
+        UserResponse created = userService.createUser(request);
+
+        // The response is the confirmation the endpoint had no way to give before: an id to
+        // follow, and the role the account actually ended up with.
+        assertThat(created.id()).isEqualTo("user-1");
+        assertThat(created.roles()).containsExactly("USER");
 
         ArgumentCaptor<UserEntity> userCaptor = ArgumentCaptor.forClass(UserEntity.class);
         verify(usersRepository).save(userCaptor.capture());
@@ -85,6 +93,24 @@ class UserServiceTest {
         verify(userRolesRepository).save(userRolesCaptor.capture());
         assertThat(userRolesCaptor.getValue().getUser()).isEqualTo(savedUser);
         assertThat(userRolesCaptor.getValue().getRole()).isEqualTo(userRole);
+    }
+
+    @Test
+    void createUser_failsLoudly_whenTheUserRoleHasNotBeenSeeded() {
+        // Left unchecked this surfaced two statements later as a NOT NULL violation on
+        // user_roles.role_id: a 500 whose message pointed at the join table rather than at the
+        // missing row, and which the password-reset advice would then have reported as a 400.
+        CreateUserRequest request = new CreateUserRequest("jane", "Password123", "jane@example.com", "Jane", "Doe");
+        when(usersRepository.existsByUsername("jane")).thenReturn(false);
+        when(rolesRepository.findByNameEqualsIgnoreCase("USER")).thenReturn(null);
+
+        assertThatThrownBy(() -> userService.createUser(request))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("USER");
+
+        // Nothing is written: no half-created account without its role.
+        verify(usersRepository, never()).save(any());
+        verify(userRolesRepository, never()).save(any());
     }
 
     @Test
@@ -105,6 +131,7 @@ class UserServiceTest {
         UserEntity user = new UserEntity();
         user.setId("user-1");
         when(usersRepository.findById("user-1")).thenReturn(Optional.of(user));
+        returnsWhatItIsGiven();
         UpdateUserRequest request = new UpdateUserRequest(
                 Optional.of("newname"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
 
@@ -123,6 +150,7 @@ class UserServiceTest {
         user.setLastname("Name");
         user.setPassword("old-hash");
         when(passwordEncoder.encode("NewPassword123")).thenReturn("new-hash");
+        returnsWhatItIsGiven();
 
         UpdateUserRequest request = new UpdateUserRequest(
                 Optional.of("new-username"),
@@ -149,6 +177,7 @@ class UserServiceTest {
         user.setFirstname("Unchanged");
         user.setLastname("Person");
         user.setPassword("unchanged-hash");
+        returnsWhatItIsGiven();
 
         UpdateUserRequest request = new UpdateUserRequest(
                 Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
@@ -162,5 +191,13 @@ class UserServiceTest {
         assertThat(user.getPassword()).isEqualTo("unchanged-hash");
         verifyNoInteractions(passwordEncoder);
         verify(usersRepository).save(user);
+    }
+
+    /**
+     * The service maps the row {@code save} hands back, not the detached input, so that the
+     * response carries what the persistence context actually flushed.
+     */
+    private void returnsWhatItIsGiven() {
+        when(usersRepository.save(any(UserEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
     }
 }

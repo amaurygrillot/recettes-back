@@ -47,13 +47,22 @@ public class UserExceptionHandler {
     public static final String RESET_FAILED_DETAIL = "Invalid password reset request.";
 
     /**
-     * {@code UserController}'s other endpoints throw typed exceptions, so in
-     * practice only the reset flow reaches this. It logs at {@code warn} with
-     * the exception so that an unexpected {@link IllegalStateException} landing
-     * here — and being reported as a 400 rather than a 500 — is still visible.
+     * Catches {@link PasswordResetFailedException} and nothing wider.
+     * <p>
+     * It used to catch {@code IllegalStateException}, which meant every
+     * {@code IllegalStateException} raised anywhere under {@code UserController} —
+     * a missing {@code USER} role row on registration, a JVM without SHA-256, an
+     * ordinary bug — came back as {@code 400 Invalid password reset request}. That
+     * is the wrong status on the wrong endpoint with a message pointing at the
+     * wrong flow, and it hid genuine 500s behind a plausible-looking 400. The
+     * narrow type is what keeps this advice deliberately blind <em>only</em> to the
+     * four failures it is supposed to be blind to.
+     * <p>
+     * Still logged at {@code warn} with the exception, because the response cannot
+     * say which of the four it was and the log is the only place that can.
      */
-    @ExceptionHandler(IllegalStateException.class)
-    ResponseEntity<ProblemDetail> handlePasswordResetFailure(IllegalStateException exception,
+    @ExceptionHandler(PasswordResetFailedException.class)
+    ResponseEntity<ProblemDetail> handlePasswordResetFailure(PasswordResetFailedException exception,
                                                              HttpServletRequest request) {
         log.warn("Password reset refused", exception);
         ProblemDetail body = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, RESET_FAILED_DETAIL);

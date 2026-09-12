@@ -3,7 +3,10 @@ package ilenreste.unpeu.recettesback.controllers.users;
 import ilenreste.unpeu.recettesback.exceptions.ApiExceptionHandler;
 import ilenreste.unpeu.recettesback.exceptions.UserExceptionHandler;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
+import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
+import ilenreste.unpeu.recettesback.models.users.responses.UserResponse;
+import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
 import ilenreste.unpeu.recettesback.services.users.UserService;
 import org.junit.jupiter.api.AfterEach;
@@ -13,6 +16,7 @@ import org.springframework.http.MediaType;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.security.web.method.annotation.AuthenticationPrincipalArgumentResolver;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -27,6 +31,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class UserControllerTest {
@@ -39,7 +45,8 @@ class UserControllerTest {
     void setUp() {
         passwordResetService = mock(PasswordResetService.class);
         userService = mock(UserService.class);
-        UserController controller = new UserController(userService, passwordResetService);
+        UserController controller =
+                new UserController(userService, passwordResetService, new CurrentUserService());
         // The controller holds no try/catch any more, so the advices are what turns an
         // exception into a status. Registering both, in this order, is also what keeps the
         // targeted advice's HIGHEST_PRECEDENCE meaningful here.
@@ -61,24 +68,38 @@ class UserControllerTest {
                 .issuedAt(Instant.now())
                 .expiresAt(Instant.now().plusSeconds(3600))
                 .build();
-        SecurityContextHolder.getContext().setAuthentication(new TestingAuthenticationToken(jwt, null));
+        SecurityContextHolder.getContext()
+                .setAuthentication(new JwtAuthenticationToken(jwt, List.of()));
+    }
+
+    private static UserResponse storedUser(String id) {
+        return new UserResponse(id, "jane", "jane@example.com", "Jane", "Doe", List.of("USER"));
     }
 
     @Test
-    void createUser_returns201_whenRequestSucceeds() throws Exception {
+    void createUser_returns201_withTheStoredAccountAndItsLocation() throws Exception {
+        // A bare 201 with no body said only "nothing threw". The id is what a client follows, and
+        // it is the thing a create had no way to confirm before.
+        when(userService.createUser(any())).thenReturn(storedUser("user-1"));
+
         mockMvc.perform(post("/users/create")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"username":"jane","password":"Password123","email":"jane@example.com","firstname":"Jane","lastname":"Doe"}
                                 """))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Location", "/users/user-1"))
+                .andExpect(jsonPath("$.id").value("user-1"))
+                .andExpect(jsonPath("$.roles[0]").value("USER"))
+                // Never in a response, whatever else changes here.
+                .andExpect(jsonPath("$.password").doesNotExist());
 
         verify(userService).createUser(any());
     }
 
     @Test
     void createUser_returns409_whenUsernameAlreadyExists() throws Exception {
-        doThrow(new ResourceConflictException("Username already exists")).when(userService).createUser(any());
+        when(userService.createUser(any())).thenThrow(new ResourceConflictException("Username already exists"));
 
         mockMvc.perform(post("/users/create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -90,7 +111,7 @@ class UserControllerTest {
 
     @Test
     void createUser_returns500_whenServiceThrowsUnexpectedly() throws Exception {
-        doThrow(new RuntimeException("db down")).when(userService).createUser(any());
+        when(userService.createUser(any())).thenThrow(new RuntimeException("db down"));
 
         mockMvc.perform(post("/users/create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -113,15 +134,17 @@ class UserControllerTest {
     }
 
     @Test
-    void updateUser_returns200_whenRequestSucceeds() throws Exception {
+    void updateUser_returns200_withTheStoredAccount() throws Exception {
         authenticateAs("user-1");
+        when(userService.updateUser(eq("user-1"), any())).thenReturn(storedUser("user-1"));
 
         mockMvc.perform(put("/users/update")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"firstname":"Janet"}
                                 """))
-                .andExpect(status().isOk());
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value("user-1"));
 
         verify(userService).updateUser(eq("user-1"), any());
     }
@@ -129,8 +152,8 @@ class UserControllerTest {
     @Test
     void updateUser_returns404_whenUserDoesNotExist() throws Exception {
         authenticateAs("missing-id");
-        doThrow(ResourceNotFoundException.of("user", "missing-id"))
-                .when(userService).updateUser(eq("missing-id"), any());
+        when(userService.updateUser(eq("missing-id"), any()))
+                .thenThrow(ResourceNotFoundException.of("user", "missing-id"));
 
         mockMvc.perform(put("/users/update")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -143,7 +166,7 @@ class UserControllerTest {
     @Test
     void updateUser_returns500_whenServiceThrowsUnexpectedly() throws Exception {
         authenticateAs("user-1");
-        doThrow(new RuntimeException("db down")).when(userService).updateUser(eq("user-1"), any());
+        when(userService.updateUser(eq("user-1"), any())).thenThrow(new RuntimeException("db down"));
 
         mockMvc.perform(put("/users/update")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -167,6 +190,29 @@ class UserControllerTest {
         verifyNoInteractions(userService);
     }
 
+    /**
+     * A {@code TestingAuthenticationToken} holding a {@link Jwt} is exactly the shape
+     * {@code CurrentUserService} refuses: its guard is a check on the token <em>type</em>, not a
+     * null check, because an anonymous request carries a token that reports
+     * {@code isAuthenticated() == true}. Reading the claim by hand off
+     * {@code @AuthenticationPrincipal} would have accepted this and updated whatever account the
+     * claim named.
+     */
+    @Test
+    void updateUser_returns403_whenTheCallerHasNoJwtAuthentication() throws Exception {
+        SecurityContextHolder.getContext()
+                .setAuthentication(new TestingAuthenticationToken("anonymousUser", null));
+
+        mockMvc.perform(put("/users/update")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstname":"Janet"}
+                                """))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(userService);
+    }
+
     @Test
     void reinitPassword_returnsOk_whenTokenIsValid() throws Exception {
         mockMvc.perform(put("/users/reinit-password")
@@ -181,7 +227,7 @@ class UserControllerTest {
 
     @Test
     void reinitPassword_returns400_whenTokenIsInvalid() throws Exception {
-        doThrow(new IllegalStateException("Invalid password reset request"))
+        doThrow(new PasswordResetFailedException("Invalid password reset request"))
                 .when(passwordResetService).resetPassword(any());
 
         mockMvc.perform(put("/users/reinit-password")
@@ -222,7 +268,7 @@ class UserControllerTest {
                 "token belongs to another account",
                 "token expired")) {
             reset(passwordResetService);
-            doThrow(new IllegalStateException(cause)).when(passwordResetService).resetPassword(any());
+            doThrow(new PasswordResetFailedException(cause)).when(passwordResetService).resetPassword(any());
 
             bodies.add(mockMvc.perform(put("/users/reinit-password")
                             .contentType(MediaType.APPLICATION_JSON)
