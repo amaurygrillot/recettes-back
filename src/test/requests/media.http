@@ -44,6 +44,10 @@ Content-Type: image/jpeg
     client.test("Returns 201 with the stored dimensions", function () {
         client.assert(response.status === 201, "Expected 201 but got " + response.status);
         client.assert(response.body.id !== undefined, "Expected a media id");
+        // Two different questions, two fields: mediaType is the KIND (PHOTO, and one day
+        // VIDEO - it decides whether a client renders an <img> or a <video>), contentType is
+        // the FORMAT we re-encoded to.
+        client.assert(response.body.mediaType === "PHOTO", "Expected PHOTO");
         client.assert(response.body.contentType === "image/jpeg", "Expected image/jpeg");
         client.global.set("mediaId", response.body.id);
     });
@@ -61,6 +65,37 @@ GET {{baseUrl}}/media/{{mediaId}}
             "Expected X-Content-Type-Options: nosniff");
         client.assert(response.headers.valueOf("Cache-Control").includes("immutable"),
             "Expected an immutable Cache-Control");
+        client.assert(response.headers.valueOf("ETag") !== null, "Expected a strong ETag");
+        client.global.set("mediaEtag", response.headers.valueOf("ETag"));
+    });
+%}
+
+### 3b. Download it again with If-None-Match -> 304 Not Modified, no body
+### "What if the image is updated? Can the cache be cleared?" - it cannot be, and it never needs
+### to be: NOTHING can change the bytes behind an id. There is no PUT /media/{id}; editing a
+### picture means uploading again, which mints a new id, and pointing the recipe at that. The old
+### URL keeps serving the old bytes for as long as anything references it, which is what makes
+### "immutable" an honest header here rather than an optimistic one.
+### The ETag is the safety net for clients that revalidate anyway - a forced reload ignores
+### "immutable" - so they get 304 instead of re-downloading several megabytes.
+GET {{baseUrl}}/media/{{mediaId}}
+If-None-Match: {{mediaEtag}}
+
+> {%
+    client.test("Returns 304 with no body", function () {
+        client.assert(response.status === 304, "Expected 304 but got " + response.status);
+    });
+%}
+
+### 3c. The thumbnail has its OWN ETag -> 200 OK, not 304
+### Same id, different bytes. Share one tag between the two variants and a cache holding the
+### thumbnail would happily answer a request for the full image with a 304.
+GET {{baseUrl}}/media/{{mediaId}}?variant=thumbnail
+If-None-Match: {{mediaEtag}}
+
+> {%
+    client.test("Returns 200, because this variant is different bytes", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
     });
 %}
 

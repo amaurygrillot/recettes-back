@@ -1,5 +1,7 @@
 package ilenreste.unpeu.recettesback.models.media.responses;
 
+import ilenreste.unpeu.recettesback.entities.media.MediaType;
+
 /**
  * What {@code POST /media} returns, and what a recipe response embeds for each
  * picture.
@@ -9,7 +11,10 @@ package ilenreste.unpeu.recettesback.models.media.responses;
  * hardcoding its own routes into every payload.
  *
  * @param id          the media id, which is also the cache key
- * @param contentType the type <em>we</em> encoded, never the client's declared one
+ * @param mediaType   {@code PHOTO} or, one day, {@code VIDEO} — the kind of thing this is,
+ *                    which is what decides whether a client renders an {@code <img>} or a
+ *                    {@code <video>}. Separate from {@code contentType}, which is the format
+ * @param contentType the format <em>we</em> encoded to, never the client's declared one
  * @param width       width of the stored image, so the frontend can reserve layout space
  * @param height      height of the stored image
  * @param sizeBytes   size of the stored full-size file. The thumbnail's few extra kilobytes are
@@ -18,6 +23,7 @@ package ilenreste.unpeu.recettesback.models.media.responses;
  */
 public record MediaResponse(
         String id,
+        MediaType mediaType,
         String contentType,
         int width,
         int height,

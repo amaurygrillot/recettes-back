@@ -12,6 +12,12 @@ import org.springframework.core.io.Resource;
  *                    file at read time
  * @param filename    a name <em>we</em> generated, never anything the uploader
  *                    supplied
+ * @param entityTag   a strong validator for this exact variant, derived from the
+ *                    stored checksum. It is what lets a client revalidate instead
+ *                    of re-downloading, and it is variant-specific — the full
+ *                    image and its thumbnail are different bytes at the same id,
+ *                    so they must not share a tag or a cache would serve one for
+ *                    the other
  */
-public record StoredMedia(Resource resource, String contentType, String filename) {
+public record StoredMedia(Resource resource, String contentType, String filename, String entityTag) {
 }

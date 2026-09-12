@@ -2,6 +2,7 @@ package ilenreste.unpeu.recettesback.services.media;
 
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
+import ilenreste.unpeu.recettesback.entities.media.MediaType;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
@@ -19,6 +20,7 @@ import java.io.UncheckedIOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -129,7 +131,24 @@ public class MediaService {
 
         String extension = ImageFormat.fromContentType(media.getContentType()).extension();
         return new StoredMedia(resource, media.getContentType(),
-                "%s.%s".formatted(media.getId(), extension));
+                "%s.%s".formatted(media.getId(), extension), entityTagFor(media, variant));
+    }
+
+    /**
+     * A strong ETag for one variant of one row.
+     * <p>
+     * Built from the checksum of the stored full-size bytes plus the variant name,
+     * not from the checksum alone: only the full-size image is hashed at upload,
+     * and the thumbnail is a different sequence of bytes served from the same id.
+     * Give them the same tag and a cache holding the thumbnail will happily answer
+     * a request for the full image with a 304.
+     * <p>
+     * The checksum makes this a genuine content hash rather than a
+     * mtime-and-length guess, which is what lets the tag be strong: two responses
+     * with this tag are byte-identical.
+     */
+    private String entityTagFor(MediaEntity media, MediaVariant variant) {
+        return "\"%s-%s\"".formatted(media.getChecksumSha256(), variant.name().toLowerCase(Locale.ROOT));
     }
 
     private ReencodedImage reencodeWithinCapacity(byte[] content, ImageFormat format) {
@@ -166,6 +185,9 @@ public class MediaService {
 
     private MediaEntity toEntity(ReencodedImage reencoded, String storageKey, String thumbnailKey) {
         MediaEntity media = new MediaEntity();
+        // Set explicitly rather than left to the field's default: this is the one place that
+        // decides what kind of media a row is, and the day VIDEO exists the branch belongs here.
+        media.setMediaType(MediaType.PHOTO);
         media.setStorageKey(storageKey);
         media.setThumbnailStorageKey(thumbnailKey);
         // Every column below is measured from what we wrote, never from what was uploaded.

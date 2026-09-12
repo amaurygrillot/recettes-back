@@ -4,6 +4,8 @@ import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EntityListeners;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
@@ -78,7 +80,23 @@ public class MediaEntity {
     @Column(nullable = false, unique = true)
     private String thumbnailStorageKey;
 
-    /** Decided by our re-encoder. Never the client's declared content type. */
+    /**
+     * Photo or video. Only {@link MediaType#PHOTO} can be produced today; see that
+     * enum for why the column exists anyway, and why media is not modelled as a
+     * class hierarchy.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "media_type", nullable = false, length = 5)
+    private MediaType mediaType = MediaType.PHOTO;
+
+    /**
+     * The <em>format</em>, as opposed to {@link #mediaType} the kind:
+     * {@code image/jpeg} or {@code image/png}. Decided by our re-encoder, never
+     * the client's declared content type, and served straight back as the
+     * {@code Content-Type} header — which is why it is stored as the media type
+     * string rather than an enum ordinal. {@code ImageFormat} is the typed view of
+     * it.
+     */
     @Column(nullable = false)
     private String contentType;
 

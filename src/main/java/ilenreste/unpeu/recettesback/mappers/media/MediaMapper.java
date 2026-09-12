@@ -16,6 +16,7 @@ public class MediaMapper {
     public MediaResponse toResponse(MediaEntity media) {
         return new MediaResponse(
                 media.getId(),
+                media.getMediaType(),
                 media.getContentType(),
                 media.getWidth(),
                 media.getHeight(),
