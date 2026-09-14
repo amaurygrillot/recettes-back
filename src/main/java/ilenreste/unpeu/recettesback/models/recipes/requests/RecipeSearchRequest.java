@@ -23,6 +23,26 @@ import org.springframework.data.domain.Sort;
  * because a form that submits its untouched fields sends {@code ?title=}, and
  * that must not silently become a filter.
  *
+ * <h2>A category filter reaches its subcategories unless told not to</h2>
+ * Categories form a tree, and {@code ?categoryId=<desserts>} means "show me the
+ * desserts" to everyone who is not reading the schema. Matching only recipes
+ * carrying that exact row — which is what this did before {@code includeSubcategories}
+ * existed — makes a recipe filed under "Tartes" invisible from "Desserts", so the
+ * hierarchy renders in the navigation and then does nothing when clicked.
+ * <p>
+ * So the default is to widen: <strong>an absent {@code includeSubcategories} means
+ * true.</strong> It is a {@link Boolean} rather than a {@code boolean} for exactly
+ * that reason — a primitive would bind absent to {@code false} and quietly give
+ * the wrong default to every client that does not know the parameter exists.
+ * <p>
+ * {@code includeSubcategories=false} asks for exact membership instead: the
+ * recipes filed under <em>this</em> category and no other. That is the right
+ * question for an admin checking what is actually in a category before deleting
+ * or merging it, and the wrong one for browsing.
+ * <p>
+ * The flag is free on a flat taxonomy: a category with no children widens to
+ * itself, so nothing changes for an installation that never nests anything.
+ *
  * <h2>Ids and names, both</h2>
  * The id filters are for a UI that just showed the user a list to pick from; the
  * name filters are for a user typing. Only the first kind existed before, which
@@ -37,23 +57,30 @@ import org.springframework.data.domain.Sort;
  * @param authorId     exactly this author
  * @param authorName   matched against the author's username, case-insensitively,
  *                     anywhere in the string
- * @param categoryId   single-value on purpose. Multi-category filtering —
- *                     "desserts AND rapide" — needs an AND-versus-OR decision and
- *                     a different query shape, and is out of scope until a UI
- *                     asks for it. Matches this category exactly and does
- *                     <em>not</em> include its subcategories; see
- *                     {@code docs/recipes-domain-model.md}
- * @param categoryName matched against the category's normalized name, so typing
- *                     {@code entrees} finds {@code Entrées}. A recipe matches if
- *                     <em>any</em> of its categories does
- * @param tagId        exactly this tag
- * @param tagName      matched against the tag's normalized name, same rules as
- *                     {@code categoryName}
- * @param sortBy       which column to order by, from a closed set — see
- *                     {@link RecipeSortField} for why it is not free text
- * @param direction    {@code ASC} or {@code DESC}. Independent of {@code sortBy},
- *                     so "oldest first" and "reverse alphabetical" are both
- *                     already expressible
+ * @param categoryId           single-value on purpose. Multi-category filtering —
+ *                             "desserts AND rapide" — needs an AND-versus-OR
+ *                             decision and a different query shape, and is out of
+ *                             scope until a UI asks for it
+ * @param categoryName         matched against the category's normalized name, so
+ *                             typing {@code entrees} finds {@code Entrées}. A
+ *                             recipe matches if <em>any</em> of its categories
+ *                             does. This and {@code categoryId} are two spellings
+ *                             of one filter: supplying both unions their matches
+ *                             rather than intersecting them, see
+ *                             {@code CategoryService.findMatchingIds}
+ * @param includeSubcategories whether a category filter reaches everything filed
+ *                             <em>beneath</em> the category as well, at any depth.
+ *                             <strong>Defaults to true</strong> when the parameter
+ *                             is absent — see below
+ * @param tagId                exactly this tag. Tags are flat, so nothing here
+ *                             widens them
+ * @param tagName              matched against the tag's normalized name, same
+ *                             rules as {@code categoryName}
+ * @param sortBy               which column to order by, from a closed set — see
+ *                             {@link RecipeSortField} for why it is not free text
+ * @param direction            {@code ASC} or {@code DESC}. Independent of
+ *                             {@code sortBy}, so "oldest first" and "reverse
+ *                             alphabetical" are both already expressible
  */
 public record RecipeSearchRequest(
 
@@ -70,6 +97,8 @@ public record RecipeSearchRequest(
         @Size(max = 100)
         String categoryName,
 
+        Boolean includeSubcategories,
+
         String tagId,
 
         @Size(max = 100)
@@ -79,6 +108,16 @@ public record RecipeSearchRequest(
 
         Sort.Direction direction
 ) {
+
+    /**
+     * Whether the category filter reaches subcategories, resolving the absent case.
+     * <p>
+     * Absent means true: see the class javadoc for why that is the default and why
+     * the field is a {@link Boolean}.
+     */
+    public boolean includesSubcategories() {
+        return includeSubcategories == null || includeSubcategories;
+    }
 
     /** Newest first: what a recipe library opens on. */
     private static final RecipeSortField DEFAULT_SORT_FIELD = RecipeSortField.CREATED_AT;

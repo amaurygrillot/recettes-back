@@ -75,6 +75,20 @@ final class CategoryTaxonomy {
         return children.getOrDefault(categoryId, List.of());
     }
 
+    /**
+     * Categories whose normalized name contains this fragment, which the caller
+     * must have normalized the same way.
+     * <p>
+     * Matched in memory rather than with a {@code LIKE} query because the snapshot
+     * is already loaded — the caller wanted it for the subtree walk anyway — and a
+     * second round trip to filter tens of rows would buy nothing.
+     */
+    List<CategoryEntity> matchingNormalizedName(String normalizedFragment) {
+        return byId.values().stream()
+                .filter(category -> category.getNormalizedName().contains(normalizedFragment))
+                .toList();
+    }
+
     /** Everything below this category at any depth, parents before their own children. */
     List<CategoryEntity> descendantsOf(String categoryId) {
         List<CategoryEntity> descendants = new ArrayList<>();

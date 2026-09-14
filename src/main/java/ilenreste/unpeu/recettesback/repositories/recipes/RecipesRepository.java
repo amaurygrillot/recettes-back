@@ -23,55 +23,64 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
      * Data's derived {@code COUNT} then counts those duplicates, so
      * {@code getTotalElements()} lies and the last page is wrong. {@code EXISTS}
      * keeps one row per recipe, so both the page and its count are correct. That
-     * matters more now than it did with three filters: {@code categoryName} and
-     * {@code tagName} are to-many <em>and</em> non-unique, so a recipe carrying
-     * two categories whose names both match would otherwise appear twice.
+     * matters more with a subtree filter than it ever did with a single id: a
+     * recipe filed under both "Desserts" and "Tartes" matches the expanded id set
+     * twice over and must still appear once.
      * <p>
      * The {@code :param IS NULL OR ...} form is used instead of a JPA
-     * {@code Specification} because seven optional filters that are all combined
-     * the same way (AND, exact or LIKE) is still below the size where the Criteria
-     * API returns more than it costs in ceremony. If filters start needing
-     * different combinators, revisit.
+     * {@code Specification} because six optional filters that are all combined the
+     * same way (AND, exact or LIKE) is still below the size where the Criteria API
+     * returns more than it costs in ceremony. If filters start needing different
+     * combinators, revisit.
      * <p>
-     * {@code LIKE '%q%'} cannot use a B-tree index, so the title, author-name,
-     * category-name and tag-name searches are sequential scans. Fine for hundreds
-     * of recipes; if it ever is not, the fix is a {@code pg_trgm} GIN index or
-     * PostgreSQL full-text search, not a different query shape.
+     * {@code LIKE '%q%'} cannot use a B-tree index, so the title, author-name and
+     * tag-name searches are sequential scans. Fine for hundreds of recipes; if it
+     * ever is not, the fix is a {@code pg_trgm} GIN index or PostgreSQL full-text
+     * search, not a different query shape.
      * <p>
      * <strong>Every text parameter is cast explicitly.</strong> A bare null
      * parameter has no type for PostgreSQL to infer inside {@code CONCAT} or
      * {@code LOWER}, so it plans the argument as {@code bytea} and the whole query
      * fails with {@code function lower(bytea) does not exist} — on every
      * unfiltered listing, which is the most common request there is. This cost a
-     * shipped bug once already; the three id parameters are compared with
-     * {@code =} against a text column and get their type from that, which is why
-     * only these four carry the cast.
-     * <p>
-     * The name filters match {@code normalized_name} rather than {@code name},
-     * which is what makes typing {@code entrees} find {@code Entrées} — the caller
-     * must normalize the term the same way before passing it in. The author is
-     * matched on {@code username} instead, since users have no normalized column.
+     * shipped bug once already; the id parameters are compared with {@code =}
+     * against a text column and get their type from that, which is why only these
+     * three carry the cast.
      *
-     * @param title          substring of the recipe title, case-insensitive, or null
-     * @param authorId       exact author id, or null
-     * @param authorName     substring of the author's username, case-insensitive, or null
-     * @param categoryId     exact category id, or null
-     * @param categoryName   substring of a category's <em>normalized</em> name, or null
-     * @param tagId          exact tag id, or null
-     * @param tagName        substring of a tag's <em>normalized</em> name, or null
+     * <h2>Why the category filter is a collection plus a flag</h2>
+     * The caller resolves what "this category" means before getting here — the
+     * name match and, when asked, the whole subtree beneath it — and hands over
+     * the finished id set. That is why there is no {@code categoryName} parameter
+     * any more: matching a name is a question about the taxonomy, and the taxonomy
+     * is not this repository's to know.
+     * <p>
+     * {@code filterByCategory} cannot be derived from the collection being empty,
+     * which is the shape that would otherwise be tempting. An empty set is a
+     * <em>meaningful</em> answer: the caller asked for a category whose name
+     * matches nothing, so the honest result is no recipes at all. Collapsing that
+     * into "no filter" would answer a search for a category that does not exist
+     * with the entire library.
+     *
+     * @param title            substring of the recipe title, case-insensitive, or null
+     * @param authorId         exact author id, or null
+     * @param authorName       substring of the author's username, case-insensitive, or null
+     * @param filterByCategory whether a category filter was asked for at all
+     * @param categoryIds      the ids it resolved to. Ignored unless
+     *                         {@code filterByCategory}; may be empty, which then
+     *                         matches nothing
+     * @param tagId            exact tag id, or null
+     * @param tagName          substring of a tag's <em>normalized</em> name, or null
      */
     @Query("""
             SELECT r.id FROM RecipeEntity r
-            WHERE (:authorId   IS NULL OR r.author.id = :authorId)
-              AND (:categoryId IS NULL OR EXISTS (SELECT 1 FROM r.categories c WHERE c.id = :categoryId))
-              AND (:tagId      IS NULL OR EXISTS (SELECT 1 FROM r.tags       t WHERE t.id = :tagId))
+            WHERE (:authorId IS NULL OR r.author.id = :authorId)
+              AND (:filterByCategory = FALSE
+                   OR EXISTS (SELECT 1 FROM r.categories c WHERE c.id IN :categoryIds))
+              AND (:tagId IS NULL OR EXISTS (SELECT 1 FROM r.tags t WHERE t.id = :tagId))
               AND (CAST(:title AS string) IS NULL
                    OR LOWER(r.title) LIKE LOWER(CONCAT('%', CAST(:title AS string), '%')))
               AND (CAST(:authorName AS string) IS NULL
                    OR LOWER(r.author.username) LIKE LOWER(CONCAT('%', CAST(:authorName AS string), '%')))
-              AND (CAST(:categoryName AS string) IS NULL
-                   OR EXISTS (SELECT 1 FROM r.categories c
-                              WHERE c.normalizedName LIKE CONCAT('%', CAST(:categoryName AS string), '%')))
               AND (CAST(:tagName AS string) IS NULL
                    OR EXISTS (SELECT 1 FROM r.tags t
                               WHERE t.normalizedName LIKE CONCAT('%', CAST(:tagName AS string), '%')))
@@ -79,8 +88,8 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
     Page<String> searchIds(@Param("title") String title,
                            @Param("authorId") String authorId,
                            @Param("authorName") String authorName,
-                           @Param("categoryId") String categoryId,
-                           @Param("categoryName") String categoryName,
+                           @Param("filterByCategory") boolean filterByCategory,
+                           @Param("categoryIds") Collection<String> categoryIds,
                            @Param("tagId") String tagId,
                            @Param("tagName") String tagName,
                            Pageable pageable);

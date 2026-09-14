@@ -149,19 +149,60 @@ exists: unreachable from any root and invisible to every hierarchy query. Re-par
 decision only an admin can make. A category's own relation row *is* cleared automatically, because for a main category
 it points at the row being deleted and nothing else could resolve it.
 
-## Known limitation: filtering recipes by a main category does not include its subcategories
+## Filtering recipes by a category reaches its subcategories
 
-`GET /recipes?categoryId=<desserts>` matches recipes carrying **that exact category**. A recipe filed only under
-"Tartes" does not appear.
+`GET /recipes?categoryId=<desserts>` returns the recipes filed under "Desserts" **and** everything beneath it — "Tartes",
+"Tartes aux pommes", at any depth. `?includeSubcategories=false` asks for exact membership instead.
 
-This is a real gap and it is deferred deliberately rather than overlooked. Expanding the filter to the whole subtree
-means the service resolving an id set and the query taking a collection, which changes the shape of the one query in
-this codebase that has already shipped a bug (see `RecipesRepository.searchIds` and the `CAST(:q AS string)` note).
-Doing it in the same change as the hierarchy itself would have made both harder to review.
+This shipped as a known gap in the first version of the hierarchy and was closed straight after, because without it the
+tree renders in the navigation and then does nothing when clicked: a recipe filed only under "Tartes" was invisible from
+"Desserts".
 
-Two things make it liveable in the meantime: a recipe may carry several categories, so an author can file a tarte under
-both "Desserts" and "Tartes"; and `?categoryName=` matches by name, so a naming convention gets part of the way. **This
-is the most obvious next piece of work on categories.**
+### The default is to include subcategories
+
+An absent `includeSubcategories` means **true**. Browsing is what nearly every caller is doing, and "show me the
+desserts" means the whole subtree to anyone not reading the schema. Exact membership is the admin's question — "what is
+actually filed in this category before I delete or merge it?" — and has to be asked for.
+
+`RecipeSearchRequest.includeSubcategories` is a `Boolean`, not a `boolean`, and that is load-bearing: Spring binds an
+absent query parameter to `false` for a primitive, which would quietly hand the wrong default to every client that
+does not know the parameter exists.
+
+The flag costs nothing on a flat taxonomy. A category with no children widens to itself, so an installation that never
+nests anything sees no change at all.
+
+### How it works
+
+The widening happens **before** the query, not inside it.
+
+1. `RecipeService` checks whether a category filter was asked for at all — a non-blank `categoryId` or `categoryName`.
+   If not, the category clause is switched off entirely and the taxonomy is never loaded.
+2. `CategoryService.findMatchingIds` builds one `CategoryTaxonomy` snapshot — the same two queries every hierarchy read
+   costs — resolves `categoryName` against the normalized names in memory, and, when asked, adds every descendant of
+   every match.
+3. `RecipesRepository.searchIds` receives a finished id set and matches recipes carrying **any** of those ids, with the
+   same `EXISTS` shape as before, so a recipe filed under both "Desserts" and "Tartes" still counts once.
+
+The subtree walk therefore has exactly one implementation — the one `/categories/{id}/subcategories` already uses,
+with its visited-set guard against a hand-edited cycle — rather than a second copy written in SQL that would eventually
+disagree with it. A recursive CTE was the alternative and was rejected for the same reason the rest of the hierarchy
+uses an in-memory walk: tens of rows, read constantly, and one less place for the definition of "descendant" to live.
+
+### Two decisions that fall out of that shape
+
+**Empty is not "no filter".** The query takes a `filterByCategory` flag *and* the id collection, rather than inferring
+the flag from the collection being empty. An empty set is a real answer — `?categoryName=inexistante` matched no
+category — and the honest result is no recipes. Collapsing it into "no filter" would answer a search for a misspelled
+category with the entire library, which reads to the user as the filter being ignored. `RecipesRepositoryTest` pins
+this against the real PostgreSQL, which also proves Hibernate renders an empty `IN` list as a contradiction rather than
+as invalid SQL.
+
+**`categoryId` and `categoryName` now union rather than intersect.** They used to be two separate `EXISTS` clauses, so
+supplying both meant "carries this category AND carries one whose name matches". They are now two spellings of one
+filter — what a dropdown sends and what a search box sends — so their matches are combined before widening. An
+intersection of "the category I clicked" and "categories whose name looks like what I typed" is not a question anyone
+asks, and expressing it would have cost a second collection parameter and a second flag in the one query here that has
+already shipped a bug.
 
 ## Migration note
 

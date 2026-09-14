@@ -326,4 +326,72 @@ class CategoryServiceTest {
         assertThatThrownBy(() -> categoryService.findSuperiorCategories("ghost"))
                 .isInstanceOf(ResourceNotFoundException.class);
     }
+
+    /** Desserts > Tartes > Tartes aux pommes, plus an unrelated root. */
+    private void givenDessertsTree() {
+        given("cat-1", "Desserts", "desserts", "cat-1");
+        given("cat-2", "Tartes", "tartes", "cat-1");
+        given("cat-3", "Tartes aux pommes", "tartes aux pommes", "cat-2");
+        given("cat-4", "Entr\u00e9es", "entrees", "cat-4");
+    }
+
+    @Test
+    void widensACategoryToEverythingBeneathIt_atAnyDepth() {
+        // What makes clicking "Desserts" in a menu show the tartes filed under it.
+        givenDessertsTree();
+
+        assertThat(categoryService.findMatchingIds("cat-1", null, true))
+                .containsExactlyInAnyOrder("cat-1", "cat-2", "cat-3");
+    }
+
+    @Test
+    void keepsExactMembershipWhenSubcategoriesAreExcluded() {
+        givenDessertsTree();
+
+        assertThat(categoryService.findMatchingIds("cat-1", null, false)).containsExactly("cat-1");
+    }
+
+    @Test
+    void widensFromTheMiddleOfTheTree_notFromItsRoot() {
+        // Widening goes down only. "Tartes" reaches "Tartes aux pommes", never back up to "Desserts".
+        givenDessertsTree();
+
+        assertThat(categoryService.findMatchingIds("cat-2", null, true))
+                .containsExactlyInAnyOrder("cat-2", "cat-3");
+    }
+
+    @Test
+    void matchesCategoryNamesOnTheNormalizedForm_andWidensEachMatch() {
+        // The term is normalized the same way the stored names were, so an accented, shouted query
+        // still finds its row - and every category it matches brings its own subtree.
+        givenDessertsTree();
+
+        assertThat(categoryService.findMatchingIds(null, "  TARTES ", true))
+                .containsExactlyInAnyOrder("cat-2", "cat-3");
+        assertThat(categoryService.findMatchingIds(null, "ENTR\u00c9ES", false)).containsExactly("cat-4");
+    }
+
+    @Test
+    void unionsTheIdAndTheName_becauseTheyAreTwoSpellingsOfOneFilter() {
+        givenDessertsTree();
+
+        assertThat(categoryService.findMatchingIds("cat-3", "entrees", false))
+                .containsExactlyInAnyOrder("cat-3", "cat-4");
+    }
+
+    @Test
+    void returnsAnEmptySetWhenTheNameMatchesNothing() {
+        // Empty, not a signal to drop the filter: the caller decides that, and must not.
+        givenDessertsTree();
+
+        assertThat(categoryService.findMatchingIds(null, "inexistante", true)).isEmpty();
+    }
+
+    @Test
+    void keepsAnUnknownIdSoThatItMatchesNoRecipe() {
+        // Dropping it would turn the filter into "no filter" and return the entire library.
+        givenDessertsTree();
+
+        assertThat(categoryService.findMatchingIds("ghost", null, true)).containsExactly("ghost");
+    }
 }

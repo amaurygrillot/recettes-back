@@ -671,8 +671,9 @@ have one place to be named, documented and validated. The wire format is unchang
 | `title`        | substring of the recipe title, case-insensitive                     |
 | `authorId`     | exactly that author                                                 |
 | `authorName`   | substring of the author's username, case-insensitive                |
-| `categoryId`   | exactly that category                                               |
-| `categoryName` | substring of a category's *normalized* name — `entrees` finds `Entrées` |
+| `categoryId`   | that category, **and everything beneath it** unless told otherwise  |
+| `categoryName` | substring of a category's *normalized* name — `entrees` finds `Entrées`; widened the same way |
+| `includeSubcategories` | `true` (default) or `false` for exact membership            |
 | `tagId`        | exactly that tag                                                    |
 | `tagName`      | substring of a tag's *normalized* name                              |
 | `sortBy`       | `CREATED_AT` (default), `UPDATED_AT` or `TITLE`                     |
@@ -694,8 +695,9 @@ alphabetical" were already expressible and needed nothing new.
 
 `categoryId` stays a single-value filter (match recipes carrying *that* category) even though a recipe now has several.
 Multi-category filtering — "desserts AND rapide" — needs an AND-vs-OR decision and a different query shape; out of scope
-until there is a UI asking for it. It also matches that category **exactly** and does not include its subcategories —
-see [category-hierarchy.md](category-hierarchy.md#known-limitation-filtering-recipes-by-a-main-category-does-not-include-its-subcategories).
+until there is a UI asking for it. By default it also reaches every subcategory of that category, at any depth, and
+`categoryId` and `categoryName` are unioned as two spellings of one filter — see
+[category-hierarchy.md](category-hierarchy.md#filtering-recipes-by-a-category-reaches-its-subcategories).
 
 `DELETE` was not in your list. A library with no way to remove a mistaken entry is awkward, and its permission rule is
 identical to update, so it is designed here — but say the word and it comes out. If it stays, deletion cascades to
@@ -950,9 +952,6 @@ set or a size. `assertThat(response.steps()).extracting(Step::instruction).conta
 - **`ddl-auto=update` with no migration tool.** Unchanged by this work and still the thing most likely to hurt on the
   VPS: it cannot drop or rename anything, it silently skips changes it cannot make, and nothing records what a given
   database has had applied. Adding Flyway deserves its own session before the first real deployment.
-- **Filtering recipes by a main category does not reach its subcategories.** `?categoryId=<desserts>` matches that
-  exact category, so a recipe filed only under "Tartes" does not appear. Deferred deliberately rather than overlooked;
-  see [category-hierarchy.md](category-hierarchy.md#known-limitation-filtering-recipes-by-a-main-category-does-not-include-its-subcategories).
 - **Three pre-existing defects in the users mapping** — `user_roles` mapped both as a `@ManyToMany` join table and as
   an entity, `RoleEntity`'s self-referential `roles` collection, and `RolesRepository`/`UserRolesRepository` declaring
   `UUID` id types for `String`-id entities. All out of scope here, all load-bearing for anything creating users or

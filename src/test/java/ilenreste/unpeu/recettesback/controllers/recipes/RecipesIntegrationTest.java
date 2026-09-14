@@ -73,6 +73,8 @@ class RecipesIntegrationTest {
     private String tagName;
     private String ingredientId;
     private final List<String> createdRecipeIds = new ArrayList<>();
+    /** Deleted before the fixture categories, whose relation rows they point at. */
+    private final List<String> createdSubcategoryIds = new ArrayList<>();
 
     @BeforeEach
     void setUp() {
@@ -107,6 +109,8 @@ class RecipesIntegrationTest {
         // The relation row has to go first: every category has one, and a main category's points
         // at itself, so the foreign key outlives the category unless it is cleared by hand. The
         // endpoint does this in CategoryService.beforeDelete; a repository delete does not.
+        // Children before parents, or the parent's delete trips the relation foreign key.
+        createdSubcategoryIds.reversed().forEach(this::deleteCategory);
         deleteCategory(categoryId);
         deleteCategory(secondCategoryId);
         admin.close();
@@ -487,6 +491,76 @@ class RecipesIntegrationTest {
                  "ingredientGroups": [{"ingredients": [{"ingredientId": "%s"}]}], "steps": []}
                 """.formatted(categoryId, ingredientId), authorToken), String.class).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    /**
+     * The hierarchy has to do something when clicked. A recipe filed only under a subcategory is
+     * reachable from its parent by default, and only an explicit includeSubcategories=false asks for
+     * exact membership - the admin's question, not the browser's.
+     * <p>
+     * The negative assertions are the half that can fail: the positive ones would also pass if the
+     * flag were silently ignored in one direction.
+     */
+    @Test
+    void filtersByAMainCategoryIncludingOrExcludingItsSubcategories() {
+        String tartesName = unique("tartes");
+        String tartes = idOf(post("/categories",
+                "{\"name\":\"%s\",\"superiorCategoryId\":\"%s\"}".formatted(tartesName, categoryId),
+                adminToken, HttpStatus.CREATED));
+        createdSubcategoryIds.add(tartes);
+
+        String tarte = createRecipe("""
+                {
+                  "title": "%s",
+                  "categoryIds": ["%s"],
+                  "ingredientGroups": [
+                    {"ingredients": [{"ingredientId": "%s", "quantity": 200.5}]}
+                  ],
+                  "steps": [{"instruction": "Melanger"}]
+                }
+                """.formatted(unique("Tarte aux prunes"), tartes, ingredientId), authorToken);
+
+        // By id: the default reaches the subcategory, and so does saying so explicitly.
+        assertThat(restTemplate.getForObject("/recipes?categoryId=" + categoryId, String.class))
+                .contains(tarte);
+        assertThat(restTemplate.getForObject(
+                "/recipes?categoryId=" + categoryId + "&includeSubcategories=true", String.class))
+                .contains(tarte);
+        assertThat(restTemplate.getForObject(
+                "/recipes?categoryId=" + categoryId + "&includeSubcategories=false", String.class))
+                .doesNotContain(tarte);
+
+        // By name, the same two answers.
+        assertThat(restTemplate.getForObject("/recipes?categoryName=" + categoryName, String.class))
+                .contains(tarte);
+        assertThat(restTemplate.getForObject(
+                "/recipes?categoryName=" + categoryName + "&includeSubcategories=false", String.class))
+                .doesNotContain(tarte);
+
+        // Filtering by the subcategory itself finds it either way.
+        assertThat(restTemplate.getForObject(
+                "/recipes?categoryId=" + tartes + "&includeSubcategories=false", String.class))
+                .contains(tarte);
+
+        // Not a boolean: a binding failure, so 400 rather than a silent default.
+        assertThat(restTemplate.getForEntity(
+                "/recipes?categoryId=" + categoryId + "&includeSubcategories=perhaps", String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    /**
+     * A category name that matches nothing is not "no filter". Answering it with the whole library
+     * would look to the user like the filter being ignored.
+     */
+    @Test
+    void aCategoryNameThatMatchesNothingReturnsNoRecipes() {
+        createRecipe(minimalRecipeJson(unique("Tarte")), authorToken);
+
+        ResponseEntity<String> response = restTemplate.getForEntity(
+                "/recipes?categoryName=" + unique("inexistante"), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains("\"totalElements\":0");
     }
 
     @Test

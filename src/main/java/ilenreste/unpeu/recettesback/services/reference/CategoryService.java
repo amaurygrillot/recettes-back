@@ -194,6 +194,60 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
     }
 
     /**
+     * The set of category ids a recipe search means by "this category" —
+     * optionally widened to everything filed beneath it.
+     * <p>
+     * It lives here rather than in {@code RecipeService} because it is entirely a
+     * question about the taxonomy, and this is the class that owns the taxonomy.
+     * One snapshot answers both halves: the name match and the subtree walk.
+     *
+     * <h2>The two arguments are alternative spellings of one filter, not two filters</h2>
+     * {@code categoryId} is what a UI sends after showing the user a list to pick
+     * from; {@code categoryName} is what a search box sends. They name the same
+     * axis, so supplying both <strong>unions</strong> their matches rather than
+     * intersecting them. That is a deliberate choice and a change from when the two
+     * were separate {@code EXISTS} clauses: an intersection of "the category I
+     * clicked" and "categories whose name looks like what I typed" is not a
+     * question anybody asks, and expressing it cost a second collection parameter
+     * in the one query here that has already shipped a bug.
+     *
+     * @param includeSubcategories when true, every descendant of every match is
+     *                             included, at any depth. This is what makes
+     *                             clicking "Desserts" in a navigation menu show the
+     *                             tartes filed under it — without it the hierarchy
+     *                             is visible but does nothing
+     * @return the ids to match against, possibly <strong>empty</strong> when
+     *         nothing matched the name. Empty is not the same as "no filter": the
+     *         caller asked for a category and none exists, so the honest answer is
+     *         no recipes. Deciding whether a filter was asked for at all is the
+     *         caller's job, since only it can see the raw request
+     */
+    @Transactional(readOnly = true)
+    public Set<String> findMatchingIds(String categoryId, String categoryName, boolean includeSubcategories) {
+        CategoryTaxonomy taxonomy = taxonomy();
+
+        Set<String> matches = new LinkedHashSet<>();
+        if (categoryId != null && !categoryId.isBlank()) {
+            // Kept even when it names nothing: an unknown id must match no recipes, not every one.
+            matches.add(categoryId);
+        }
+        if (categoryName != null && !categoryName.isBlank()) {
+            taxonomy.matchingNormalizedName(normalizer.normalize(categoryName))
+                    .forEach(category -> matches.add(category.getId()));
+        }
+        if (!includeSubcategories) {
+            return Set.copyOf(matches);
+        }
+
+        Set<String> withDescendants = new LinkedHashSet<>(matches);
+        matches.forEach(id -> taxonomy.descendantsOf(id)
+                .forEach(descendant -> withDescendants.add(descendant.getId())));
+        log.debug("Category filter {} widened to {} id(s) including subcategories",
+                matches, withDescendants.size());
+        return Set.copyOf(withDescendants);
+    }
+
+    /**
      * The whole taxonomy as a forest of main categories, each carrying its
      * children nested, name-sorted at every level.
      */

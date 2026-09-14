@@ -148,6 +148,11 @@ class RecipesRepositoryTest {
         return PageRequest.of(0, 20, Sort.by(Sort.Direction.DESC, "createdAt"));
     }
 
+    /** Only the category filter on, with the id set the service would have resolved. */
+    private Page<String> inCategories(java.util.Collection<String> categoryIds) {
+        return recipesRepository.searchIds(null, null, null, true, categoryIds, null, null, firstPage());
+    }
+
     /**
      * The bug this whole query shape exists to avoid.
      * <p>
@@ -161,8 +166,7 @@ class RecipesRepositoryTest {
         CategoryEntity dessert = category("dessert");
         recipe("Tarte aux pommes", List.of(dessert, category("gouter"), category("automne")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(
-                null, null, null, dessert.getId(), null, null, null, firstPage());
+        Page<String> page = inCategories(List.of(dessert.getId()));
 
         assertThat(page.getTotalElements()).isEqualTo(1);
         assertThat(page.getContent()).hasSize(1);
@@ -174,7 +178,7 @@ class RecipesRepositoryTest {
         recipe("Soupe", List.of(category("entree")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, null, null, null, null, firstPage());
+                null, null, null, false, List.of(), null, null, firstPage());
 
         assertThat(page.getTotalElements()).isGreaterThanOrEqualTo(2);
     }
@@ -185,8 +189,7 @@ class RecipesRepositoryTest {
         RecipeEntity tarte = recipe("Tarte", List.of(dessert), List.of());
         recipe("Soupe", List.of(category("entree")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(
-                null, null, null, dessert.getId(), null, null, null, firstPage());
+        Page<String> page = inCategories(List.of(dessert.getId()));
 
         assertThat(page.getContent()).containsExactly(tarte.getId());
     }
@@ -198,7 +201,7 @@ class RecipesRepositoryTest {
         recipe("Steak", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, null, null, vegetarien.getId(), null, firstPage());
+                null, null, null, false, List.of(), vegetarien.getId(), null, firstPage());
 
         assertThat(page.getContent()).containsExactly(soupe.getId());
     }
@@ -210,7 +213,7 @@ class RecipesRepositoryTest {
         recipe("Theirs", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, author.getId(), null, null, null, null, null, firstPage());
+                null, author.getId(), null, false, List.of(), null, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(mine.getId());
     }
@@ -221,7 +224,7 @@ class RecipesRepositoryTest {
         recipe("Soupe a l'oignon", List.of(category("entree")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                "pommes", null, null, null, null, null, null, firstPage());
+                "pommes", null, null, false, List.of(), null, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(tarte.getId());
     }
@@ -235,26 +238,10 @@ class RecipesRepositoryTest {
         recipe("Autre rapide", List.of(category("plat")), List.of(rapide));
 
         Page<String> page = recipesRepository.searchIds(
-                "tarte", author.getId(), null, dessert.getId(), null, rapide.getId(), null, firstPage());
+                "tarte", author.getId(), null, true, List.of(dessert.getId()), rapide.getId(), null,
+                firstPage());
 
         assertThat(page.getContent()).containsExactly(wanted.getId());
-    }
-
-    /**
-     * The name filters exist because a user typing into a search box does not know a UUID. They
-     * match normalized_name, which is what makes an unaccented, lower-case term find the stored
-     * spelling - and which is why the caller has to normalize the term the same way.
-     */
-    @Test
-    void filtersByCategoryName_againstTheNormalizedColumn() {
-        CategoryEntity dessert = category("dessert");
-        RecipeEntity tarte = recipe("Tarte", List.of(dessert), List.of());
-        recipe("Soupe", List.of(category("entree")), List.of());
-
-        Page<String> page = recipesRepository.searchIds(
-                null, null, null, null, dessert.getNormalizedName(), null, null, firstPage());
-
-        assertThat(page.getContent()).containsExactly(tarte.getId());
     }
 
     @Test
@@ -264,7 +251,7 @@ class RecipesRepositoryTest {
         recipe("Steak", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, null, null, null, rapide.getNormalizedName(), firstPage());
+                null, null, null, false, List.of(), null, rapide.getNormalizedName(), firstPage());
 
         assertThat(page.getContent()).containsExactly(soupe.getId());
     }
@@ -276,28 +263,69 @@ class RecipesRepositoryTest {
         recipe("Theirs", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, author.getUsername().toUpperCase(java.util.Locale.ROOT), null, null,
+                null, null, author.getUsername().toUpperCase(java.util.Locale.ROOT), false, List.of(),
                 null, null, firstPage());
 
         assertThat(page.getContent()).contains(mine.getId());
     }
 
     /**
-     * A recipe carrying two categories whose names both match must still appear once. This is the
-     * same duplicate-row trap the id filters have, made likelier by names not being unique across
-     * the LIKE.
+     * How a subtree filter reaches the query: as several ids at once. A recipe in any one of them
+     * matches.
      */
     @Test
-    void countsARecipeOnce_evenWhenSeveralOfItsCategoryNamesMatch() {
-        String shared = "noel" + UUID.randomUUID().toString().replace("-", "");
-        CategoryEntity first = category(shared + "a");
-        CategoryEntity second = category(shared + "b");
-        recipe("Buche", List.of(first, second), List.of());
+    void matchesARecipeInAnyOfTheGivenCategories() {
+        CategoryEntity tartes = category("tartes");
+        CategoryEntity glaces = category("glaces");
+        RecipeEntity tarte = recipe("Tarte", List.of(tartes), List.of());
+        RecipeEntity glace = recipe("Glace", List.of(glaces), List.of());
+        recipe("Soupe", List.of(category("entree")), List.of());
 
-        Page<String> page = recipesRepository.searchIds(
-                null, null, null, null, shared, null, null, firstPage());
+        Page<String> page = inCategories(List.of(tartes.getId(), glaces.getId()));
+
+        assertThat(page.getContent()).containsExactlyInAnyOrder(tarte.getId(), glace.getId());
+    }
+
+    /**
+     * The duplicate-row trap, made likelier by subtree expansion: a recipe filed under both
+     * "Desserts" and "Tartes" matches the widened set twice over and must still count once.
+     */
+    @Test
+    void countsARecipeOnce_evenWhenSeveralOfItsCategoriesAreInTheSet() {
+        CategoryEntity desserts = category("desserts");
+        CategoryEntity tartes = category("tartes");
+        recipe("Tarte", List.of(desserts, tartes), List.of());
+
+        Page<String> page = inCategories(List.of(desserts.getId(), tartes.getId()));
 
         assertThat(page.getTotalElements()).isEqualTo(1);
+        assertThat(page.getContent()).hasSize(1);
+    }
+
+    /**
+     * The case that makes the flag necessary. A category name that matched nothing resolves to an
+     * EMPTY id set with the filter ON, and the honest answer is no recipes - not the entire library.
+     * It is also the proof that Hibernate renders an empty IN list as a contradiction on PostgreSQL
+     * rather than as invalid SQL, which a mocked repository could never show.
+     */
+    @Test
+    void matchesNothingWhenTheCategoryFilterResolvedToAnEmptySet() {
+        recipe("Tarte", List.of(category("dessert")), List.of());
+
+        Page<String> page = inCategories(List.of());
+
+        assertThat(page.getTotalElements()).isZero();
+    }
+
+    /** With the flag off, whatever sits in the collection must not narrow anything. */
+    @Test
+    void ignoresTheCategoryIdsWhenTheFilterIsOff() {
+        RecipeEntity tarte = recipe("Tarte", List.of(category("dessert")), List.of());
+
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, false, List.of("no-such-category"), null, null, firstPage());
+
+        assertThat(page.getContent()).contains(tarte.getId());
     }
 
     /**
@@ -311,7 +339,7 @@ class RecipesRepositoryTest {
         RecipeEntity b = recipe(prefix + "-B", List.of(dessert), List.of());
         RecipeEntity a = recipe(prefix + "-A", List.of(dessert), List.of());
 
-        Page<String> page = recipesRepository.searchIds(prefix, null, null, null, null, null, null,
+        Page<String> page = recipesRepository.searchIds(prefix, null, null, false, List.of(), null, null,
                 PageRequest.of(0, 20, Sort.by(Sort.Direction.ASC, "title")));
 
         assertThat(page.getContent()).containsExactly(a.getId(), b.getId());

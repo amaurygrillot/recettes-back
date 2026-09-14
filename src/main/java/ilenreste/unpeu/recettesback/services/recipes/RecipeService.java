@@ -32,6 +32,7 @@ import ilenreste.unpeu.recettesback.repositories.reference.CategoryRelationsRepo
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.TagsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
+import ilenreste.unpeu.recettesback.services.reference.CategoryService;
 import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import lombok.extern.log4j.Log4j2;
@@ -46,7 +47,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Collection;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 
 @Log4j2
@@ -61,6 +64,7 @@ public class RecipeService {
     private final UnitsRepository unitsRepository;
     private final MediaRepository mediaRepository;
     private final ReferenceResolver referenceResolver;
+    private final CategoryService categoryService;
     private final ReferenceNameNormalizer normalizer;
     private final CurrentUserService currentUserService;
     private final RecipeMapper mapper;
@@ -69,7 +73,8 @@ public class RecipeService {
                          CategoryRelationsRepository categoryRelationsRepository,
                          TagsRepository tagsRepository, IngredientsRepository ingredientsRepository,
                          UnitsRepository unitsRepository, MediaRepository mediaRepository,
-                         ReferenceResolver referenceResolver, ReferenceNameNormalizer normalizer,
+                         ReferenceResolver referenceResolver, CategoryService categoryService,
+                         ReferenceNameNormalizer normalizer,
                          CurrentUserService currentUserService, RecipeMapper mapper) {
         this.recipesRepository = recipesRepository;
         this.categoriesRepository = categoriesRepository;
@@ -79,6 +84,7 @@ public class RecipeService {
         this.unitsRepository = unitsRepository;
         this.mediaRepository = mediaRepository;
         this.referenceResolver = referenceResolver;
+        this.categoryService = categoryService;
         this.normalizer = normalizer;
         this.currentUserService = currentUserService;
         this.mapper = mapper;
@@ -101,20 +107,26 @@ public class RecipeService {
      * the request contributes an ordering chosen from a closed enum. See
      * {@code RecipeSortField}.
      * <p>
-     * The two name filters are normalized the same way the reference tables
-     * normalize what they store, which is what makes {@code ?categoryName=entrees}
-     * find {@code Entrées}. Doing it here rather than in the query is what lets the
+     * The tag name filter is normalized the same way the reference tables normalize
+     * what they store, which is what makes {@code ?tagName=vegetarien} find
+     * {@code végétarien}. Doing it here rather than in the query is what lets the
      * comparison stay a plain {@code LIKE} against an ordinary column.
+     * <p>
+     * The category filter is resolved to a set of ids before the query runs — by
+     * {@code CategoryService}, which owns the taxonomy — because "this category"
+     * may mean the whole subtree beneath it. See
+     * {@link #resolveCategoryFilter(RecipeSearchRequest)}.
      */
     @Transactional(readOnly = true)
     public Page<RecipeSummaryResponse> search(RecipeSearchRequest request, Pageable pageable) {
         Pageable sorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), request.sort());
+        Collection<String> categoryIds = resolveCategoryFilter(request);
         Page<String> idPage = recipesRepository.searchIds(
                 blankToNull(request.title()),
                 blankToNull(request.authorId()),
                 blankToNull(request.authorName()),
-                blankToNull(request.categoryId()),
-                normalizedOrNull(request.categoryName()),
+                categoryIds != null,
+                categoryIds == null ? Set.of() : categoryIds,
                 blankToNull(request.tagId()),
                 normalizedOrNull(request.tagName()),
                 sorted);
@@ -389,6 +401,31 @@ public class RecipeService {
      */
     private RecipeResponse toResponse(RecipeEntity recipe) {
         return mapper.toResponse(recipe, categoryRelationsRepository.superiorIdsByCategoryId());
+    }
+
+    /**
+     * What "this category" means for one request, as a set of ids — or null when
+     * no category filter was asked for.
+     * <p>
+     * Null and empty are different answers and the distinction is load-bearing:
+     * <strong>null</strong> is "the caller named no category", which must not
+     * filter at all, and <strong>empty</strong> is "the caller named a category
+     * that does not exist", which must match nothing. Collapsing the second into
+     * the first would answer a search for a misspelled category with the entire
+     * library, which looks like the filter being ignored — and is, in a sense.
+     * <p>
+     * The widening itself belongs to {@code CategoryService}: it is a question
+     * about the taxonomy, and keeping it there means the subtree walk has exactly
+     * one implementation rather than a second copy that eventually disagrees about
+     * cycles or depth.
+     */
+    private Collection<String> resolveCategoryFilter(RecipeSearchRequest request) {
+        String categoryId = blankToNull(request.categoryId());
+        String categoryName = blankToNull(request.categoryName());
+        if (categoryId == null && categoryName == null) {
+            return null;
+        }
+        return categoryService.findMatchingIds(categoryId, categoryName, request.includesSubcategories());
     }
 
     /** A blank query parameter means "no filter", not "match the empty string". */

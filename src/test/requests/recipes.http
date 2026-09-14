@@ -2,7 +2,8 @@
 ### Covers: GET /recipes, GET /recipes/{id}, POST /recipes, PUT /recipes/{id}, DELETE /recipes/{id}
 ###
 ### GET /recipes takes its criteria as a request object bound from the query string: title,
-### authorId, authorName, categoryId, categoryName, tagId, tagName, sortBy, direction - plus the
+### authorId, authorName, categoryId, categoryName, includeSubcategories, tagId, tagName, sortBy,
+### direction - plus the
 ### usual page and size. Every one is optional, including all of them at once.
 ###
 ### Reads are public. Writing needs a login; editing or deleting needs to be the AUTHOR or an
@@ -230,6 +231,65 @@ GET {{baseUrl}}/recipes?categoryName=dessert&authorName={{authorUsername}}
 > {%
     client.test("Finds the recipe by names rather than ids", function () {
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9b-i. Filter by a MAIN category -> 200 OK, recipes in its subcategories included
+### Categories form a tree, and "show me the desserts" means the whole subtree to anyone not reading the
+### schema - so a recipe filed only under "Tartes" is found from "Desserts". includeSubcategories is
+### absent here, and absent means TRUE: it is a Boolean rather than a boolean precisely so a client that
+### does not know the parameter exists still gets the browsing default. Run categories.http #12-13 first
+### to have a subcategory, then file a recipe under it and paste the main category's id below.
+@mainCategoryId = paste-the-id-of-a-main-category-that-has-subcategories
+GET {{baseUrl}}/recipes?categoryId={{mainCategoryId}}
+
+> {%
+    client.test("Returns 200, reaching into the subcategories", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9b-ii. The same, with exact membership -> 200 OK, ONLY recipes filed directly under it
+### The admin's question - what is actually in this category before deleting or merging it - rather than
+### the browser's. A recipe filed only under a subcategory disappears from this result.
+GET {{baseUrl}}/recipes?categoryId={{mainCategoryId}}&includeSubcategories=false
+
+> {%
+    client.test("Returns 200 with exact membership", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9b-iii. By category NAME, subcategories included -> 200 OK
+### categoryName is widened exactly like categoryId. If both are sent they are UNIONED, not intersected:
+### they are two spellings of one filter, what a dropdown sends and what a search box sends.
+GET {{baseUrl}}/recipes?categoryName=dessert&includeSubcategories=true
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 9b-iv. A category name that matches NOTHING -> 200 OK, and no recipes at all
+### Not "no filter". Answering a misspelled category with the entire library would look to the user like
+### the filter being ignored.
+GET {{baseUrl}}/recipes?categoryName=categorie-qui-nexiste-pas
+
+> {%
+    client.test("Returns an empty page, not everything", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.totalElements === 0,
+            "Expected no recipes, got " + response.body.totalElements);
+    });
+%}
+
+### 9b-v. includeSubcategories that is not a boolean -> 400 Bad Request
+GET {{baseUrl}}/recipes?categoryId={{mainCategoryId}}&includeSubcategories=perhaps
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
     });
 %}
 
