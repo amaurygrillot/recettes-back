@@ -239,3 +239,34 @@ Content-Type: image/jpeg
 ### Not scriptable as a single request: it needs more than app.media.max-concurrent-processing
 ### (4) large uploads in flight at once. Lower that property to 1 and fire request #2 twice
 ### concurrently to see it. MediaServiceTest covers it deterministically with a latch.
+
+### 14. Exhaust this account's upload allowance -> 429 Too Many Requests with Retry-After
+### Re-run request #2 app.media.upload-limit times (20) inside app.media.upload-limit-window
+### (10 minutes) and the next one answers 429. Lower upload-limit to 1 to see it in two requests.
+### 429 and NOT 503: nothing is wrong with the request or with the server - this caller has simply
+### had their share. The limit exists because every other gate in the pipeline looks at one file,
+### and one account posting a thousand valid files in a row fills a disk that Postgres writes to.
+### The allowance is per account and rolls continuously, so it does not reset on a clock boundary.
+### Counters live in this instance's heap: restarting the app forgives everyone. UploadRateLimiter
+### and UploadRateLimiterTest are the real coverage; this block is here to read the response.
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample.jpg"
+Content-Type: image/jpeg
+
+< ./sample.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 429 with a Retry-After the client can act on", function () {
+        client.assert(response.status === 429, "Expected 429 but got " + response.status
+            + " - run this block until the allowance is spent");
+        client.assert(response.headers.valueOf("Retry-After") !== null, "Expected Retry-After");
+        // Never 0: the header is whole seconds, and a client reads 0 as "retry immediately".
+        client.assert(parseInt(response.headers.valueOf("Retry-After"), 10) >= 1,
+            "Expected at least one second");
+    });
+%}

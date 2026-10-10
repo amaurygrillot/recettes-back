@@ -83,9 +83,9 @@ public class CategoryController {
      * The categories above this one, nearest first, up to the main category.
      * Empty for a main category.
      */
-    @GetMapping("/{id}/superior-categories")
-    public ResponseEntity<List<CategoryResponse>> superiorCategories(@PathVariable String id) {
-        return ResponseEntity.ok(categoryService.findSuperiorCategories(id));
+    @GetMapping("/{id}/parent-categories")
+    public ResponseEntity<List<CategoryResponse>> parentCategories(@PathVariable String id) {
+        return ResponseEntity.ok(categoryService.findParentCategories(id));
     }
 
     @PostMapping
@@ -95,7 +95,7 @@ public class CategoryController {
         return ResponseEntity.created(URI.create("/categories/" + created.id())).body(created);
     }
 
-    /** Full replacement: an absent {@code superiorCategoryId} promotes the category to a root. */
+    /** Full replacement: an absent {@code parentCategoryId} promotes the category to a root. */
     @PutMapping("/{id}")
     public ResponseEntity<CategoryResponse> update(@PathVariable String id,
                                                    @Valid @RequestBody CategoryRequest request) {

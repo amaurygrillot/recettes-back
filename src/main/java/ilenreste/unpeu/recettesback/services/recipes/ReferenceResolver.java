@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.recipes;
 
+import ilenreste.unpeu.recettesback.entities.Identifiable;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
 import org.springframework.stereotype.Component;
 
@@ -25,40 +26,47 @@ import java.util.function.Function;
  * once, and if fewer rows came back, subtract to find which ones are missing and
  * name them. That is what makes the resulting 400 actionable instead of just
  * "bad request".
+ * <p>
+ * The type parameter is bounded by {@link Identifiable} rather than left as a
+ * bare {@code T}. That is not decoration: the bound is what lets this class read
+ * an id off a loaded row itself, which removed the {@code idExtractor} argument
+ * every call site used to pass — five copies of {@code SomeEntity::getId}, each
+ * of which could have named the wrong getter with nothing to catch it. See
+ * {@link Identifiable} for why the bound is not {@code ReferenceEntity}.
  */
 @Component
 public class ReferenceResolver {
 
     /**
-     * @param field        the request field the ids came from, e.g. {@code "categoryIds"} — it goes
+     * @param fieldName    the request field the ids came from, e.g. {@code "categoryIds"} — it goes
      *                     into the error message, so the caller knows where to look
-     * @param ids          the ids to resolve; nulls and blanks are ignored, and duplicates collapse
+     * @param requestedIds the ids to resolve; nulls and blanks are ignored, and duplicates collapse
      * @param loader       the repository's {@code findAllById}
-     * @param idExtractor  how to read an id back off a loaded entity
      * @return the loaded entities keyed by id, in the order the ids were given
      * @throws InvalidReferenceException naming every id that matched no row
      */
-    public <T> Map<String, T> resolve(String field, Collection<String> ids,
-                                      Function<Collection<String>, List<T>> loader,
-                                      Function<T, String> idExtractor) {
-        Set<String> wanted = new LinkedHashSet<>();
-        if (ids != null) {
-            ids.stream().filter(id -> id != null && !id.isBlank()).forEach(wanted::add);
+    public <E extends Identifiable> Map<String, E> resolve(
+            String fieldName, Collection<String> requestedIds,
+            Function<Collection<String>, List<E>> loader) {
+
+        Set<String> wantedIds = new LinkedHashSet<>();
+        if (requestedIds != null) {
+            requestedIds.stream().filter(id -> id != null && !id.isBlank()).forEach(wantedIds::add);
         }
-        if (wanted.isEmpty()) {
+        if (wantedIds.isEmpty()) {
             return Map.of();
         }
 
-        Map<String, T> found = new LinkedHashMap<>();
-        loader.apply(wanted).forEach(entity -> found.put(idExtractor.apply(entity), entity));
+        Map<String, E> resolvedById = new LinkedHashMap<>();
+        loader.apply(wantedIds).forEach(entity -> resolvedById.put(entity.getId(), entity));
 
-        if (found.size() < wanted.size()) {
+        if (resolvedById.size() < wantedIds.size()) {
             // Report all of them at once. Failing on the first is a worse experience when a client
             // has sent a stale list and would otherwise fix one id per round trip.
-            Set<String> missing = new LinkedHashSet<>(wanted);
-            missing.removeAll(found.keySet());
-            throw new InvalidReferenceException(field, missing);
+            Set<String> missingIds = new LinkedHashSet<>(wantedIds);
+            missingIds.removeAll(resolvedById.keySet());
+            throw new InvalidReferenceException(fieldName, missingIds);
         }
-        return found;
+        return resolvedById;
     }
 }

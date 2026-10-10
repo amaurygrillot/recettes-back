@@ -505,7 +505,7 @@ class RecipesIntegrationTest {
     void filtersByAMainCategoryIncludingOrExcludingItsSubcategories() {
         String tartesName = unique("tartes");
         String tartes = idOf(post("/categories",
-                "{\"name\":\"%s\",\"superiorCategoryId\":\"%s\"}".formatted(tartesName, categoryId),
+                "{\"name\":\"%s\",\"parentCategoryId\":\"%s\"}".formatted(tartesName, categoryId),
                 adminToken, HttpStatus.CREATED));
         createdSubcategoryIds.add(tartes);
 

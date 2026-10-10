@@ -7,7 +7,7 @@ import jakarta.validation.constraints.Size;
  * Create or update a category.
  * <p>
  * Full replacement, not a patch: this same record serves {@code POST} and
- * {@code PUT}, so an absent {@code superiorCategoryId} on a {@code PUT} means
+ * {@code PUT}, so an absent {@code parentCategoryId} on a {@code PUT} means
  * "this is a main category now", not "leave the parent alone". Re-parenting and
  * promoting to a root are both ordinary edits, and a shape where one of them is
  * unexpressible would force a second endpoint.
@@ -15,7 +15,7 @@ import jakarta.validation.constraints.Size;
  * @param name              the category as it should be displayed. Stored as
  *                          typed; uniqueness is decided on its normalized form,
  *                          so {@code Entrées} collides with {@code entrees}
- * @param superiorCategoryId the id of the category this one sits directly under.
+ * @param parentCategoryId the id of the category this one sits directly under.
  *                          Null, blank, or this category's own id all mean
  *                          <strong>main category</strong> — the relation row is
  *                          then written pointing at itself. Anything else must
@@ -29,6 +29,6 @@ public record CategoryRequest(
         @Size(min = 1, max = 100)
         String name,
 
-        String superiorCategoryId
+        String parentCategoryId
 ) {
 }

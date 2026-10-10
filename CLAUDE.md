@@ -26,6 +26,9 @@ In particular, avoid collapsing every error into 400/500 — pick the code that 
 - `401 Unauthorized` — missing/invalid credentials or token.
 - `403 Forbidden` — authenticated but not allowed to perform the action (e.g. a disabled account, wrong role).
 - `400 Bad Request` — reserved for malformed/invalid input (validation failures).
+- `429 Too Many Requests` — the request is fine but *this caller* has made too many of them (`POST /media` is rate
+  limited per account). Distinct from `503`, which says the *server* is momentarily at capacity; both carry
+  `Retry-After`.
 - `500 Internal Server Error` — reserved for unexpected/unhandled failures, not for expected business-rule rejections.
 
 When adding or touching an endpoint, check that its error branches map to the specific status that matches what actually
@@ -107,7 +110,9 @@ the scenario.
 The app expects PostgreSQL reachable at the URL/credentials in
 [application.properties](src/main/resources/application.properties). `spring.jpa.hibernate.ddl-auto=update` means
 Hibernate creates/updates the schema automatically from the JPA entities — there are no migration scripts (no
-Flyway/Liquibase). A `USER` row must exist in the `roles` table for `POST /users/create` to succeed
+Flyway/Liquibase). Update mode only ever *adds*, so a change it cannot express — renaming a column, narrowing a type —
+needs SQL run by hand; those scripts live in `docs/sql/`, next to the document explaining the change, and each says at
+its top when it has to be run. A `USER` row must exist in the `roles` table for `POST /users/create` to succeed
 (`UserService.createUser` looks it up by name and assigns it to every new user; it does not create the role itself).
 
 ### Local secrets (`.env`)
@@ -160,24 +165,30 @@ their only caller.
 > domains, while every other layer is grouped. The trade-off inverted — see
 > [docs/recipes-domain-model.md](docs/recipes-domain-model.md#package-layout).
 
-`configuration`, `properties`, `bootstrap`, `filters` and `exceptions` stay **flat**. They are cross-cutting —
-`SecurityFilterConfig` is not a recipes class or a users class, and `ResourceNotFoundException` is thrown by every
-domain. Subdividing *them* would produce single-class packages that answer no question.
+`configuration`, `properties`, `bootstrap`, `filters` and `exceptions` are **not** split by domain. They are
+cross-cutting — `SecurityFilterConfig` is not a recipes class or a users class, and `ResourceNotFoundException` is
+thrown by every domain. Splitting *them* that way would produce single-class packages that answer no question. Four of
+the five are flat; `exceptions` has one sub-package, for the reason below.
 
 Each of those five holds one kind of thing, and `configuration` is the one that attracts strays. The test is **does
 this class declare a bean or wire something?** If not, it is not configuration:
 
 - `configuration` — `@Configuration` classes and nothing else: `SecurityFilterConfig`, `SecurityBeansConfig`,
-  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`.
+  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
+  anything reasoning about a *window* of time (`UploadRateLimiter`) injects it, because a test that cannot move the
+  clock can only assert a window by waiting it out.
 - `properties` — `@ConfigurationProperties` records. Bound data, no logic, no beans; picked up by the
-  `@ConfigurationPropertiesScan` on the application class. Not `models`, which is for records that cross the HTTP
-  boundary.
+  `@ConfigurationPropertiesScan` on the application class. Not `models`, which is for the types — records *and* enums,
+  as `MediaVariant` and `MediaType` show — that cross the HTTP boundary.
 - `bootstrap` — `ApplicationRunner`s and anything else whose job is "put the rows in place that the rest of the code
   assumes exist". `ReferenceDataSeeder` lives here; it is not optional and not a spent migration — it is the only thing
   that populates an empty database, which happens on every fresh clone, every CI run and every VPS rebuild.
-- `exceptions` — the exception types, **both** `@RestControllerAdvice` classes, and `ProblemDetailErrorResponder`.
-  Keeping the advices together is not tidiness: which one wins is decided by the `@Order` on each, and that
-  relationship is invisible when they sit in different packages.
+- `exceptions` — the exception **types** and nothing else, with one sub-package:
+  - `exceptions/handlers` — the classes that *answer* a failure: **both** `@RestControllerAdvice` classes and
+    `ProblemDetailErrorResponder`. The split is between describing a failure and answering it, and the three answerers
+    stay together because which advice wins is decided by the `@Order` on each — a relationship that is invisible when
+    they sit in different packages. This is the one subdivision of the five flat packages, and it exists because
+    `exceptions` holds two kinds of thing; the other four hold one each.
 - `filters` — servlet filters.
 
 ### Authentication flow

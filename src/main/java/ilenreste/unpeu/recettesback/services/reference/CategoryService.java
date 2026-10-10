@@ -123,22 +123,22 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
      * in one transaction — a category with no edge would break the invariant that
      * every category has exactly one.
      *
-     * @throws InvalidReferenceException if {@code superiorCategoryId} names no category
+     * @throws InvalidReferenceException if {@code parentCategoryId} names no category
      * @throws ResourceConflictException if the name is already taken
      */
     @Transactional
     public CategoryResponse createCategory(CategoryRequest request) {
         CategoryEntity created = create(request.name(), category -> { });
-        linkTo(created, resolveSuperior(request.superiorCategoryId(), created));
+        linkTo(created, resolveParent(request.parentCategoryId(), created));
         return toResponse(created, taxonomy());
     }
 
     /**
      * Renames a category and re-places it in the tree. Both are full
-     * replacements: an absent {@code superiorCategoryId} promotes the category to
+     * replacements: an absent {@code parentCategoryId} promotes the category to
      * a root rather than leaving its parent alone.
      *
-     * @throws InvalidReferenceException if {@code superiorCategoryId} names no category
+     * @throws InvalidReferenceException if {@code parentCategoryId} names no category
      * @throws InvalidInputException     if the requested parent is this category's own
      *                                   descendant, which would close a cycle
      * @throws ResourceConflictException if the new name is already taken
@@ -146,9 +146,9 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
     @Transactional
     public CategoryResponse updateCategory(String id, CategoryRequest request) {
         CategoryEntity updated = update(id, request.name(), category -> { });
-        CategoryEntity superior = resolveSuperior(request.superiorCategoryId(), updated);
-        rejectCycle(updated, superior);
-        linkTo(updated, superior);
+        CategoryEntity parent = resolveParent(request.parentCategoryId(), updated);
+        rejectCycle(updated, parent);
+        linkTo(updated, parent);
         return toResponse(updated, taxonomy());
     }
 
@@ -178,14 +178,14 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
 
     /**
      * The ancestor chain, <strong>nearest first</strong>, ending at the main
-     * category. Empty for a main category, which has no superior but itself.
+     * category. Empty for a main category, whose only edge points at itself.
      * <p>
      * Nearest first because that is a breadcrumb reversed, and a breadcrumb is
      * what this feeds; a caller wanting root-first reverses a list it already
      * holds.
      */
     @Transactional(readOnly = true)
-    public List<CategoryResponse> findSuperiorCategories(String id) {
+    public List<CategoryResponse> findParentCategories(String id) {
         findById(id);
         CategoryTaxonomy taxonomy = taxonomy();
         return taxonomy.ancestorsOf(id).stream()
@@ -262,18 +262,18 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
      * writer of both, which is the entire justification for storing the second
      * one.
      */
-    private void linkTo(CategoryEntity category, CategoryEntity superior) {
+    private void linkTo(CategoryEntity category, CategoryEntity parent) {
         CategoryRelationEntity relation = relationsRepository.findById(category.getId())
                 .orElseGet(CategoryRelationEntity::new);
         relation.setCategory(category);
-        relation.setSuperiorCategory(superior);
+        relation.setParentCategory(parent);
         relationsRepository.save(relation);
 
-        category.setCategoryType(superior.getId().equals(category.getId())
+        category.setCategoryType(parent.getId().equals(category.getId())
                 ? CategoryType.MAIN : CategoryType.SUB);
         categoriesRepository.save(category);
         log.info("Category {} ('{}') is now {}, under {}", category.getId(), category.getName(),
-                category.getCategoryType(), superior.getId());
+                category.getCategoryType(), parent.getId());
     }
 
     /**
@@ -284,14 +284,14 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
      *                                   a 404: {@code /categories} is perfectly
      *                                   reachable, it is the payload that is wrong
      */
-    private CategoryEntity resolveSuperior(String superiorCategoryId, CategoryEntity category) {
-        if (superiorCategoryId == null || superiorCategoryId.isBlank()
-                || superiorCategoryId.equals(category.getId())) {
+    private CategoryEntity resolveParent(String parentCategoryId, CategoryEntity category) {
+        if (parentCategoryId == null || parentCategoryId.isBlank()
+                || parentCategoryId.equals(category.getId())) {
             return category;
         }
-        return categoriesRepository.findById(superiorCategoryId)
-                .orElseThrow(() -> new InvalidReferenceException("superiorCategoryId",
-                        List.of(superiorCategoryId)));
+        return categoriesRepository.findById(parentCategoryId)
+                .orElseThrow(() -> new InvalidReferenceException("parentCategoryId",
+                        List.of(parentCategoryId)));
     }
 
     /**
@@ -303,15 +303,15 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
      * exactly the state this check exists to keep out, and therefore the state it
      * has to survive.
      */
-    private void rejectCycle(CategoryEntity category, CategoryEntity superior) {
-        if (superior.getId().equals(category.getId())) {
+    private void rejectCycle(CategoryEntity category, CategoryEntity parent) {
+        if (parent.getId().equals(category.getId())) {
             return;
         }
         boolean wouldLoop = taxonomy().descendantsOf(category.getId()).stream()
-                .anyMatch(descendant -> descendant.getId().equals(superior.getId()));
+                .anyMatch(descendant -> descendant.getId().equals(parent.getId()));
         if (wouldLoop) {
             log.warn("Refusing to file category {} under its own descendant {}",
-                    category.getId(), superior.getId());
+                    category.getId(), parent.getId());
             throw new InvalidInputException(
                     "A category cannot be placed under one of its own subcategories.");
         }
@@ -341,10 +341,10 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
     }
 
     private CategoryTaxonomy taxonomy() {
-        return new CategoryTaxonomy(findAll(), relationsRepository.superiorIdsByCategoryId());
+        return new CategoryTaxonomy(findAll(), relationsRepository.parentIdsByCategoryId());
     }
 
     private CategoryResponse toResponse(CategoryEntity category, CategoryTaxonomy taxonomy) {
-        return mapper.toResponse(category, taxonomy.superiorIdOf(category.getId()));
+        return mapper.toResponse(category, taxonomy.parentIdOf(category.getId()));
     }
 }

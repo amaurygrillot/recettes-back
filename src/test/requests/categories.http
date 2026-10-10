@@ -1,6 +1,6 @@
 ### Categories
 ### Covers: GET /categories, GET /categories/hierarchy, GET /categories/{id},
-###         GET /categories/{id}/subcategories, GET /categories/{id}/superior-categories,
+###         GET /categories/{id}/subcategories, GET /categories/{id}/parent-categories,
 ###         POST /categories, PUT /categories/{id}, DELETE /categories/{id}
 ###
 ### Categories are the taxonomy that drives navigation: reads are public, every write is
@@ -9,9 +9,9 @@
 ### user_roles row by hand.
 ###
 ### Unlike tags, categories form a HIERARCHY. Every category has exactly one row in
-### categories_relation: a subcategory's points at its directly superior category, a main
+### categories_relation: a subcategory's row points at its direct parent category, a main
 ### category's points at ITSELF. That self-reference is a schema device and never leaves the
-### server - the API reports superiorCategoryId: null for a main category, and categoryType
+### server - the API reports parentCategoryId: null for a main category, and categoryType
 ### tells the two apart without anyone comparing ids. Requests 14-21 walk that flow.
 ###
 ### tags.http and units.http follow the same permission and conflict rules; the rationale for
@@ -66,7 +66,7 @@ GET {{baseUrl}}/categories
 %}
 
 ### 4. Create a main category as an admin -> 201 Created, with a Location header
-### No superiorCategoryId means "this is a root". The response carries the stored name - which
+### No parentCategoryId means "this is a root". The response carries the stored name - which
 ### is trimmed, so it is not simply an echo of what was sent.
 POST {{baseUrl}}/categories
 Authorization: Bearer {{adminToken}}
@@ -77,10 +77,10 @@ Content-Type: application/json
 }
 
 > {%
-    client.test("Returns 201 as a MAIN category with no superior", function () {
+    client.test("Returns 201 as a MAIN category with no parent", function () {
         client.assert(response.status === 201, "Expected 201 but got " + response.status);
         client.assert(response.body.categoryType === "MAIN", "Expected MAIN");
-        client.assert(response.body.superiorCategoryId === null,
+        client.assert(response.body.parentCategoryId === null,
             "A root must report null, never its own id");
         client.global.set("categoryId", response.body.id);
     });
@@ -194,7 +194,7 @@ Content-Type: application/json
 ###############################################################################
 
 ### 12. Create a subcategory under the one from #4 -> 201 Created
-### superiorCategoryId names the DIRECTLY superior category. The response reports SUB and
+### parentCategoryId names the DIRECT parent category. The response reports SUB and
 ### carries that id back.
 POST {{baseUrl}}/categories
 Authorization: Bearer {{adminToken}}
@@ -202,7 +202,7 @@ Content-Type: application/json
 
 {
   "name": "Tartes",
-  "superiorCategoryId": "{{categoryId}}"
+  "parentCategoryId": "{{categoryId}}"
 }
 
 > {%
@@ -222,7 +222,7 @@ Content-Type: application/json
 
 {
   "name": "Tartes aux pommes",
-  "superiorCategoryId": "{{subCategoryId}}"
+  "parentCategoryId": "{{subCategoryId}}"
 }
 
 > {%
@@ -241,13 +241,13 @@ Content-Type: application/json
 
 {
   "name": "Orpheline",
-  "superiorCategoryId": "00000000-0000-0000-0000-000000000000"
+  "parentCategoryId": "00000000-0000-0000-0000-000000000000"
 }
 
 > {%
-    client.test("Returns 400 naming superiorCategoryId", function () {
+    client.test("Returns 400 naming parentCategoryId", function () {
         client.assert(response.status === 400, "Expected 400 but got " + response.status);
-        client.assert(response.body.detail.includes("superiorCategoryId"), "Expected the field name");
+        client.assert(response.body.detail.includes("parentCategoryId"), "Expected the field name");
     });
 %}
 
@@ -268,7 +268,7 @@ GET {{baseUrl}}/categories/{{categoryId}}/subcategories
 
 ### 16. The ancestor chain of a leaf -> 200 OK
 ### NEAREST FIRST, up to the main category: a breadcrumb reversed. Empty for a main category.
-GET {{baseUrl}}/categories/{{leafCategoryId}}/superior-categories
+GET {{baseUrl}}/categories/{{leafCategoryId}}/parent-categories
 
 > {%
     client.test("Returns the chain nearest first", function () {
@@ -281,8 +281,8 @@ GET {{baseUrl}}/categories/{{leafCategoryId}}/superior-categories
 %}
 
 ### 17. The ancestor chain of a main category -> 200 OK, empty
-### A root has no superior but itself, and the self-reference never crosses the wire.
-GET {{baseUrl}}/categories/{{categoryId}}/superior-categories
+### A root's only edge points at itself, and that self-reference never crosses the wire.
+GET {{baseUrl}}/categories/{{categoryId}}/parent-categories
 
 > {%
     client.test("Returns an empty array", function () {
@@ -304,7 +304,7 @@ GET {{baseUrl}}/categories/00000000-0000-0000-0000-000000000000/subcategories
 
 ### 19. The whole taxonomy, nested -> 200 OK
 ### One call for a navigation menu. Roots at the top level, children nested inside them, name
-### sorted at every level. No superiorCategoryId here: nesting already says who the parent is.
+### sorted at every level. No parentCategoryId here: nesting already says who the parent is.
 GET {{baseUrl}}/categories/hierarchy
 
 > {%
@@ -325,7 +325,7 @@ Content-Type: application/json
 
 {
   "name": "dessert",
-  "superiorCategoryId": "{{leafCategoryId}}"
+  "parentCategoryId": "{{leafCategoryId}}"
 }
 
 > {%
@@ -348,7 +348,7 @@ Authorization: Bearer {{adminToken}}
 %}
 
 ### 22. Promote a subcategory back to a root -> 200 OK
-### PUT is a full replacement, not a patch: omitting superiorCategoryId means "this is a main
+### PUT is a full replacement, not a patch: omitting parentCategoryId means "this is a main
 ### category now", not "leave its parent alone". Re-parenting and promoting are both ordinary
 ### edits, so neither needs its own endpoint.
 PUT {{baseUrl}}/categories/{{subCategoryId}}
@@ -363,7 +363,7 @@ Content-Type: application/json
     client.test("Returns 200 and the category is now MAIN", function () {
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         client.assert(response.body.categoryType === "MAIN", "Expected MAIN");
-        client.assert(response.body.superiorCategoryId === null, "Expected no superior");
+        client.assert(response.body.parentCategoryId === null, "Expected no parent");
     });
 %}
 

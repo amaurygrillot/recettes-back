@@ -1,5 +1,7 @@
 package ilenreste.unpeu.recettesback.services.media;
 
+import ilenreste.unpeu.recettesback.models.media.MediaType;
+
 import java.util.Arrays;
 import java.util.Optional;
 
@@ -31,24 +33,41 @@ import java.util.Optional;
  */
 public enum ImageFormat {
 
-    JPEG("image/jpeg", "jpg", (byte) 0xFF, (byte) 0xD8, (byte) 0xFF),
-    PNG("image/png", "png", (byte) 0x89, (byte) 0x50, (byte) 0x4E, (byte) 0x47,
+    JPEG(MediaType.PHOTO, "image/jpeg", "jpg", (byte) 0xFF, (byte) 0xD8, (byte) 0xFF),
+    PNG(MediaType.PHOTO, "image/png", "png", (byte) 0x89, (byte) 0x50, (byte) 0x4E, (byte) 0x47,
             (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A);
 
+    private final MediaType mediaType;
     private final String contentType;
     private final String extension;
     private final byte[] magic;
 
-    ImageFormat(String contentType, String extension, byte... magic) {
+    ImageFormat(MediaType mediaType, String contentType, String extension, byte... magic) {
+        this.mediaType = mediaType;
         this.contentType = contentType;
         this.extension = extension;
         this.magic = magic;
+    }
+
+    /**
+     * The <em>kind</em> of media a file in this format is, which is what the
+     * {@code media_type} column records.
+     * <p>
+     * Declared per format rather than decided at the call site: {@code MediaService}
+     * used to hard-code {@code MediaType.PHOTO} on every row with a comment saying
+     * the branch belonged there the day a second kind arrived. This is that branch,
+     * written once, where the fact lives — a format cannot be added without saying
+     * what kind of media it produces.
+     */
+    public MediaType mediaType() {
+        return mediaType;
     }
 
     public String contentType() {
         return contentType;
     }
 
+    /** Lower-case, no leading dot. One of {@link #mediaType()}'s declared extensions. */
     public String extension() {
         return extension;
     }

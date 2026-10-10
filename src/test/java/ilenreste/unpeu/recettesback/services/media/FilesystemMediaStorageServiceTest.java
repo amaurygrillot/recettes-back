@@ -27,7 +27,7 @@ class FilesystemMediaStorageServiceTest {
 
     private MediaProperties propertiesFor(Path storagePath) {
         return new MediaProperties(storagePath, 8000, 40_000_000L, 2000, 640,
-                0.85f, 4, Duration.ofSeconds(10));
+                0.85f, 4, Duration.ofSeconds(10), 20, Duration.ofMinutes(10));
     }
 
     @BeforeEach

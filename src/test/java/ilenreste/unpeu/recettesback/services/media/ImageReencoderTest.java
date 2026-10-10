@@ -29,7 +29,8 @@ class ImageReencoderTest {
 
     private final MediaProperties properties = new MediaProperties(
             Path.of("target", "test-media"), 8000, 40_000_000L,
-            MAX_STORED_EDGE, THUMBNAIL_EDGE, 0.85f, 4, Duration.ofSeconds(10));
+            MAX_STORED_EDGE, THUMBNAIL_EDGE, 0.85f, 4, Duration.ofSeconds(10),
+            20, Duration.ofMinutes(10));
 
     private final ImageReencoder reencoder = new ImageReencoder(properties);
 

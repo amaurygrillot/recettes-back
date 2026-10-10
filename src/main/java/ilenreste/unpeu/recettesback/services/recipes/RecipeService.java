@@ -136,12 +136,12 @@ public class RecipeService {
 
         Map<String, RecipeEntity> byId = recipesRepository.findAllForSummary(idPage.getContent()).stream()
                 .collect(java.util.stream.Collectors.toMap(RecipeEntity::getId, Function.identity()));
-        Map<String, String> categorySuperiorIds = categoryRelationsRepository.superiorIdsByCategoryId();
+        Map<String, String> categoryParentIds = categoryRelationsRepository.parentIdsByCategoryId();
 
         List<RecipeSummaryResponse> ordered = idPage.getContent().stream()
                 .map(byId::get)
                 .filter(Objects::nonNull)
-                .map(recipe -> mapper.toSummary(recipe, categorySuperiorIds))
+                .map(recipe -> mapper.toSummary(recipe, categoryParentIds))
                 .toList();
 
         return new PageImpl<>(ordered, sorted, idPage.getTotalElements());
@@ -232,6 +232,13 @@ public class RecipeService {
      * <p>
      * It lives in the service, not the controller, so a second caller reaching
      * the same operation another way cannot bypass it.
+     * <p>
+     * An admin passes too, and the refusal message <strong>says so</strong>. It
+     * used to read "Only the author of this recipe may modify it", which is a
+     * statement about who may edit — and it was false: the condition below has
+     * always let an admin through. A refusal that misdescribes the rule sends the
+     * reader looking for a bug in the wrong place, and this one would have told an
+     * admin reading their own 403 that the server disagrees with its own code.
      */
     private void requireAuthorOrAdmin(String authorId, String recipeId) {
         String currentUserId = currentUserService.currentUserId()
@@ -240,7 +247,8 @@ public class RecipeService {
         if (!currentUserId.equals(authorId) && !currentUserService.isAdmin()) {
             log.warn("User {} attempted to modify recipe {} authored by {}",
                     currentUserId, recipeId, authorId);
-            throw new ForbiddenOperationException("Only the author of this recipe may modify it.");
+            throw new ForbiddenOperationException(
+                    "Only the author of this recipe, or an administrator, may modify it.");
         }
     }
 
@@ -251,12 +259,12 @@ public class RecipeService {
 
     private List<CategoryEntity> resolveCategories(Collection<String> ids) {
         return List.copyOf(referenceResolver.resolve("categoryIds", ids,
-                categoriesRepository::findAllById, CategoryEntity::getId).values());
+                categoriesRepository::findAllById).values());
     }
 
     private List<TagEntity> resolveTags(Collection<String> ids) {
         return List.copyOf(referenceResolver.resolve("tagIds", ids,
-                tagsRepository::findAllById, TagEntity::getId).values());
+                tagsRepository::findAllById).values());
     }
 
     /**
@@ -330,11 +338,11 @@ public class RecipeService {
         Map<String, IngredientEntity> ingredients = referenceResolver.resolve(
                 "ingredientGroups[].ingredients[].ingredientId",
                 allLines.stream().map(RecipeIngredientRequest::ingredientId).toList(),
-                ingredientsRepository::findAllById, IngredientEntity::getId);
+                ingredientsRepository::findAllById);
         Map<String, UnitEntity> units = referenceResolver.resolve(
                 "ingredientGroups[].ingredients[].unitId",
                 allLines.stream().map(RecipeIngredientRequest::unitId).toList(),
-                unitsRepository::findAllById, UnitEntity::getId);
+                unitsRepository::findAllById);
 
         recipe.getIngredientGroups().clear();
         for (int position = 0; position < requested.size(); position++) {
@@ -365,7 +373,7 @@ public class RecipeService {
     private Map<String, MediaEntity> resolveMedia(String field, List<RecipePictureRequest> pictures) {
         return referenceResolver.resolve(field,
                 new ArrayList<>(pictures.stream().map(RecipePictureRequest::mediaId).toList()),
-                mediaRepository::findAllById, MediaEntity::getId);
+                mediaRepository::findAllById);
     }
 
     /**
@@ -396,11 +404,11 @@ public class RecipeService {
 
     /**
      * One extra two-column query per recipe read, so that a category can report
-     * its superior. See {@code RecipeMapper} for why the edges are not read once
+     * its parent. See {@code RecipeMapper} for why the edges are not read once
      * per category instead.
      */
     private RecipeResponse toResponse(RecipeEntity recipe) {
-        return mapper.toResponse(recipe, categoryRelationsRepository.superiorIdsByCategoryId());
+        return mapper.toResponse(recipe, categoryRelationsRepository.parentIdsByCategoryId());
     }
 
     /**

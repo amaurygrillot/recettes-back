@@ -4,7 +4,7 @@ package ilenreste.unpeu.recettesback.exceptions;
  * A password reset that cannot be honoured: unknown email, unknown token,
  * expired token, or a token issued to a different account.
  * <p>
- * One type for all four, because {@link UserExceptionHandler} answers all four
+ * One type for all four, because {@code UserExceptionHandler} answers all four
  * identically and the distinction must not survive as far as the response — see
  * {@code docs/password-reset.md}. Being able to <em>throw</em> them apart would
  * be the first step towards accidentally reporting them apart.

@@ -44,7 +44,7 @@ Everything that can go wrong is already accounted for, and none of it is visible
 | What goes wrong                      | Where it is caught          | Status |
 |--------------------------------------|-----------------------------|--------|
 | body fails bean validation           | never reaches the service   | 400    |
-| `superiorCategoryId` names no row    | `InvalidReferenceException` | 400    |
+| `parentCategoryId` names no row    | `InvalidReferenceException` | 400    |
 | the name is already taken            | `ResourceConflictException` | 409    |
 | two requests race for the same name  | unique constraint → advice  | 409    |
 | the caller is not an admin           | `SecurityFilterConfig`      | 403    |

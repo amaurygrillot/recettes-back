@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
+import ilenreste.unpeu.recettesback.models.media.MediaType;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -65,5 +66,23 @@ class ImageFormatTest {
         // Only ever called with a value this application wrote itself, so this is a bug, not input.
         assertThatThrownBy(() -> ImageFormat.fromContentType("image/gif"))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void everyFormatsExtensionIsOneItsMediaTypeDeclares() {
+        // The one assertion that keeps the two lists from drifting: MediaType holds the extensions
+        // a kind of media comes in, every format names the kind it belongs to, and nothing else
+        // would notice a format added here but not listed there - the mismatch would surface as a
+        // rejection message that omits a format the server actually accepts.
+        for (ImageFormat format : ImageFormat.values()) {
+            assertThat(format.mediaType().extensions())
+                    .as("%s declares extension '%s'", format.mediaType(), format.extension())
+                    .contains(format.extension());
+        }
+    }
+
+    @Test
+    void mapsEveryImageFormatToThePhotoKind() {
+        assertThat(ImageFormat.values()).allMatch(format -> format.mediaType() == MediaType.PHOTO);
     }
 }

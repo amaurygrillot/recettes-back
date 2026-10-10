@@ -26,7 +26,7 @@ import lombok.Setter;
  * with exactly one row per category:
  * <ul>
  *   <li>a {@link CategoryType#SUB} category's row points at its <em>directly</em>
- *       superior category;</li>
+ *       parent category;</li>
  *   <li>a {@link CategoryType#MAIN} category's row points at <em>itself</em>.</li>
  * </ul>
  * The self-pointing root is unusual and deliberate: with it, "every category has

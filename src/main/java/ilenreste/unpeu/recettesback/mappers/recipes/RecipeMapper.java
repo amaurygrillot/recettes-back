@@ -39,7 +39,7 @@ import java.util.Map;
  * so they are sorted by name to give a stable output.
  * <p>
  * <strong>Why the category edges are passed in.</strong> A {@code CategoryResponse}
- * carries the id of its superior category, and that lives in
+ * carries the id of its parent category, and that lives in
  * {@code categories_relation} — not on the entity Hibernate hydrated. Looking it
  * up here would mean either a repository dependency in a mapper, or one query per
  * category per recipe per row of a listing. Instead {@code RecipeService} reads the
@@ -61,18 +61,18 @@ public class RecipeMapper {
     }
 
     /**
-     * @param categorySuperiorIds {@code categoryId -> superiorCategoryId} for the
+     * @param categoryParentIds {@code categoryId -> parentCategoryId} for the
      *                            whole taxonomy, roots absent — see
-     *                            {@code CategoryRelationsRepository.superiorIdsByCategoryId()}
+     *                            {@code CategoryRelationsRepository.parentIdsByCategoryId()}
      */
-    public RecipeResponse toResponse(RecipeEntity recipe, Map<String, String> categorySuperiorIds) {
+    public RecipeResponse toResponse(RecipeEntity recipe, Map<String, String> categoryParentIds) {
         return new RecipeResponse(
                 recipe.getId(),
                 recipe.getTitle(),
                 toIntroduction(recipe.getIntroduction()),
                 recipe.getRecommendations(),
                 toAuthor(recipe),
-                toCategories(recipe, categorySuperiorIds),
+                toCategories(recipe, categoryParentIds),
                 toTags(recipe),
                 recipe.getCoverPictures().stream().map(this::toPicture).toList(),
                 recipe.getIngredientGroups().stream().map(this::toGroup).toList(),
@@ -94,12 +94,12 @@ public class RecipeMapper {
      * cover picture past the first — a list page must not cost one full recipe
      * load per row.
      */
-    public RecipeSummaryResponse toSummary(RecipeEntity recipe, Map<String, String> categorySuperiorIds) {
+    public RecipeSummaryResponse toSummary(RecipeEntity recipe, Map<String, String> categoryParentIds) {
         return new RecipeSummaryResponse(
                 recipe.getId(),
                 recipe.getTitle(),
                 firstCoverMediaId(recipe),
-                toCategories(recipe, categorySuperiorIds),
+                toCategories(recipe, categoryParentIds),
                 toTags(recipe),
                 toAuthor(recipe),
                 recipe.getCreatedAt()
@@ -123,10 +123,10 @@ public class RecipeMapper {
     }
 
     private List<CategoryResponse> toCategories(RecipeEntity recipe,
-                                                Map<String, String> categorySuperiorIds) {
+                                                Map<String, String> categoryParentIds) {
         return recipe.getCategories().stream().sorted(BY_CATEGORY_NAME)
                 .map(category -> referenceMapper.toResponse(
-                        category, categorySuperiorIds.get(category.getId())))
+                        category, categoryParentIds.get(category.getId())))
                 .toList();
     }
 

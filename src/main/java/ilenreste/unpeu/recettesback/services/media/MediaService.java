@@ -2,14 +2,16 @@ package ilenreste.unpeu.recettesback.services.media;
 
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
-import ilenreste.unpeu.recettesback.entities.media.MediaType;
+import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.mappers.media.MediaMapper;
+import ilenreste.unpeu.recettesback.models.media.MediaType;
 import ilenreste.unpeu.recettesback.models.media.MediaVariant;
 import ilenreste.unpeu.recettesback.models.media.responses.MediaResponse;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
+import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
@@ -24,6 +26,7 @@ import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * The upload and download pipeline for user-supplied images.
@@ -33,6 +36,10 @@ import java.util.concurrent.TimeUnit;
  * <ol>
  *   <li><strong>Size</strong> — enforced by the servlet container before a byte
  *       reaches this class ({@code spring.servlet.multipart.max-file-size}).</li>
+ *   <li><strong>Rate</strong> — how many uploads this account has already made in
+ *       the last few minutes, in {@link UploadRateLimiter}. The only gate that
+ *       looks at anything beyond the one file in hand, and therefore the only one
+ *       that can see a thousand perfectly valid uploads filling a disk.</li>
  *   <li><strong>Format</strong> — by magic bytes only. The declared
  *       {@code Content-Type} and the filename are both attacker-controlled and
  *       are ignored.</li>
@@ -57,6 +64,8 @@ public class MediaService {
     private final ImageReencoder reencoder;
     private final MediaProperties properties;
     private final MediaMapper mediaMapper;
+    private final CurrentUserService currentUserService;
+    private final UploadRateLimiter rateLimiter;
 
     /**
      * Bounds how many uploads decode at once.
@@ -70,22 +79,30 @@ public class MediaService {
     private final Semaphore processingPermits;
 
     public MediaService(MediaRepository mediaRepository, MediaStorageService storageService,
-                        ImageReencoder reencoder, MediaProperties properties, MediaMapper mediaMapper) {
+                        ImageReencoder reencoder, MediaProperties properties, MediaMapper mediaMapper,
+                        CurrentUserService currentUserService, UploadRateLimiter rateLimiter) {
         this.mediaRepository = mediaRepository;
         this.storageService = storageService;
         this.reencoder = reencoder;
         this.properties = properties;
         this.mediaMapper = mediaMapper;
+        this.currentUserService = currentUserService;
+        this.rateLimiter = rateLimiter;
         // Fair, so a burst does not starve the request that has been waiting longest.
         this.processingPermits = new Semaphore(properties.maxConcurrentProcessing(), true);
     }
 
     public MediaResponse upload(MultipartFile file) {
+        // First, and before the bytes are read into the heap: a refusal here must be the cheapest
+        // thing this method can do, or the limit protecting the disk becomes a way to spend memory.
+        rateLimiter.requirePermit(uploaderId());
+
         byte[] content = readFully(file);
         ImageFormat format = ImageFormat.detect(content)
                 .orElseThrow(() -> new InvalidInputException(
-                        "Only JPEG and PNG images are accepted. If this is a photo from an iPhone "
-                                + "it is probably HEIC; convert it to JPEG before uploading."));
+                        "Only %s images are accepted. If this is a photo from an iPhone it is "
+                                .formatted(acceptedExtensions())
+                                + "probably HEIC; convert it to JPEG before uploading."));
         log.info("Accepting a {} upload of {} bytes", format, content.length);
 
         ReencodedImage reencoded = reencodeWithinCapacity(content, format);
@@ -185,9 +202,9 @@ public class MediaService {
 
     private MediaEntity toEntity(ReencodedImage reencoded, String storageKey, String thumbnailKey) {
         MediaEntity media = new MediaEntity();
-        // Set explicitly rather than left to the field's default: this is the one place that
-        // decides what kind of media a row is, and the day VIDEO exists the branch belongs here.
-        media.setMediaType(MediaType.PHOTO);
+        // Read off the format rather than hard-coded here: the format is what knows whether it
+        // produces a photo or a video, so the day VIDEO exists there is no branch to remember.
+        media.setMediaType(reencoded.format().mediaType());
         media.setStorageKey(storageKey);
         media.setThumbnailStorageKey(thumbnailKey);
         // Every column below is measured from what we wrote, never from what was uploaded.
@@ -197,6 +214,29 @@ public class MediaService {
         media.setSizeBytes(reencoded.full().length);
         media.setChecksumSha256(sha256(reencoded.full()));
         return media;
+    }
+
+    /**
+     * Who the upload is counted against.
+     * <p>
+     * {@code SecurityFilterConfig} already requires authentication for
+     * {@code POST /media}, so an empty optional here means the route was opened up
+     * without this being revisited — a 403 naming the reason, never an unlimited
+     * anonymous allowance or a {@link NullPointerException} keyed on null.
+     */
+    private String uploaderId() {
+        return currentUserService.currentUserId()
+                .orElseThrow(() -> new ForbiddenOperationException("You must be signed in to upload media."));
+    }
+
+    /**
+     * {@code "JPG or PNG"} — read off {@link MediaType#PHOTO} rather than spelled
+     * out, so widening the allowlist updates the rejection message with it.
+     */
+    private String acceptedExtensions() {
+        return MediaType.PHOTO.extensions().stream()
+                .map(extension -> extension.toUpperCase(Locale.ROOT))
+                .collect(Collectors.joining(" or "));
     }
 
     private byte[] readFully(MultipartFile file) {

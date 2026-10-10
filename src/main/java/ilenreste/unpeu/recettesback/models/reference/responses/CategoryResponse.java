@@ -11,19 +11,19 @@ import ilenreste.unpeu.recettesback.entities.reference.CategoryType;
  *
  * @param categoryType       {@code MAIN} or {@code SUB}, so a client can render a
  *                           root differently without having to compare
- *                           {@code superiorCategoryId} to {@code id} itself
- * @param superiorCategoryId the directly superior category. <strong>Null for a
+ *                           {@code parentCategoryId} to {@code id} itself
+ * @param parentCategoryId the direct parent category. <strong>Null for a
  *                           main category</strong>, even though the stored row
  *                           points at itself — the self-reference is a schema
  *                           device that keeps the relation table total, and
  *                           leaking it would make every client write the
- *                           {@code id.equals(superiorCategoryId)} check that
+ *                           {@code id.equals(parentCategoryId)} check that
  *                           {@code categoryType} exists to spare them
  */
 public record CategoryResponse(
         String id,
         String name,
         CategoryType categoryType,
-        String superiorCategoryId
+        String parentCategoryId
 ) {
 }

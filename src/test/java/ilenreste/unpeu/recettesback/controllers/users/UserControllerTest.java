@@ -1,7 +1,7 @@
 package ilenreste.unpeu.recettesback.controllers.users;
 
-import ilenreste.unpeu.recettesback.exceptions.ApiExceptionHandler;
-import ilenreste.unpeu.recettesback.exceptions.UserExceptionHandler;
+import ilenreste.unpeu.recettesback.exceptions.handlers.ApiExceptionHandler;
+import ilenreste.unpeu.recettesback.exceptions.handlers.UserExceptionHandler;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;

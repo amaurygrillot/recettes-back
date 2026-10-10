@@ -118,8 +118,8 @@ nesting changes — the failure mode being that the create-race 409 quietly stop
 provokes the happy path notices. The loop is also guarded against a self-referencing cause, which some drivers
 produce.
 
-Where the handler classes live: **both advices sit in the flat, cross-cutting `exceptions` package**, next to the
-exception types they map.
+Where the handler classes live: **both advices and `ProblemDetailErrorResponder` sit in `exceptions/handlers`**, one
+package below the exception types they map.
 
 The targeted `UserExceptionHandler` originally lived beside the controller it serves, in `controllers/users`, on the
 grounds that it is meaningless without it. The PR review moved it, and that is the better call: it is not a controller
@@ -128,6 +128,25 @@ is decided by the `@Order` on each, `HIGHEST_PRECEDENCE` against `LOWEST_PRECEDE
 impossible to notice when they are two packages apart. `ProblemDetailErrorResponder` joined them for the same reason:
 it is the third piece of the same mechanism, the one that runs above the `DispatcherServlet` where an
 `@ExceptionHandler` cannot reach.
+
+A later round of review asked for the handlers to have a package of their own, which is where `exceptions/handlers`
+comes from. `exceptions` was holding two kinds of thing: the types that **describe** a failure and the three classes
+that **answer** one. The three move as a unit, for the reason above — splitting them is what the `@Order` argument
+rules out — so the only change is that they now sit together one level down, with the types left alone above them.
+
+### The retryable statuses
+
+Two handlers answer with a `Retry-After` header, and they are not interchangeable:
+
+| Status | Exception                     | Means                                                     |
+|--------|-------------------------------|-----------------------------------------------------------|
+| `503`  | `ServiceOverloadedException`  | the **server** is momentarily at capacity (decode pool full) |
+| `429`  | `RateLimitExceededException`  | the **caller** has made too many of these requests          |
+
+Collapsing them would tell a throttled client the server is unwell and a queued client that it is being throttled, each
+sending the reader to the wrong place. They share one private helper, which floors the header at one second: the header
+is whole seconds, and a sub-second wait renders as `0`, which a client reads as "retry immediately" — a hot loop
+against the thing that just asked it to slow down.
 
 The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
 `media.created_at NOT NULL` trap in [recipes-domain-model.md](recipes-domain-model.md#auditing) and any missed

@@ -1,8 +1,5 @@
 package ilenreste.unpeu.recettesback.services.media;
 
-import com.drew.imaging.ImageMetadataReader;
-import com.drew.metadata.Metadata;
-import com.drew.metadata.exif.ExifIFD0Directory;
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import lombok.extern.log4j.Log4j2;
@@ -48,8 +45,6 @@ import java.util.Iterator;
 @Log4j2
 @Service
 public class ImageReencoder {
-
-    private static final int ORIENTATION_NORMAL = 1;
 
     private final MediaProperties properties;
 
@@ -147,17 +142,18 @@ public class ImageReencoder {
      * Rotates and flips the raster to match the EXIF orientation tag.
      * <p>
      * Stock {@code ImageIO} exposes the JPEG APP1/Exif segment only as an
-     * unparsed marker segment with no accessor for this tag, which is the entire
-     * reason metadata-extractor is a dependency. Note the rotation can swap width
-     * and height — a second reason the header dimensions cannot be reused for the
+     * unparsed marker segment with no accessor for this tag, which is why
+     * {@link ExifOrientation} exists. Note the rotation can swap width and
+     * height — a second reason the header dimensions cannot be reused for the
      * stored row.
      * <p>
      * A missing or unreadable EXIF block is the normal case for PNGs and for
-     * anything a tool has already stripped, so it is not an error.
+     * anything a tool has already stripped, so it is not an error: it reads as
+     * {@link ExifOrientation#NORMAL} and the raster is returned untouched.
      */
     private BufferedImage applyExifOrientation(BufferedImage image, byte[] source) {
-        int orientation = readOrientation(source);
-        if (orientation == ORIENTATION_NORMAL) {
+        int orientation = ExifOrientation.of(source);
+        if (orientation == ExifOrientation.NORMAL) {
             return image;
         }
         log.debug("Applying EXIF orientation {}", orientation);
@@ -204,21 +200,6 @@ public class ImageReencoder {
             graphics.dispose();
         }
         return rotated;
-    }
-
-    private int readOrientation(byte[] source) {
-        try {
-            Metadata metadata = ImageMetadataReader.readMetadata(new ByteArrayInputStream(source));
-            ExifIFD0Directory directory = metadata.getFirstDirectoryOfType(ExifIFD0Directory.class);
-            if (directory != null && directory.containsTag(ExifIFD0Directory.TAG_ORIENTATION)) {
-                return directory.getInt(ExifIFD0Directory.TAG_ORIENTATION);
-            }
-        } catch (Exception exception) {
-            // Absent, truncated or nonsensical EXIF is routine, not a reason to reject an upload
-            // that decoded perfectly well. The photo may come out sideways; that is the worst case.
-            log.debug("No usable EXIF orientation on this upload", exception);
-        }
-        return ORIENTATION_NORMAL;
     }
 
     /**

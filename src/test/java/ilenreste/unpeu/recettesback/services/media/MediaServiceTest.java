@@ -2,13 +2,16 @@ package ilenreste.unpeu.recettesback.services.media;
 
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
+import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
+import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.mappers.media.MediaMapper;
 import ilenreste.unpeu.recettesback.models.media.MediaVariant;
 import ilenreste.unpeu.recettesback.models.media.responses.MediaResponse;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
+import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -19,6 +22,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.Optional;
@@ -37,23 +41,37 @@ import static org.mockito.Mockito.when;
 
 class MediaServiceTest {
 
+    private static final Duration UPLOAD_WINDOW = Duration.ofMinutes(10);
+
     private MediaRepository mediaRepository;
     private MediaStorageService storageService;
+    private CurrentUserService currentUserService;
     private MediaProperties properties;
     private MediaService mediaService;
 
     private MediaProperties properties(int permits, Duration timeout) {
+        return properties(permits, timeout, 20);
+    }
+
+    private MediaProperties properties(int permits, Duration timeout, int uploadLimit) {
         return new MediaProperties(Path.of("target", "test-media"), 8000, 40_000_000L,
-                200, 64, 0.85f, permits, timeout);
+                200, 64, 0.85f, permits, timeout, uploadLimit, UPLOAD_WINDOW);
+    }
+
+    private MediaService mediaService(MediaProperties mediaProperties, ImageReencoder reencoder) {
+        return new MediaService(mediaRepository, storageService, reencoder, mediaProperties,
+                new MediaMapper(), currentUserService,
+                new UploadRateLimiter(mediaProperties, Clock.systemUTC()));
     }
 
     @BeforeEach
     void setUp() {
         mediaRepository = mock(MediaRepository.class);
         storageService = mock(MediaStorageService.class);
+        currentUserService = mock(CurrentUserService.class);
+        when(currentUserService.currentUserId()).thenReturn(Optional.of("uploader-1"));
         properties = properties(4, Duration.ofSeconds(5));
-        mediaService = new MediaService(mediaRepository, storageService,
-                new ImageReencoder(properties), properties, new MediaMapper());
+        mediaService = mediaService(properties, new ImageReencoder(properties));
     }
 
     private MultipartFile upload(byte[] content) {
@@ -92,7 +110,7 @@ class MediaServiceTest {
 
         assertThatThrownBy(() -> mediaService.upload(notAnImage))
                 .isInstanceOf(InvalidInputException.class)
-                .hasMessageContaining("JPEG and PNG")
+                .hasMessageContaining("JPG or PNG")
                 // The HEIC hint matters: an iPhone shoots HEIC by default, so this is the error a
                 // real user hits first and it has to tell them what to do about it.
                 .hasMessageContaining("HEIC");
@@ -145,8 +163,7 @@ class MediaServiceTest {
                 return super.reencode(source, format);
             }
         };
-        MediaService saturated = new MediaService(mediaRepository, storageService,
-                blocking, oneAtATime, new MediaMapper());
+        MediaService saturated = mediaService(oneAtATime, blocking);
         when(mediaRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         byte[] image = TestImages.jpeg(120, 120);
@@ -162,6 +179,38 @@ class MediaServiceTest {
             release.countDown();
             holder.join(5000);
         }
+    }
+
+    @Test
+    void refusesAnUploadOverTheAccountsRateLimit_withoutTouchingStorage() {
+        // The gate that sees what no single-file check can: one user posting file after file until
+        // the disk is full. It is also the first thing upload() does, which is what this asserts by
+        // way of storage and the repository staying untouched - a refusal must not cost a decode.
+        MediaProperties oneUpload = properties(4, Duration.ofSeconds(5), 1);
+        MediaService limited = mediaService(oneUpload, new ImageReencoder(oneUpload));
+        when(mediaRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        limited.upload(upload(TestImages.jpeg(120, 120)));
+        org.mockito.Mockito.clearInvocations(storageService, mediaRepository);
+
+        assertThatThrownBy(() -> limited.upload(upload(TestImages.jpeg(120, 120))))
+                .isInstanceOf(RateLimitExceededException.class)
+                .hasMessageContaining("limit");
+
+        verifyNoInteractions(storageService, mediaRepository);
+    }
+
+    @Test
+    void refusesAnUploadWithNoSignedInCaller() {
+        // SecurityFilterConfig already requires authentication here, so this is the second lock on
+        // the same door: there is no identity to count the upload against, and an unlimited
+        // anonymous allowance would be the one hole in the limit above.
+        when(currentUserService.currentUserId()).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> mediaService.upload(upload(TestImages.jpeg(120, 120))))
+                .isInstanceOf(ForbiddenOperationException.class)
+                .hasMessageContaining("signed in");
+
+        verifyNoInteractions(storageService, mediaRepository);
     }
 
     @Test

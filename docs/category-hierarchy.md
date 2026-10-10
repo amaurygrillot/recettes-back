@@ -29,7 +29,7 @@ This value is **derivable** — a category is `MAIN` exactly when its relation r
 derived value is normally a mistake, so it needs a reason. Two:
 
 - Finding the roots is the first query of every navigation render. `WHERE category_type = 'MAIN'` is an indexable
-  predicate; `WHERE category_id = superior_category_id` is a self-comparison no index can serve.
+  predicate; `WHERE category_id = parent_category_id` is a self-comparison no index can serve.
 - It makes the invariant readable from plain SQL while debugging, instead of something you reconstruct by joining a
   table to itself.
 
@@ -41,14 +41,14 @@ the column together, and nothing else touches either. `CategoryServiceTest` asse
 | Column                 | Notes                                                            |
 |------------------------|------------------------------------------------------------------|
 | `category_id`          | **primary key**, and a foreign key to `categories`                |
-| `superior_category_id` | foreign key to `categories`, `NOT NULL`, separately indexed       |
+| `parent_category_id` | foreign key to `categories`, `NOT NULL`, separately indexed       |
 
-Exactly one row per category. A subcategory's row points at its **directly** superior category; a main category's row
+Exactly one row per category. A subcategory’s row points at its **direct** parent category; a main category’s row
 points at **itself**.
 
 #### Why the roots point at themselves
 
-This is the part that looks wrong at first reading. The alternative is a nullable `superior_category_id`, where a root
+This is the part that looks wrong at first reading. The alternative is a nullable `parent_category_id`, where a root
 simply has no parent.
 
 The self-reference buys one thing: *"every category has exactly one relation row"* becomes a total invariant the
@@ -58,13 +58,13 @@ create fails between inserting the category and inserting its edge, the orphan l
 nothing ever notices.
 
 The cost is that the self-reference is a lie about the domain: a category is not its own parent. So it is contained.
-`CategoryRelationsRepository.superiorIdsByCategoryId()` is the **one** place that translates the stored form into the
+`CategoryRelationsRepository.parentIdsByCategoryId()` is the **one** place that translates the stored form into the
 domain form, dropping self-edges as it goes, and everything above it — the taxonomy walker, the service, the responses
-— sees `null` for a root. Nothing outside that method ever compares an id to its own superior.
+— sees `null` for a root. Nothing outside that method ever compares an id to its own parent.
 
 #### Why a separate table rather than a column on `categories`
 
-Honestly: because that is what the review specified. A nullable `superior_category_id` column on `categories` would
+Honestly: because that is what the review specified. A nullable `parent_category_id` column on `categories` would
 give the same guarantees (a primary key and a unique constraint are the same guarantee here) with one table fewer.
 
 The one real thing the separate table buys is that an edge can be rewritten without touching the category row an admin
@@ -115,7 +115,7 @@ routes needed no security change).
 | GET    | `/categories/hierarchy`                 | public   | 200     | nested forest of main categories                  |
 | GET    | `/categories/{id}`                      | public   | 200     | 404 if unknown                                    |
 | GET    | `/categories/{id}/subcategories`        | public   | 200     | **all** descendants; 404 if the id is unknown     |
-| GET    | `/categories/{id}/superior-categories`  | public   | 200     | ancestor chain, nearest first; `[]` for a root    |
+| GET    | `/categories/{id}/parent-categories`    | public   | 200     | ancestor chain, nearest first; `[]` for a root    |
 | POST   | `/categories`                           | `ADMIN`  | 201     | 400 on an unknown parent, 409 on a duplicate name |
 | PUT    | `/categories/{id}`                      | `ADMIN`  | 200     | 400 on a cycle or an unknown parent               |
 | DELETE | `/categories/{id}`                      | `ADMIN`  | 204     | 409 if still used **or** still has children       |
@@ -129,19 +129,25 @@ under desserts", which is what a listing page wants. A caller that needs one lev
 category itself is not included — it is not below itself, and including it would make an empty result indistinguishable
 from a leaf.
 
-**`/superior-categories` is nearest-first.** That is a breadcrumb reversed, and a breadcrumb is what it feeds. A caller
+**`/parent-categories` is nearest-first.** That is a breadcrumb reversed, and a breadcrumb is what it feeds. A caller
 wanting root-first reverses a list it already holds.
 
 **Both answer 404 for an unknown id, not an empty list.** "This category has nothing under it" and "there is no such
 category" are different answers, and collapsing them hides a broken link on the client.
 
-**`/hierarchy` nests and carries no `superiorCategoryId`.** Nesting already says who the parent is; a second encoding
+**`/hierarchy` nests and carries no `parentCategoryId`.** Nesting already says who the parent is; a second encoding
 of the same fact is a second thing that can disagree. It carries no `categoryType` either — depth 0 is `MAIN` by
 construction.
 
-**`PUT` is a full replacement.** An absent `superiorCategoryId` promotes the category to a root rather than leaving its
+**`PUT` is a full replacement.** An absent `parentCategoryId` promotes the category to a root rather than leaving its
 parent alone. Re-parenting and promoting are both ordinary edits, and a shape where one of them is unexpressible would
 force a second endpoint.
+
+**It is `parent`, not `superior`, everywhere.** The first implementation said `superiorCategoryId`,
+`superior_category_id` and `/superior-categories`. "Parent" is the word every tree in every other system uses — it is
+what a reader already knows, and it is the word the children half of the same relation was always spelled with
+(`children`, "childless", `/subcategories`), so the pair now reads consistently. The rename reaches the wire format and
+the column; see the migration note at the end of this document for what that costs a database that already exists.
 
 **`DELETE` refuses a category that still has children**, with 409. Deleting a node its children point at would fail on
 the foreign key as a raw 500 — or, had that constraint been missing, leave a subtree naming a row that no longer
@@ -213,7 +219,28 @@ There is no migration tool (`ddl-auto=update`, no Flyway — see
 - `category_type` is `NOT NULL` with a default of `MAIN` in the entity, which covers *new* rows only. Existing rows on
   a database that already has categories need `UPDATE categories SET category_type = 'MAIN';` by hand.
 - Every existing category needs its self-referencing relation row:
-  `INSERT INTO categories_relation (category_id, superior_category_id) SELECT id, id FROM categories;`
+  `INSERT INTO categories_relation (category_id, parent_category_id) SELECT id, id FROM categories;`
 
 Run both once, in that order, against any database that predates this change. A category with no relation row reads as
 a root with no children, so the failure is quiet rather than loud — which is exactly why it is written down here.
+
+### The `superior_category_id` → `parent_category_id` rename
+
+The column was called `superior_category_id` when the table first shipped, and `ddl-auto=update` renames nothing: it
+sees a column it does not know about and a column it expects, and tries to *add* the second one. The add is
+`parent_category_id VARCHAR(255) NOT NULL`, which PostgreSQL refuses on a table that already has rows — so the column
+is never created and **every read of the table fails**:
+
+```
+ERROR: column cre1_0.parent_category_id does not exist
+```
+
+Run [sql/rename-superior-category-to-parent.sql](sql/rename-superior-category-to-parent.sql) once against any database
+whose `categories_relation` predates the rename. It is a `RENAME COLUMN`, not an add-copy-drop: the type, the
+`NOT NULL` and the foreign key come across untouched and there is nothing left to clean up afterwards. The script is
+idempotent and also renames the one index this project names itself.
+
+A fresh database needs none of it — Hibernate creates the table from the entity, under the new name. This is a one-off
+either way: no deployment of this API exists yet, so the only affected databases are local ones. That it needed a
+hand-written script at all is the cost of having no migration tool, paid for the first time here and noted in
+[recipes-domain-model.md](recipes-domain-model.md#still-open-after-implementation).

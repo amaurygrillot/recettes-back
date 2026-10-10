@@ -47,7 +47,7 @@ class ReferenceResolverTest {
                 List.of(category("a"), category("b"), category("c")));
 
         Map<String, CategoryEntity> resolved = resolver.resolve("categoryIds",
-                List.of("a", "b", "c"), loader, CategoryEntity::getId);
+                List.of("a", "b", "c"), loader);
 
         assertThat(loader.calls).hasSize(1);
         assertThat(resolved).containsOnlyKeys("a", "b", "c");
@@ -57,8 +57,7 @@ class ReferenceResolverTest {
     void collapsesDuplicatesAndSkipsNullsAndBlanks() {
         RecordingLoader loader = new RecordingLoader(List.of(category("a")));
 
-        resolver.resolve("categoryIds", Arrays.asList("a", "a", null, "  ", "a"),
-                loader, CategoryEntity::getId);
+        resolver.resolve("categoryIds", Arrays.asList("a", "a", null, "  ", "a"), loader);
 
         assertThat(loader.calls.getFirst()).containsExactly("a");
     }
@@ -69,7 +68,7 @@ class ReferenceResolverTest {
         RecordingLoader loader = new RecordingLoader(List.of(category("a")));
 
         assertThatThrownBy(() -> resolver.resolve("categoryIds",
-                List.of("a", "ghost-1", "ghost-2"), loader, CategoryEntity::getId))
+                List.of("a", "ghost-1", "ghost-2"), loader))
                 .isInstanceOf(InvalidReferenceException.class)
                 .hasMessageContaining("categoryIds")
                 .hasMessageContaining("ghost-1")
@@ -81,7 +80,7 @@ class ReferenceResolverTest {
         RecordingLoader loader = new RecordingLoader(List.of());
 
         assertThatThrownBy(() -> resolver.resolve("ingredientGroups[].ingredients[].unitId",
-                List.of("ghost"), loader, CategoryEntity::getId))
+                List.of("ghost"), loader))
                 .hasMessageContaining("ingredientGroups[].ingredients[].unitId");
     }
 
@@ -89,10 +88,9 @@ class ReferenceResolverTest {
     void doesNotQueryAtAllWhenThereIsNothingToResolve() {
         RecordingLoader loader = new RecordingLoader(List.of());
 
-        assertThat(resolver.resolve("categoryIds", List.of(), loader, CategoryEntity::getId)).isEmpty();
-        assertThat(resolver.resolve("categoryIds", null, loader, CategoryEntity::getId)).isEmpty();
-        assertThat(resolver.resolve("categoryIds", Arrays.asList((String) null), loader,
-                CategoryEntity::getId)).isEmpty();
+        assertThat(resolver.resolve("categoryIds", List.of(), loader)).isEmpty();
+        assertThat(resolver.resolve("categoryIds", null, loader)).isEmpty();
+        assertThat(resolver.resolve("categoryIds", Arrays.asList((String) null), loader)).isEmpty();
 
         assertThat(loader.calls).isEmpty();
     }

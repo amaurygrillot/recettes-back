@@ -1,6 +1,7 @@
 package ilenreste.unpeu.recettesback.entities.reference;
 
 import ilenreste.unpeu.recettesback.entities.AuditableEntity;
+import ilenreste.unpeu.recettesback.entities.Identifiable;
 import jakarta.persistence.Column;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
@@ -36,7 +37,7 @@ import lombok.Setter;
 @Getter
 @Setter
 @MappedSuperclass
-public abstract class ReferenceEntity extends AuditableEntity {
+public abstract class ReferenceEntity extends AuditableEntity implements Identifiable {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)

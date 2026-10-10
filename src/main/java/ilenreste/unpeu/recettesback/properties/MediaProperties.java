@@ -37,6 +37,11 @@ import java.time.Duration;
  *                                request thread simultaneously
  * @param processingTimeout       how long an upload waits for a processing permit before the
  *                                request is answered 503
+ * @param uploadLimit             how many uploads one account may make inside
+ *                                {@code uploadLimitWindow}. Not a quota — it bounds the rate at
+ *                                which one user can consume disk, which is the half of the
+ *                                problem a single request cannot see
+ * @param uploadLimitWindow       the rolling window {@code uploadLimit} is counted over
  */
 @ConfigurationProperties(prefix = "app.media")
 public record MediaProperties(
@@ -47,6 +52,8 @@ public record MediaProperties(
         int thumbnailEdge,
         float jpegQuality,
         int maxConcurrentProcessing,
-        Duration processingTimeout
+        Duration processingTimeout,
+        int uploadLimit,
+        Duration uploadLimitWindow
 ) {
 }

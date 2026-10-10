@@ -19,16 +19,16 @@ import lombok.Setter;
  * {@code category_id} is the <strong>primary key</strong>, not just a column.
  * That is the whole point of the table: a primary key is a uniqueness constraint,
  * so the database itself guarantees a category cannot have two parents. Modelled
- * as a nullable {@code superior_category_id} column on {@code categories} the
+ * as a nullable {@code parent_category_id} column on {@code categories} the
  * same guarantee would be free, but a separate table is what was specified, and
  * it buys one real thing — the edge can be deleted and rewritten without touching
  * the category row an admin is concurrently renaming.
  * <p>
  * A {@link CategoryType#MAIN} category's row points at <strong>itself</strong>
- * ({@code superior_category_id = category_id}). See {@link CategoryEntity} for
+ * ({@code parent_category_id = category_id}). See {@link CategoryEntity} for
  * why the roots are spelled that way rather than as a missing row.
  * <p>
- * {@code superior_category_id} carries its own index: PostgreSQL indexes primary
+ * {@code parent_category_id} carries its own index: PostgreSQL indexes primary
  * keys and unique constraints for free but never foreign keys, and "give me the
  * children of X" — the query behind every hierarchy read and the guard on every
  * delete — searches exactly that column.
@@ -41,7 +41,7 @@ import lombok.Setter;
 @Setter
 @Entity
 @Table(name = "categories_relation", indexes =
-@Index(name = "idx_categories_relation_superior", columnList = "superior_category_id"))
+@Index(name = "idx_categories_relation_parent", columnList = "parent_category_id"))
 public class CategoryRelationEntity {
 
     /**
@@ -57,8 +57,8 @@ public class CategoryRelationEntity {
     @JoinColumn(name = "category_id", nullable = false)
     private CategoryEntity category;
 
-    /** The <em>directly</em> superior category, or this same category when it is a root. */
+    /** The <em>direct</em> parent category, or this same category when it is a root. */
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "superior_category_id", nullable = false)
-    private CategoryEntity superiorCategory;
+    @JoinColumn(name = "parent_category_id", nullable = false)
+    private CategoryEntity parentCategory;
 }

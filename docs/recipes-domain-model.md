@@ -275,14 +275,17 @@ classes" or "all the repositories".
 ilenreste.unpeu.recettesback
 ├── configuration/           flat, cross-cutting — and ONLY things that configure:
 │                            SecurityFilterConfig, SecurityBeansConfig, RsaKeyConfig,
-│                            JwtIssuerConfig, JpaAuditingConfig
+│                            JwtIssuerConfig, JpaAuditingConfig, TimeConfig
 ├── properties/              flat — @ConfigurationProperties records (MediaProperties)
 ├── bootstrap/               flat — ApplicationRunners (ReferenceDataSeeder)
 ├── filters/                 unchanged, flat
-├── exceptions/              the exception types, the two advices (ApiExceptionHandler,
-│                            UserExceptionHandler) and ProblemDetailErrorResponder
+├── exceptions/              the exception TYPES, and nothing else
+│   └── handlers/            the classes that answer a failure: both advices
+│                            (ApiExceptionHandler, UserExceptionHandler) and
+│                            ProblemDetailErrorResponder          ← moved, see below
 ├── entities/
 │   ├── AuditableEntity      @MappedSuperclass, shared — stays at the root
+│   ├── Identifiable         "has an id" — also shared, also at the root
 │   ├── recipes/             RecipeEntity, RecipeStepEntity, RecipeStepPictureEntity,
 │   │                        RecipeCoverPictureEntity, RecipeIngredientGroupEntity,
 │   │                        RecipeIngredientEntity
@@ -339,6 +342,36 @@ maps no route — it is a `@RestControllerAdvice`, and the pair of advices only 
 `@Order` on each is what decides which wins. That is impossible to notice when they live in different packages.
 
 `AuditableEntity` stays at the `entities` root for the same reason — it is the shared supertype, owned by no domain.
+`Identifiable` joined it there: one method, `getId()`, implemented by `ReferenceEntity` and `MediaEntity`, and it
+exists to bound `ReferenceResolver`'s type parameter. See [the resolver note](#referenceresolver-is-bounded-not-generic).
+
+#### …and then all three answerers moved again, into `exceptions/handlers`
+
+A later round of the same review: *"the exception/error handlers should be in a dedicated package"*. They were already
+out of `configuration` and `controllers`, but `exceptions` was holding two kinds of thing — the types that **describe**
+a failure and the three classes that **answer** one. Those are different jobs with different reasons to change, so the
+answerers now sit in `exceptions/handlers` and `exceptions` holds types only.
+
+The three stay together rather than being split by what they serve, and that is the same argument as before: which
+advice wins is decided by the `@Order` on each, and `ProblemDetailErrorResponder` is the half of the same mapping that
+runs above the `DispatcherServlet`. Read apart, none of the three explains itself.
+
+This is the only sub-package among the five cross-cutting ones. The others hold one kind of thing each, so dividing
+them would produce packages that answer no question — the rule in `CLAUDE.md` is unchanged, this is the one place it
+did not apply.
+
+#### `ReferenceResolver` is bounded, not generic
+
+The review asked for its type parameter to extend `ReferenceEntity`, "since this is a Reference resolver". It cannot:
+`MediaEntity` is resolved by the same five-line batch loader and is deliberately *not* reference data — no name, no
+normalised name, and not an `AuditableEntity`, because media rows are immutable. The bound would have meant either a
+second copy of the resolver for media or no batch load for it, which is the one thing it exists to do.
+
+So the bound is `Identifiable`, which is the narrowest type that covers all five call sites and is exactly what the
+resolver uses. It paid for itself immediately: the bound lets the resolver read an id off a loaded row itself, which
+removed the `idExtractor` argument every call site used to pass — five copies of `SomeEntity::getId`, any one of which
+could have named a getter for the wrong entity with nothing to catch it. Locals are named for what they hold
+(`requestedIds`, `resolvedById`, `missingIds`) rather than `ids`, `found`, `missing`.
 
 ### The `services` conflict — resolved: grouped, and `CLAUDE.md` amended
 
@@ -718,7 +751,7 @@ categories.
 | DELETE | `/categories/{id}`  | `ADMIN`           | 204     | 409 if in use **or** if it still has children    |
 
 Categories carry three further read routes — `/categories/hierarchy`, `/categories/{id}/subcategories` and
-`/categories/{id}/superior-categories` — documented in [category-hierarchy.md](category-hierarchy.md).
+`/categories/{id}/parent-categories` — documented in [category-hierarchy.md](category-hierarchy.md).
 
 `?q=` on `/ingredients` was renamed `?namePrefix=`: `q` said nothing about what was matched or how, and the answer was
 not guessable — it is a prefix, against the normalized name, so a trailing wildcard can use the index and a leading one

@@ -1,6 +1,8 @@
 package ilenreste.unpeu.recettesback.entities.media;
 
+import ilenreste.unpeu.recettesback.entities.Identifiable;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.models.media.MediaType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EntityListeners;
@@ -56,7 +58,7 @@ import java.time.Instant;
         // indexed from the referencing tables, which arrive with the recipes entities.
         @Index(name = "idx_media_created_at", columnList = "created_at")
 })
-public class MediaEntity {
+public class MediaEntity implements Identifiable {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)

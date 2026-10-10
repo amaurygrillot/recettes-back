@@ -1,6 +1,7 @@
-package ilenreste.unpeu.recettesback.exceptions;
+package ilenreste.unpeu.recettesback.exceptions.handlers;
 
 import ilenreste.unpeu.recettesback.controllers.users.UserController;
+import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.Ordered;
@@ -26,8 +27,8 @@ import java.net.URI;
  * one must not — deliberately collapse four distinguishable failures into one
  * indistinguishable response.
  * <p>
- * It sits in {@code exceptions} next to {@link ApiExceptionHandler}, not in
- * {@code controllers}. It is not a controller and maps no route: it is a
+ * It sits in {@code exceptions.handlers} next to {@link ApiExceptionHandler},
+ * not in {@code controllers}. It is not a controller and maps no route: it is a
  * {@code @RestControllerAdvice}, one of the two halves of this application's
  * exception-to-status mapping, and the pair only makes sense read together —
  * the {@code @Order} on each is what decides which of them wins, and that is

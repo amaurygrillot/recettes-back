@@ -35,34 +35,34 @@ final class CategoryTaxonomy {
             Comparator.comparing(CategoryEntity::getName, String.CASE_INSENSITIVE_ORDER);
 
     private final Map<String, CategoryEntity> byId = new LinkedHashMap<>();
-    /** {@code categoryId -> superiorCategoryId}, roots absent. */
-    private final Map<String, String> superiors;
-    /** {@code superiorCategoryId -> direct children}, name-sorted. */
+    /** {@code categoryId -> parentCategoryId}, roots absent. */
+    private final Map<String, String> parents;
+    /** {@code parentCategoryId -> direct children}, name-sorted. */
     private final Map<String, List<CategoryEntity>> children = new LinkedHashMap<>();
 
     /**
-     * @param superiors the map from
-     *                  {@code CategoryRelationsRepository.superiorIdsByCategoryId()},
+     * @param parents the map from
+     *                  {@code CategoryRelationsRepository.parentIdsByCategoryId()},
      *                  in which a root has <strong>no entry</strong> rather than an
      *                  entry pointing at itself. That normalisation happens once, at
      *                  the repository, so nothing here has to remember it — and a
      *                  root cannot end up listed among its own children, which would
      *                  make every walk below immediately cyclic
      */
-    CategoryTaxonomy(List<CategoryEntity> categories, Map<String, String> superiors) {
-        this.superiors = superiors;
+    CategoryTaxonomy(List<CategoryEntity> categories, Map<String, String> parents) {
+        this.parents = parents;
         for (CategoryEntity category : categories.stream().sorted(BY_NAME).toList()) {
             byId.put(category.getId(), category);
-            String superiorId = superiors.get(category.getId());
-            if (superiorId != null) {
-                children.computeIfAbsent(superiorId, key -> new ArrayList<>()).add(category);
+            String parentId = parents.get(category.getId());
+            if (parentId != null) {
+                children.computeIfAbsent(parentId, key -> new ArrayList<>()).add(category);
             }
         }
     }
 
     /** The parent's id, or null for a root. */
-    String superiorIdOf(String categoryId) {
-        return superiors.get(categoryId);
+    String parentIdOf(String categoryId) {
+        return parents.get(categoryId);
     }
 
     List<CategoryEntity> roots() {
@@ -100,9 +100,9 @@ final class CategoryTaxonomy {
     List<CategoryEntity> ancestorsOf(String categoryId) {
         List<CategoryEntity> ancestors = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>(Set.of(categoryId));
-        for (String current = superiorIdOf(categoryId);
+        for (String current = parentIdOf(categoryId);
              current != null && seen.add(current);
-             current = superiorIdOf(current)) {
+             current = parentIdOf(current)) {
             CategoryEntity ancestor = byId.get(current);
             if (ancestor == null) {
                 break;

@@ -50,7 +50,7 @@ class CategoryServiceTest {
 
     /** Every category the fake repository knows about, in insertion order. */
     private final List<CategoryEntity> stored = new ArrayList<>();
-    /** Edges as {@code {categoryId, superiorCategoryId}}, self-referencing for roots. */
+    /** Edges as {@code {categoryId, parentCategoryId}}, self-referencing for roots. */
     private final List<Object[]> edges = new ArrayList<>();
 
     @BeforeEach
@@ -71,25 +71,25 @@ class CategoryServiceTest {
         when(categoriesRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         // The default method under test is the real one; only findAllEdges is faked.
         when(relationsRepository.findAllEdges()).thenAnswer(invocation -> List.copyOf(edges));
-        when(relationsRepository.superiorIdsByCategoryId()).thenCallRealMethod();
+        when(relationsRepository.parentIdsByCategoryId()).thenCallRealMethod();
         when(relationsRepository.findById(anyString())).thenReturn(Optional.empty());
         when(relationsRepository.save(any())).thenAnswer(invocation -> {
             CategoryRelationEntity relation = invocation.getArgument(0);
             edges.removeIf(edge -> edge[0].equals(relation.getCategory().getId()));
-            edges.add(new Object[]{relation.getCategory().getId(), relation.getSuperiorCategory().getId()});
+            edges.add(new Object[]{relation.getCategory().getId(), relation.getParentCategory().getId()});
             return relation;
         });
     }
 
     /** Registers a category as if it had already been created, with its edge. */
-    private CategoryEntity given(String id, String name, String normalized, String superiorId) {
+    private CategoryEntity given(String id, String name, String normalized, String parentId) {
         CategoryEntity entity = new CategoryEntity();
         entity.setId(id);
         entity.setName(name);
         entity.setNormalizedName(normalized);
-        entity.setCategoryType(superiorId.equals(id) ? CategoryType.MAIN : CategoryType.SUB);
+        entity.setCategoryType(parentId.equals(id) ? CategoryType.MAIN : CategoryType.SUB);
         stored.add(entity);
-        edges.add(new Object[]{id, superiorId});
+        edges.add(new Object[]{id, parentId});
         return entity;
     }
 
@@ -215,36 +215,36 @@ class CategoryServiceTest {
     }
 
     @Test
-    void aCategoryWithNoSuperiorIsAMainCategory_andItsEdgePointsAtItself() {
+    void aCategoryWithNoParentIsAMainCategory_andItsEdgePointsAtItself() {
         assignIdOnSave("cat-1");
 
         CategoryResponse created = categoryService.createCategory(new CategoryRequest("Desserts", null));
 
         assertThat(created.categoryType()).isEqualTo(CategoryType.MAIN);
         // Null rather than the stored self-reference: the schema device stays inside the server.
-        assertThat(created.superiorCategoryId()).isNull();
+        assertThat(created.parentCategoryId()).isNull();
         assertThat(edges).anySatisfy(edge -> assertThat(edge).containsExactly("cat-1", "cat-1"));
     }
 
     @Test
-    void aCategoryWithASuperiorIsASubcategory() {
+    void aCategoryWithAParentIsASubcategory() {
         given("cat-1", "Desserts", "desserts", "cat-1");
         assignIdOnSave("cat-2");
 
         CategoryResponse created = categoryService.createCategory(new CategoryRequest("Tartes", "cat-1"));
 
         assertThat(created.categoryType()).isEqualTo(CategoryType.SUB);
-        assertThat(created.superiorCategoryId()).isEqualTo("cat-1");
+        assertThat(created.parentCategoryId()).isEqualTo("cat-1");
     }
 
     @Test
-    void refusesASuperiorThatNamesNoCategory() {
+    void refusesAParentThatNamesNoCategory() {
         // 400 and not 404: /categories is perfectly reachable, it is the payload that is wrong.
         assignIdOnSave("cat-1");
 
         assertThatThrownBy(() -> categoryService.createCategory(new CategoryRequest("Tartes", "ghost")))
                 .isInstanceOf(InvalidReferenceException.class)
-                .hasMessageContaining("superiorCategoryId");
+                .hasMessageContaining("parentCategoryId");
     }
 
     @Test
@@ -268,7 +268,7 @@ class CategoryServiceTest {
         CategoryResponse updated = categoryService.updateCategory("cat-2", new CategoryRequest("Tartes", null));
 
         assertThat(updated.categoryType()).isEqualTo(CategoryType.MAIN);
-        assertThat(updated.superiorCategoryId()).isNull();
+        assertThat(updated.parentCategoryId()).isNull();
         assertThat(sub.getCategoryType()).isEqualTo(CategoryType.MAIN);
     }
 
@@ -290,10 +290,10 @@ class CategoryServiceTest {
         given("cat-2", "Tartes", "tartes", "cat-1");
         given("cat-3", "Tartes aux pommes", "tartes aux pommes", "cat-2");
 
-        assertThat(categoryService.findSuperiorCategories("cat-3"))
+        assertThat(categoryService.findParentCategories("cat-3"))
                 .extracting(CategoryResponse::id)
                 .containsExactly("cat-2", "cat-1");
-        assertThat(categoryService.findSuperiorCategories("cat-1")).isEmpty();
+        assertThat(categoryService.findParentCategories("cat-1")).isEmpty();
     }
 
     @Test
@@ -323,7 +323,7 @@ class CategoryServiceTest {
         // answers, and an empty list for the second would hide a client's broken link.
         assertThatThrownBy(() -> categoryService.findSubcategories("ghost"))
                 .isInstanceOf(ResourceNotFoundException.class);
-        assertThatThrownBy(() -> categoryService.findSuperiorCategories("ghost"))
+        assertThatThrownBy(() -> categoryService.findParentCategories("ghost"))
                 .isInstanceOf(ResourceNotFoundException.class);
     }
 

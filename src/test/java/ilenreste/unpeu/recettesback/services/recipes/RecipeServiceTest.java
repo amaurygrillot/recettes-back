@@ -74,7 +74,7 @@ class RecipeServiceTest {
         mediaRepository = mock(MediaRepository.class);
         categoryRelationsRepository = mock(CategoryRelationsRepository.class);
         categoryService = mock(CategoryService.class);
-        when(categoryRelationsRepository.superiorIdsByCategoryId()).thenReturn(Map.of());
+        when(categoryRelationsRepository.parentIdsByCategoryId()).thenReturn(Map.of());
         recipeService = new RecipeService(recipesRepository,
                 categoriesRepository, categoryRelationsRepository, mock(TagsRepository.class),
                 mock(IngredientsRepository.class), mock(UnitsRepository.class),
@@ -299,8 +299,11 @@ class RecipeServiceTest {
         when(currentUserService.currentUserId()).thenReturn(Optional.of("someone-else"));
         when(currentUserService.isAdmin()).thenReturn(false);
 
+        // The message is asserted, not just the type: it is the only thing the refused caller
+        // reads, and it has to describe the rule the condition actually applies - admins included.
         assertThatThrownBy(() -> recipeService.update("r-1", titleOnly("Hijacked")))
-                .isInstanceOf(ForbiddenOperationException.class);
+                .isInstanceOf(ForbiddenOperationException.class)
+                .hasMessage("Only the author of this recipe, or an administrator, may modify it.");
 
         assertThat(existing.getTitle()).isEqualTo("Tarte");
         verify(recipesRepository, never()).save(any());

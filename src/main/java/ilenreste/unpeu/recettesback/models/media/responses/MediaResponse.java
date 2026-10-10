@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.models.media.responses;
 
-import ilenreste.unpeu.recettesback.entities.media.MediaType;
+import ilenreste.unpeu.recettesback.models.media.MediaType;
 
 /**
  * What {@code POST /media} returns, and what a recipe response embeds for each

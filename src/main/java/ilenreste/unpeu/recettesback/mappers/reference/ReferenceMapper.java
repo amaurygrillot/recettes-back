@@ -30,13 +30,13 @@ public class ReferenceMapper {
      * mapper a repository so it could look the edge up itself would turn every
      * category in a list into its own query.
      *
-     * @param superiorCategoryId the directly superior category, or null for a main
+     * @param parentCategoryId the direct parent category, or null for a main
      *                           category. Null and not the stored self-reference:
      *                           see {@link CategoryResponse}
      */
-    public CategoryResponse toResponse(CategoryEntity category, String superiorCategoryId) {
+    public CategoryResponse toResponse(CategoryEntity category, String parentCategoryId) {
         return new CategoryResponse(category.getId(), category.getName(),
-                category.getCategoryType(), superiorCategoryId);
+                category.getCategoryType(), parentCategoryId);
     }
 
     public TagResponse toResponse(TagEntity tag) {

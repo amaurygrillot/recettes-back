@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.exceptions;
+package ilenreste.unpeu.recettesback.exceptions.handlers;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -21,8 +21,9 @@ import java.net.URI;
  * shape as every application error, so a client never has to special-case 401
  * and 403 as the two responses with no body.
  * <p>
- * It lives in {@code exceptions} next to {@link ApiExceptionHandler} rather than
- * in {@code configuration}: it configures nothing and declares no bean — it is
+ * It lives in {@code exceptions.handlers} next to {@link ApiExceptionHandler}
+ * rather than in {@code configuration}: it configures nothing and declares no
+ * bean — it is
  * the second half of "turn a failure into a {@code problem+json} body", the half
  * that runs above the {@code DispatcherServlet} where an {@code @ExceptionHandler}
  * cannot reach. {@code SecurityFilterConfig} is the configuration that wires it.

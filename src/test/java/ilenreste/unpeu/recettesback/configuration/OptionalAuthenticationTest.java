@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.configuration;
 
-import ilenreste.unpeu.recettesback.exceptions.ProblemDetailErrorResponder;
+import ilenreste.unpeu.recettesback.exceptions.handlers.ProblemDetailErrorResponder;
 import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;

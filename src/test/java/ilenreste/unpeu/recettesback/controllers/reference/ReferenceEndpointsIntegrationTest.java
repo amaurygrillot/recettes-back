@@ -114,10 +114,10 @@ class ReferenceEndpointsIntegrationTest {
         return createCategoryAsAdmin(name, null);
     }
 
-    private String createCategoryAsAdmin(String name, String superiorCategoryId) {
-        String json = superiorCategoryId == null
+    private String createCategoryAsAdmin(String name, String parentCategoryId) {
+        String json = parentCategoryId == null
                 ? "{\"name\":\"%s\"}".formatted(name)
-                : "{\"name\":\"%s\",\"superiorCategoryId\":\"%s\"}".formatted(name, superiorCategoryId);
+                : "{\"name\":\"%s\",\"parentCategoryId\":\"%s\"}".formatted(name, parentCategoryId);
         ResponseEntity<String> response = restTemplate.postForEntity("/categories",
                 body(json, adminToken), String.class);
         assertThat(response.getStatusCode())
@@ -228,10 +228,10 @@ class ReferenceEndpointsIntegrationTest {
         String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
         String tartesAuxPommes = createCategoryAsAdmin(uniqueName("tartes-aux-pommes"), tartes);
 
-        // A root reports MAIN and no superior - never the self-reference the schema actually holds.
+        // A root reports MAIN and no parent - never the self-reference the schema actually holds.
         assertThat(restTemplate.getForObject("/categories/" + desserts, String.class))
                 .contains("\"categoryType\":\"MAIN\"")
-                .contains("\"superiorCategoryId\":null");
+                .contains("\"parentCategoryId\":null");
         assertThat(restTemplate.getForObject("/categories/" + tartes, String.class))
                 .contains("\"categoryType\":\"SUB\"")
                 .contains(desserts);
@@ -242,11 +242,11 @@ class ReferenceEndpointsIntegrationTest {
                 .contains(tartesAuxPommes);
 
         // The ancestor chain, nearest first: breadcrumb order reversed.
-        String superiors = restTemplate.getForObject(
-                "/categories/" + tartesAuxPommes + "/superior-categories", String.class);
-        assertThat(superiors.indexOf(tartes)).isLessThan(superiors.indexOf(desserts));
+        String parents = restTemplate.getForObject(
+                "/categories/" + tartesAuxPommes + "/parent-categories", String.class);
+        assertThat(parents.indexOf(tartes)).isLessThan(parents.indexOf(desserts));
         assertThat(restTemplate.getForObject(
-                "/categories/" + desserts + "/superior-categories", String.class)).isEqualTo("[]");
+                "/categories/" + desserts + "/parent-categories", String.class)).isEqualTo("[]");
 
         // Nested, so a navigation menu is one call.
         assertThat(restTemplate.getForObject("/categories/hierarchy", String.class))
@@ -263,7 +263,7 @@ class ReferenceEndpointsIntegrationTest {
                 .isEqualTo(HttpStatus.OK);
         assertThat(restTemplate.getForEntity("/categories/" + desserts + "/subcategories", String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(restTemplate.getForEntity("/categories/" + desserts + "/superior-categories", String.class)
+        assertThat(restTemplate.getForEntity("/categories/" + desserts + "/parent-categories", String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 
@@ -275,19 +275,19 @@ class ReferenceEndpointsIntegrationTest {
     void hierarchyReadsAnswer404ForAnUnknownCategory() {
         assertThat(restTemplate.getForEntity("/categories/no-such-id/subcategories", String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(restTemplate.getForEntity("/categories/no-such-id/superior-categories", String.class)
+        assertThat(restTemplate.getForEntity("/categories/no-such-id/parent-categories", String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test
-    void rejectsASuperiorCategoryThatDoesNotExist() {
+    void rejectsAParentCategoryThatDoesNotExist() {
         // 400 and not 404: /categories is perfectly reachable, it is the payload that is wrong.
         ResponseEntity<String> response = restTemplate.postForEntity("/categories",
-                body("{\"name\":\"%s\",\"superiorCategoryId\":\"00000000-0000-0000-0000-000000000000\"}"
+                body("{\"name\":\"%s\",\"parentCategoryId\":\"00000000-0000-0000-0000-000000000000\"}"
                         .formatted(uniqueName("tartes")), adminToken), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(response.getBody()).contains("superiorCategoryId");
+        assertThat(response.getBody()).contains("parentCategoryId");
     }
 
     @Test
@@ -298,7 +298,7 @@ class ReferenceEndpointsIntegrationTest {
 
         ResponseEntity<String> response = restTemplate.exchange("/categories/" + desserts,
                 HttpMethod.PUT,
-                body("{\"name\":\"desserts-%s\",\"superiorCategoryId\":\"%s\"}"
+                body("{\"name\":\"desserts-%s\",\"parentCategoryId\":\"%s\"}"
                         .formatted(UUID.randomUUID().toString().substring(0, 8), tartes), adminToken),
                 String.class);
 
@@ -319,7 +319,7 @@ class ReferenceEndpointsIntegrationTest {
 
     /** An update is a full replacement, so dropping the field promotes the category to a root. */
     @Test
-    void promotesASubcategoryToARootWhenTheSuperiorIsOmitted() {
+    void promotesASubcategoryToARootWhenTheParentIsOmitted() {
         String desserts = createCategoryAsAdmin(uniqueName("desserts"));
         String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
 

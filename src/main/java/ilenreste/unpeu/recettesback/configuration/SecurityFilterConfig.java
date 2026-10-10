@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.configuration;
 
-import ilenreste.unpeu.recettesback.exceptions.ProblemDetailErrorResponder;
+import ilenreste.unpeu.recettesback.exceptions.handlers.ProblemDetailErrorResponder;
 import ilenreste.unpeu.recettesback.filters.JwtAuthenticationFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

@@ -92,6 +92,20 @@ of adding it *later* is not symmetric: `ddl-auto=update` creates the column but 
 discriminator on a table that already has rows means a hand-written backfill, on a project that deliberately has no
 migration tool. One enum now, or a migration script later.
 
+Two follow-ups from the same review thread:
+
+- **The enum lives in `models/media`, not `entities/media`.** It is not an entity — no `@Entity`, no `@Id`, no table —
+  and it is a value that crosses the HTTP boundary, as a documented field of `MediaResponse`. That is what `models` is
+  for, and `MediaVariant`, the other media enum on the wire, was already there. `MediaEntity` persisting it with
+  `@Enumerated` makes it no more an entity than persisting a `String` makes `String` one.
+- **Each kind declares the extensions it comes in** (`PHOTO("jpg", "png")`), so "what sort of file is this?" is
+  answerable from the kind rather than only from a `content_type` string — the review's "the media type should at least
+  hold the extension". The *exact* extension of one row stays a property of its format, `ImageFormat.JPEG.extension()`,
+  because a kind covers several and a row is exactly one. The two cannot drift apart silently: every `ImageFormat` now
+  names the `MediaType` it belongs to — which is also what sets the column, replacing a hard-coded `PHOTO` and the
+  comment promising a branch there one day — and `ImageFormatTest` asserts each format's extension is one its kind
+  declares. The upload rejection message is built from the same list, so widening the allowlist updates it too.
+
 #### Why not `PhotoEntity` / `VideoEntity` under a `MediaEntity` supertype
 
 - Everything that points at media points at *media*, not at a photo: recipe cover pictures, step pictures, ingredient
@@ -147,6 +161,9 @@ content type.
 
 The pipeline, in order — each step is a gate, and a failure at any of them stores nothing:
 
+0. **Rate cap on the calling account**, before the bytes are read into the heap. `app.media.upload-limit` uploads per
+   `app.media.upload-limit-window`; over it the answer is **429 with `Retry-After`**. See below — this is the only gate
+   that looks at anything beyond the one file in hand.
 1. **Size cap before anything is read into memory.** `spring.servlet.multipart.max-file-size` and
    `max-request-size` (proposed: 8 MB). Exceeding it is `413 Payload Too Large`.
 2. **Format allowlist by magic bytes.** JPEG and PNG only. The declared `Content-Type` header and the filename
@@ -191,6 +208,42 @@ Two implementation details that are load-bearing rather than incidental:
   `app.media.processing-timeout` answers **503 with `Retry-After`** — the honest status, since nothing failed and the
   server is momentarily busy.
 
+### Rate limiting the upload endpoint
+
+> *"We need to have a protocol to avoid a disk saturation from a user that uploads 1000 files in a row. Maybe a rate
+> limit?"* — review of `MediaController`
+
+Every other gate in the pipeline asks a question about **one file**: is it a JPEG, does it declare too many pixels, is
+the decoder busy. A thousand ordinary photos pass all of them, a thousand times. And the failure is not "uploads stop
+working": the storage root shares a volume with the database, so a full disk is Postgres refusing writes.
+
+`UploadRateLimiter` keeps the instants of each account's recent uploads and refuses once there are
+`app.media.upload-limit` of them inside `app.media.upload-limit-window` (20 per 10 minutes). Four decisions in that
+sentence are deliberate:
+
+- **429, not 503.** The request is fine and the server is fine; *this caller* has had their share. 503 is the existing
+  answer to a saturated decode pool and means something different — a client told "the server is busy" when it is being
+  throttled goes looking in the wrong place. Both carry `Retry-After`, floored at one second, because the header is
+  whole seconds and a client reads `0` as "retry now".
+- **Per account, not per IP.** The endpoint is authenticated, so there is a real identity to count against — and
+  `CurrentUserService` returning nothing here is a `403`, not an unlimited anonymous allowance.
+- **A rolling window, not a counter that resets.** A fixed ten-minute window lets a caller spend the whole allowance at
+  09:59:59 and the whole allowance again at 10:00:01, which is twice the limit in two seconds — the exact burst the
+  limit exists to stop. The cost is one `Instant` per upload per active uploader, and a refused upload is not counted,
+  so retrying cannot push a caller's own window further out.
+- **First in the pipeline.** A refusal must be the cheapest thing the request can do, or a limit that protects the disk
+  becomes a way to spend CPU and heap.
+
+It is **in memory**, like the RSA key pair in `RsaKeyConfig`: a restart forgives everyone, and a second instance would
+double the effective limit. Both are accepted on a single-instance deployment, and the fix for both is the same shared
+store — not worth it before there is a second instance, and a limit that is sometimes enforced still bounds a disk that
+was otherwise unbounded. Counters for accounts whose windows have drained are dropped once the map passes a threshold;
+there is no scheduler in this application and adding one for a few kilobytes would be the wrong trade.
+
+The numbers are config, not code. 20 per 10 minutes is far above what a recipe needs — a cover plus a picture per
+step — and far below what fills a volume. It is not a quota: see the deferred gaps at the end of this document for why
+the total-bytes half is still open, and what has to happen first.
+
 ### `server.tomcat.max-swallow-size` is part of the size cap, not an unrelated setting
 
 When Tomcat rejects an oversized upload it answers immediately, while the client is still sending. It then has to read
@@ -213,11 +266,23 @@ bytes **this application generated**, not bytes a user supplied:
   photos do not come out sideways once it is gone.
 
   Reading that tag is the one thing stock `ImageIO` cannot do: it exposes the JPEG APP1/Exif segment as an unparsed
-  "unknown" marker segment with no accessor for orientation. Hence the single added dependency,
-  `com.drewnoakes:metadata-extractor` — chosen over hand-parsing the TIFF IFD (writing our own binary parser for
-  attacker-controlled input is the worse trade in security-sensitive code) and over TwelveMonkeys (which would also
-  widen the format allowlist, adding parsers on hostile bytes, which is the opposite of what this document wants).
+  "unknown" marker segment with no accessor for orientation. `ExifOrientation` is the ~60 lines that read it.
   Decoding still uses stock `ImageIO` alone.
+
+  **This was `com.drewnoakes:metadata-extractor`, and the dependency was removed in review.** The original reasoning
+  was that hand-parsing attacker-controlled binary is the worse trade in security-sensitive code, and that is a real
+  argument — but it was weighed against the wrong thing. The library reads every tag of every metadata format in every
+  container; what is needed is *one* two-byte integer at a well-specified offset, reached by walking marker segments
+  that each declare their own length. That parse is bounds-checked against the array it was handed, allocates nothing
+  proportional to anything the file declares, has no recursion and never follows an offset backwards or outside the
+  segment — and the worst outcome of getting it wrong is a photo displayed sideways, because a malformed block returns
+  "no rotation" rather than throwing. Against that, a dependency is a supply chain, a version to track and a transitive
+  surface, on a project whose whole upload posture is about minimising parsers on hostile bytes. `ExifOrientationTest`
+  is 33 cases, half of them malformed input, and the eight orientations are additionally asserted end to end on real
+  pixels by `ImageReencoderTest`.
+
+  TwelveMonkeys was rejected and stays rejected, for a different reason: it would also widen the format allowlist,
+  adding parsers on hostile bytes, which is the opposite of what this document wants.
 - **Malformed-image parser exploits** — a corrupt file crafted against a downstream decoder never reaches a viewer,
   because it has to survive our decoder first, in a JVM, server-side.
 
@@ -289,6 +354,8 @@ taking image bytes off the JVM entirely. Not needed at launch.
 | `app.media.jpeg-quality`               | Re-encode quality                                  | `0.85`          |
 | `app.media.max-concurrent-processing`  | Uploads that may decode at once                    | `4`             |
 | `app.media.processing-timeout`         | Wait for a decode permit before answering 503      | `10s`           |
+| `app.media.upload-limit`               | Uploads one account may make inside the window     | `20`            |
+| `app.media.upload-limit-window`        | Rolling window the limit is counted over           | `10m`           |
 | `spring.servlet.multipart.max-file-size` | Hard size cap, enforced by the container         | `8MB`           |
 | `server.tomcat.max-swallow-size`       | Body discarded after a rejected upload             | `12MB`          |
 
@@ -300,16 +367,15 @@ On the VPS, `app.media.storage-path` must point **outside** the deployment direc
 
 ## Known gaps, deliberately deferred
 
-- **No per-user quota.** Any authenticated user can upload until the disk fills, which on a VPS takes the database
-  down with it. Low risk at friends-and-family scale with named accounts, but it is a real availability hole.
-  `MediaRepository.totalBytesUploadedBy` is written and tested-adjacent but **not called**: enforcing it is a handful
-  of lines in `MediaService.upload` returning `413`, plus a disk-space monitor.
+- **No per-user quota.** The rate limit below bounds how *fast* an account can consume disk; it does not bound the
+  total. A determined uploader can still fill a volume slowly, and this is the remaining half of the problem.
+  `MediaRepository.totalBytesUploadedBy` is written and **not called**: enforcing it is a handful of lines in
+  `MediaService.upload` returning `413`, plus a disk-space monitor. It is deferred rather than done because the number
+  it sums is wrong until orphan cleanup exists — abandoned uploads would count against their uploader forever, so the
+  first users to hit the quota would be the ones who changed their mind about a photo.
 - **No orphan cleanup.** Media uploaded and then never attached (user abandons the form) stays forever. A scheduled
-  job deleting rows older than, say, 24 hours with no referencing row is the fix.
-- **No rate limiting** on `POST /media` — the same gap already recorded for the password-reset endpoints in
-  [password-reset.md](password-reset.md), and worth solving once for the whole API rather than per endpoint. Note the
-  concurrency bound above is *not* rate limiting: it caps simultaneous work, not requests over time, so one account can
-  still upload continuously.
+  job deleting rows older than, say, 24 hours with no referencing row is the fix, and `MediaRepository.findOrphans`
+  already finds them. It blocks the quota above, which is the strongest argument yet for doing it.
 - **No virus scanning.** Re-encoding makes a stored file very unlikely to be a working payload for anything, and these
   are images served to browsers, not executables handed to users. ClamAV would be the addition if uploads ever open
   beyond known accounts.

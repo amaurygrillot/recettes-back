@@ -8,6 +8,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
 
@@ -52,13 +53,37 @@ final class TestImages {
      * that re-encoding actually drops it rather than trusting that it does.
      */
     static byte[] jpegWithExif(int width, int height, int orientation, String description) {
-        byte[] base = jpeg(width, height);
-        byte[] app1 = exifApp1Segment(orientation, description);
+        return jpegWithExif(width, height, orientation, description, ByteOrder.LITTLE_ENDIAN);
+    }
 
+    /**
+     * The same, in a chosen TIFF byte order. {@code II} (little-endian) and
+     * {@code MM} (big-endian) are both legal and both shipped by real cameras, so
+     * the reader has to handle each.
+     */
+    static byte[] jpegWithExif(int width, int height, int orientation, String description,
+                               ByteOrder order) {
+        return jpegWithSegment(jpeg(width, height), exifApp1Segment(orientation, description, order));
+    }
+
+    /** Splices {@code segment} in immediately after the SOI marker, where APP1 belongs. */
+    static byte[] jpegWithSegment(byte[] baseJpeg, byte[] segment) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        out.write(base, 0, 2);                       // SOI (FF D8)
-        out.write(app1, 0, app1.length);             // our APP1, before everything else
-        out.write(base, 2, base.length - 2);
+        out.write(baseJpeg, 0, 2);                       // SOI (FF D8)
+        out.write(segment, 0, segment.length);
+        out.write(baseJpeg, 2, baseJpeg.length - 2);
+        return out.toByteArray();
+    }
+
+    /** Wraps {@code payload} in an APP1 marker segment with the two-byte length JPEG requires. */
+    static byte[] app1Segment(byte[] payload) {
+        int segmentLength = 2 + payload.length;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(0xFF);
+        out.write(0xE1);
+        out.write((segmentLength >> 8) & 0xFF);
+        out.write(segmentLength & 0xFF);
+        out.writeBytes(payload);
         return out.toByteArray();
     }
 
@@ -130,18 +155,24 @@ final class TestImages {
     }
 
     /**
-     * A minimal but valid little-endian TIFF block wrapped in a JPEG APP1
-     * segment: two IFD0 entries, orientation inline and the description at an
-     * offset past the directory.
+     * A minimal but valid TIFF block wrapped in a JPEG APP1 segment: two IFD0
+     * entries, orientation inline and the description at an offset past the
+     * directory.
+     * <p>
+     * Generated in a chosen byte order because a SHORT's value sits in the
+     * <em>first two</em> of the entry's four value bytes, which makes reading it
+     * endianness-dependent rather than just "the first two bytes" - the one detail
+     * a hand-written reader is most likely to get wrong, and therefore the one
+     * worth generating both ways.
      */
-    private static byte[] exifApp1Segment(int orientation, String description) {
+    static byte[] exifApp1Segment(int orientation, String description, ByteOrder order) {
         byte[] descriptionBytes = (description + "\0").getBytes(StandardCharsets.US_ASCII);
 
         // TIFF header (8) + entry count (2) + two entries (24) + next-IFD offset (4) = 38
         int descriptionOffset = 38;
-        ByteBuffer tiff = ByteBuffer.allocate(descriptionOffset + descriptionBytes.length)
-                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        tiff.put((byte) 'I').put((byte) 'I');
+        ByteBuffer tiff = ByteBuffer.allocate(descriptionOffset + descriptionBytes.length).order(order);
+        byte orderMark = (byte) (order == ByteOrder.LITTLE_ENDIAN ? 'I' : 'M');
+        tiff.put(orderMark).put(orderMark);
         tiff.putShort((short) 42);
         tiff.putInt(8);                       // offset of IFD0
 
@@ -158,19 +189,12 @@ final class TestImages {
         tiff.putInt(0);                       // no next IFD
         tiff.put(descriptionBytes);
 
-        byte[] payload = tiff.array();
-        int segmentLength = 2 + 6 + payload.length;   // length field + "Exif\0\0" + TIFF block
+        return app1Segment(concat(exifHeader(), tiff.array()));
+    }
 
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        out.write(0xFF);
-        out.write(0xE1);
-        out.write((segmentLength >> 8) & 0xFF);
-        out.write(segmentLength & 0xFF);
-        out.writeBytes("Exif".getBytes(StandardCharsets.US_ASCII));
-        out.write(0);
-        out.write(0);
-        out.writeBytes(payload);
-        return out.toByteArray();
+    /** {@code "Exif\0\0"}, the six bytes that tell an APP1 segment apart from XMP's. */
+    static byte[] exifHeader() {
+        return new byte[]{'E', 'x', 'i', 'f', 0, 0};
     }
 
     private static void writeChunk(ByteArrayOutputStream out, String type, byte[] data) {

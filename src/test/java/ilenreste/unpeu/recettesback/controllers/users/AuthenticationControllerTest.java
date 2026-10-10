@@ -1,6 +1,6 @@
 package ilenreste.unpeu.recettesback.controllers.users;
 
-import ilenreste.unpeu.recettesback.exceptions.ApiExceptionHandler;
+import ilenreste.unpeu.recettesback.exceptions.handlers.ApiExceptionHandler;
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
 import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
 import org.junit.jupiter.api.BeforeEach;

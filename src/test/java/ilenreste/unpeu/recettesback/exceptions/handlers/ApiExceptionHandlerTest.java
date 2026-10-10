@@ -1,8 +1,15 @@
-package ilenreste.unpeu.recettesback.exceptions;
+package ilenreste.unpeu.recettesback.exceptions.handlers;
 
+import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
+import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
+import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
+import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -10,6 +17,7 @@ import org.springframework.mock.web.MockHttpServletRequest;
 
 import java.net.URI;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -67,6 +75,41 @@ class ApiExceptionHandlerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getDetail()).isEqualTo("Only the author may edit this recipe");
+    }
+
+    @Test
+    void rateLimitExceeded_mapsTo429_withRetryAfter() {
+        // 429 and not 503: the request is fine, this caller has simply made too many of them.
+        // Telling them the server is unwell would send them looking in the wrong place.
+        ResponseEntity<ProblemDetail> response = handler.handleRateLimited(
+                new RateLimitExceededException("Too many uploads.", Duration.ofMinutes(4)),
+                request("/media"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getDetail()).isEqualTo("Too many uploads.");
+        assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("240");
+    }
+
+    @Test
+    void serviceOverloaded_mapsTo503_withRetryAfter() {
+        ResponseEntity<ProblemDetail> response = handler.handleOverloaded(
+                new ServiceOverloadedException("The server is busy.", Duration.ofSeconds(10)),
+                request("/media"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("10");
+    }
+
+    @Test
+    void retryAfterNeverRendersAsZero_whichAClientWouldReadAsImmediately() {
+        // The header is whole seconds, so a sub-second wait would floor to 0 and invite a hot retry
+        // loop against the thing that just asked the caller to slow down.
+        ResponseEntity<ProblemDetail> response = handler.handleRateLimited(
+                new RateLimitExceededException("Too many uploads.", Duration.ofMillis(120)),
+                request("/media"));
+
+        assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("1");
     }
 
     @Test

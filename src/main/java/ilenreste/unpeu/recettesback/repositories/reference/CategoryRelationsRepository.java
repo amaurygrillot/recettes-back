@@ -22,50 +22,50 @@ import java.util.Map;
 public interface CategoryRelationsRepository extends JpaRepository<CategoryRelationEntity, String> {
 
     /**
-     * Every edge as a {@code (categoryId, superiorCategoryId)} pair, without
+     * Every edge as a {@code (categoryId, parentCategoryId)} pair, without
      * hydrating a single {@code CategoryEntity}.
      * <p>
-     * Returning the entities instead would make {@code getSuperiorCategory()}
+     * Returning the entities instead would make {@code getParentCategory()}
      * either a lazy proxy per row or a fetch join pulling the full category twice
      * over, to answer a question that only ever needs two ids.
      */
-    @Query("SELECT r.categoryId, r.superiorCategory.id FROM CategoryRelationEntity r")
+    @Query("SELECT r.categoryId, r.parentCategory.id FROM CategoryRelationEntity r")
     List<Object[]> findAllEdges();
 
     /**
-     * The edge list as {@code categoryId -> superiorCategoryId}, with the roots'
+     * The edge list as {@code categoryId -> parentCategoryId}, with the roots'
      * self-references <strong>dropped</strong> rather than carried through.
      * <p>
      * This is the one place that translation happens. Inside the schema a root
-     * points at itself, which is what keeps {@code superior_category_id}
+     * points at itself, which is what keeps {@code parent_category_id}
      * {@code NOT NULL} and makes "no relation row" unambiguously a bug; outside
-     * it, a root simply has no superior. Letting the self-reference escape would
-     * put an {@code id.equals(superiorId)} check in every caller, and the first
+     * it, a root simply has no parent. Letting the self-reference escape would
+     * put an {@code id.equals(parentId)} check in every caller, and the first
      * one to forget it would render a category as its own parent — or loop.
      */
-    default Map<String, String> superiorIdsByCategoryId() {
-        Map<String, String> superiors = new LinkedHashMap<>();
+    default Map<String, String> parentIdsByCategoryId() {
+        Map<String, String> parents = new LinkedHashMap<>();
         for (Object[] edge : findAllEdges()) {
             String categoryId = (String) edge[0];
-            String superiorId = (String) edge[1];
-            if (!categoryId.equals(superiorId)) {
-                superiors.put(categoryId, superiorId);
+            String parentId = (String) edge[1];
+            if (!categoryId.equals(parentId)) {
+                parents.put(categoryId, parentId);
             }
         }
-        return superiors;
+        return parents;
     }
 
     /**
      * Whether anything hangs off this category — the guard that stops a delete
      * orphaning a subtree.
      * <p>
-     * The {@code <>} is load-bearing: a main category is its own superior, so
+     * The {@code <>} is load-bearing: a main category is its own parent, so
      * without it every root would report having children and could never be
      * deleted.
      */
     @Query("""
             SELECT COUNT(r) > 0 FROM CategoryRelationEntity r
-            WHERE r.superiorCategory.id = :categoryId AND r.categoryId <> :categoryId
+            WHERE r.parentCategory.id = :categoryId AND r.categoryId <> :categoryId
             """)
     boolean hasSubcategories(String categoryId);
 }

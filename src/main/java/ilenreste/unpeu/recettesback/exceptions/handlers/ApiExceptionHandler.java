@@ -1,5 +1,12 @@
-package ilenreste.unpeu.recettesback.exceptions;
+package ilenreste.unpeu.recettesback.exceptions.handlers;
 
+import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
+import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
+import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
+import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
+import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.Ordered;
@@ -20,6 +27,7 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 
 import java.net.URI;
 import java.sql.SQLException;
+import java.time.Duration;
 
 /**
  * The single place that turns an exception type into an HTTP status, so that
@@ -36,6 +44,12 @@ import java.sql.SQLException;
  * Extending {@link ResponseEntityExceptionHandler} means Spring's own
  * exceptions (bean-validation failures, unreadable bodies, unsupported methods)
  * come back in the same RFC 9457 {@code ProblemDetail} shape.
+ * <p>
+ * It sits in {@code exceptions.handlers} with the other advice and
+ * {@link ProblemDetailErrorResponder}: the three classes that <em>answer</em>
+ * failures, kept apart from the exception types that <em>describe</em> them, and
+ * kept together because which advice wins is decided by the {@code @Order} on
+ * each — a relationship that is invisible when they sit in different packages.
  */
 @Log4j2
 @Order(Ordered.LOWEST_PRECEDENCE)
@@ -100,12 +114,21 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<ProblemDetail> handleOverloaded(ServiceOverloadedException exception,
                                                    HttpServletRequest request) {
         log.warn("Refusing a request at capacity: {}", exception.getMessage());
-        ProblemDetail body = ProblemDetail.forStatusAndDetail(
-                HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
-        body.setInstance(URI.create(request.getRequestURI()));
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .header(HttpHeaders.RETRY_AFTER, String.valueOf(Math.max(1, exception.retryAfter().toSeconds())))
-                .body(body);
+        return retryable(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage(),
+                exception.retryAfter(), request);
+    }
+
+    /**
+     * The caller's own allowance, not the server's capacity — so 429, with the
+     * same {@code Retry-After} contract so a client has one thing to read whether
+     * it was throttled or queued.
+     */
+    @ExceptionHandler(RateLimitExceededException.class)
+    ResponseEntity<ProblemDetail> handleRateLimited(RateLimitExceededException exception,
+                                                    HttpServletRequest request) {
+        log.warn("Refusing a request over its rate limit: {}", exception.getMessage());
+        return retryable(HttpStatus.TOO_MANY_REQUESTS, exception.getMessage(),
+                exception.retryAfter(), request);
     }
 
     @ExceptionHandler(ResourceConflictException.class)
@@ -157,7 +180,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * Rethrowing is the supported idiom: {@code ExceptionHandlerExceptionResolver} treats a handler
      * that throws the original exception as "not resolved" and lets it continue up the chain to
      * {@code ExceptionTranslationFilter}, which invokes
-     * {@link ilenreste.unpeu.recettesback.exceptions.ProblemDetailErrorResponder}.
+     * {@link ProblemDetailErrorResponder}.
      */
     @ExceptionHandler({AuthenticationException.class, AccessDeniedException.class})
     ResponseEntity<ProblemDetail> rethrowSecurityException(RuntimeException exception) {
@@ -187,6 +210,23 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             }
         }
         return false;
+    }
+
+    /**
+     * A problem response that also tells the caller when to come back.
+     * <p>
+     * {@code Retry-After} is floored at one second: the header is whole seconds,
+     * and a sub-second wait would render as {@code 0}, which a client reads as
+     * "immediately" and turns into a hot retry loop against the thing that just
+     * asked it to slow down.
+     */
+    private ResponseEntity<ProblemDetail> retryable(HttpStatusCode status, String detail,
+                                                    Duration retryAfter, HttpServletRequest request) {
+        ProblemDetail body = ProblemDetail.forStatusAndDetail(status, detail);
+        body.setInstance(URI.create(request.getRequestURI()));
+        return ResponseEntity.status(status)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(Math.max(1, retryAfter.toSeconds())))
+                .body(body);
     }
 
     private ResponseEntity<ProblemDetail> problem(HttpStatusCode status, String detail,

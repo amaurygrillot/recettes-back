@@ -10,7 +10,7 @@ package ilenreste.unpeu.recettesback.entities.reference;
  * <ul>
  *   <li>Finding the roots is the first query of every navigation render, and
  *       {@code WHERE category_type = 'MAIN'} is an indexable predicate where
- *       {@code WHERE category_id = superior_category_id} is a self-comparison no
+ *       {@code WHERE category_id = parent_category_id} is a self-comparison no
  *       index can serve.</li>
  *   <li>It makes the invariant readable from plain SQL while debugging, instead
  *       of something you have to reconstruct by joining a table to itself.</li>

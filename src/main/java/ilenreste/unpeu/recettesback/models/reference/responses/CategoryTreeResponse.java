@@ -11,7 +11,7 @@ import java.util.List;
  * from {@code GET /categories}; returning the same rows twice in the same shape
  * would make the second endpoint pointless.
  * <p>
- * There is no {@code superiorCategoryId} here: nesting already says who the
+ * There is no {@code parentCategoryId} here: nesting already says who the
  * parent is, and a second encoding of the same fact is a second thing that can
  * disagree. There is no {@code categoryType} either — depth 0 is {@code MAIN} by
  * construction.
