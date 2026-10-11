@@ -205,13 +205,26 @@ class CategoryServiceTest {
         verify(categoriesRepository).delete(entity);
     }
 
+    /**
+     * By {@code normalizedName}, not {@code name}.
+     * <p>
+     * Normalization has already folded case and accents, so this is the one
+     * ordering that agrees with {@code AbstractReferenceService.BY_NAME} — the
+     * comparator the in-memory callers ({@code RecipeMapper},
+     * {@code CategoryTaxonomy}) use. Sorting on {@code name} in SQL meant the
+     * database used column collation while Java used
+     * {@code String.CASE_INSENSITIVE_ORDER}, so {@code GET /tags} and the
+     * {@code tags} array inside {@code GET /recipes/{id}} returned the same rows in
+     * different orders, and neither put {@code Épices} where a French reader looks
+     * for it. The column also carries a unique index, so the ordering is free.
+     */
     @Test
-    void listsEverythingSortedByName_soTheOutputIsStable() {
+    void listsEverythingSortedByNormalizedName_soEveryListingAgrees() {
         categoryService.findAll();
 
         ArgumentCaptor<Sort> sort = ArgumentCaptor.forClass(Sort.class);
         verify(categoriesRepository).findAll(sort.capture());
-        assertThat(sort.getValue()).isEqualTo(Sort.by("name"));
+        assertThat(sort.getValue()).isEqualTo(Sort.by("normalizedName"));
     }
 
     @Test

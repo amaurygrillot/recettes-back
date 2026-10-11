@@ -130,3 +130,32 @@ already guarantee.
   reach. See [api-error-handling.md](api-error-handling.md).
 - **`src/test/requests/*.http`** walks each flow by hand, success case and failure cases side by side, for when the
   question is "what does this actually answer" rather than "does it still pass".
+
+## The fifth place the contract was not honoured: an untransacted delete
+
+"Every write transactional so a failure leaves nothing half-written" had one hole, and it was in the shared base class
+rather than in any one service — which is why it survived four code reviews of the subclasses.
+
+`AbstractReferenceService.delete` carried no `@Transactional`. No subclass overrode it, and the four reference
+controllers call it directly, so `DELETE /categories/{id}`, `/ingredients/{id}`, `/tags/{id}` and `/units/{id}` all ran
+with each repository call committing on its own. Every *sibling* write was annotated — `createCategory`,
+`updateCategory`, `createTag`, `updateTag`, `createUnit`, `updateUnit`, `createIngredient`, `updateIngredient` — which
+is exactly what made the gap invisible: the file looked uniformly careful.
+
+The reachable consequence is in `CategoryService`. Its `beforeDelete` hook deletes the row's `categories_relation`
+edge, and the category delete that follows is a separate statement. If that second one fails — a concurrent
+`POST /recipes` files a recipe under this category between the `isUsed` check and the delete, so the
+`recipe_categories` foreign key refuses — the edge is already committed gone while the category row survives.
+
+That leaves a category with **no relation row**, which `CategoryRelationsRepository` documents as "unambiguously a
+bug", and the effect is not subtle: `CategoryTaxonomy` lists roots by `categoryType` and children by edge, so a
+surviving subcategory appears in neither and vanishes from `GET /categories/hierarchy` entirely. See
+[category-hierarchy.md](category-hierarchy.md).
+
+It also contradicted the class's own javadoc, which promised "the transaction rolls back ... The row is not
+half-written", and `beforeDelete`'s, which justifies being a hook on the grounds that every guard runs before anything
+is removed "instead of being unwound by a rollback afterwards" — there was no transaction to roll back.
+
+`CategoryServiceTest` could not catch it: it mocks the repositories, and a missing transaction is invisible to a mock.
+The check that would have caught it is the one the test pyramid here already prescribes for this class of bug — a real
+`@SpringBootTest` against real PostgreSQL.

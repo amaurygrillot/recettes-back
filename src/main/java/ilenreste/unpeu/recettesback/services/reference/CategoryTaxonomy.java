@@ -2,6 +2,7 @@ package ilenreste.unpeu.recettesback.services.reference;
 
 import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
 import ilenreste.unpeu.recettesback.entities.reference.CategoryType;
+import ilenreste.unpeu.recettesback.entities.reference.ReferenceEntity;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -31,8 +32,8 @@ import java.util.Set;
  */
 final class CategoryTaxonomy {
 
-    private static final Comparator<CategoryEntity> BY_NAME =
-            Comparator.comparing(CategoryEntity::getName, String.CASE_INSENSITIVE_ORDER);
+    /** Shared with {@code AbstractReferenceService.findAll()}, so every listing agrees. */
+    private static final Comparator<ReferenceEntity> BY_NAME = AbstractReferenceService.BY_NAME;
 
     private final Map<String, CategoryEntity> byId = new LinkedHashMap<>();
     /** {@code categoryId -> parentCategoryId}, roots absent. */

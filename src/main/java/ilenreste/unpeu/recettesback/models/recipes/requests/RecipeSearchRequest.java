@@ -2,6 +2,7 @@ package ilenreste.unpeu.recettesback.models.recipes.requests;
 
 import jakarta.validation.constraints.Size;
 import org.springframework.data.domain.Sort;
+import org.springframework.util.StringUtils;
 
 /**
  * The criteria {@code GET /recipes} accepts, bound from the query string.
@@ -117,6 +118,52 @@ public record RecipeSearchRequest(
      */
     public boolean includesSubcategories() {
         return includeSubcategories == null || includeSubcategories;
+    }
+
+    /*
+     * The six text criteria below answer blank as null, which is what makes the
+     * promise in the class javadoc ("Blank strings are treated as absent") true of
+     * this record rather than of whoever remembers to call a helper.
+     *
+     * It used to be true only because RecipeService passed every one of them
+     * through a private blankToNull on the way to the repository -- so the rule
+     * lived one layer away from the documentation that stated it, and a second
+     * caller of this record would not have inherited it. CategoryService then
+     * re-tested two of the same values for blankness on the other side, branches
+     * that could never fire.
+     */
+
+    public String title() {
+        return absentIfBlank(title);
+    }
+
+    public String authorId() {
+        return absentIfBlank(authorId);
+    }
+
+    public String authorName() {
+        return absentIfBlank(authorName);
+    }
+
+    public String categoryId() {
+        return absentIfBlank(categoryId);
+    }
+
+    public String categoryName() {
+        return absentIfBlank(categoryName);
+    }
+
+    public String tagId() {
+        return absentIfBlank(tagId);
+    }
+
+    public String tagName() {
+        return absentIfBlank(tagName);
+    }
+
+    /** A blank query parameter means "no filter", not "match the empty string". */
+    private static String absentIfBlank(String value) {
+        return StringUtils.hasText(value) ? value : null;
     }
 
     /** Newest first: what a recipe library opens on. */

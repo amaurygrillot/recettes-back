@@ -1,4 +1,4 @@
-package ilenreste.unpeu.recettesback.services.media;
+package ilenreste.unpeu.recettesback.support;
 
 import javax.imageio.ImageIO;
 import java.awt.Color;
@@ -13,24 +13,32 @@ import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
 
 /**
+ * Lives in {@code support} next to {@code TestAccount}, not in
+ * {@code services.media}: {@code MediaUploadIntegrationTest} needs it too, and
+ * while it was package-private that suite grew its own copy of {@code jpeg} —
+ * which had already drifted to a different colour and a different asymmetry, so
+ * the HTTP-level test was uploading a different image than every unit test of the
+ * pipeline it exercises.
+ */
+/**
  * Real image bytes for the media tests.
  * <p>
  * Everything here produces genuine files rather than fixtures on disk, so the
  * tests state exactly what they feed the pipeline and a reader can see why each
  * case matters.
  */
-final class TestImages {
+public final class TestImages {
 
     private TestImages() {
     }
 
     /** A JPEG with visible structure, so a downscale that silently blanks the image would show. */
-    static byte[] jpeg(int width, int height) {
+    public static byte[] jpeg(int width, int height) {
         return encode(paint(new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)), "jpg");
     }
 
     /** A PNG. With {@code alpha}, it carries a real transparent region. */
-    static byte[] png(int width, int height, boolean alpha) {
+    public static byte[] png(int width, int height, boolean alpha) {
         BufferedImage image = new BufferedImage(width, height,
                 alpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB);
         paint(image);
@@ -52,7 +60,7 @@ final class TestImages {
      * coordinates, camera serial, timestamps — so a test can assert by substring
      * that re-encoding actually drops it rather than trusting that it does.
      */
-    static byte[] jpegWithExif(int width, int height, int orientation, String description) {
+    public static byte[] jpegWithExif(int width, int height, int orientation, String description) {
         return jpegWithExif(width, height, orientation, description, ByteOrder.LITTLE_ENDIAN);
     }
 
@@ -61,13 +69,13 @@ final class TestImages {
      * {@code MM} (big-endian) are both legal and both shipped by real cameras, so
      * the reader has to handle each.
      */
-    static byte[] jpegWithExif(int width, int height, int orientation, String description,
+    public static byte[] jpegWithExif(int width, int height, int orientation, String description,
                                ByteOrder order) {
         return jpegWithSegment(jpeg(width, height), exifApp1Segment(orientation, description, order));
     }
 
     /** Splices {@code segment} in immediately after the SOI marker, where APP1 belongs. */
-    static byte[] jpegWithSegment(byte[] baseJpeg, byte[] segment) {
+    public static byte[] jpegWithSegment(byte[] baseJpeg, byte[] segment) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(baseJpeg, 0, 2);                       // SOI (FF D8)
         out.write(segment, 0, segment.length);
@@ -76,7 +84,7 @@ final class TestImages {
     }
 
     /** Wraps {@code payload} in an APP1 marker segment with the two-byte length JPEG requires. */
-    static byte[] app1Segment(byte[] payload) {
+    public static byte[] app1Segment(byte[] payload) {
         int segmentLength = 2 + payload.length;
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(0xFF);
@@ -95,7 +103,7 @@ final class TestImages {
      * the point of the test using it is that the pipeline rejects it from the
      * header and never gets that far.
      */
-    static byte[] pngHeaderClaiming(int width, int height) {
+    public static byte[] pngHeaderClaiming(int width, int height) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.writeBytes(new byte[]{(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A});
 
@@ -112,14 +120,14 @@ final class TestImages {
         return out.toByteArray();
     }
 
-    static byte[] concat(byte[] first, byte[] second) {
+    public static byte[] concat(byte[] first, byte[] second) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.writeBytes(first);
         out.writeBytes(second);
         return out.toByteArray();
     }
 
-    static boolean contains(byte[] haystack, String needle) {
+    public static boolean contains(byte[] haystack, String needle) {
         byte[] pattern = needle.getBytes(StandardCharsets.ISO_8859_1);
         outer:
         for (int i = 0; i <= haystack.length - pattern.length; i++) {
@@ -165,7 +173,7 @@ final class TestImages {
      * a hand-written reader is most likely to get wrong, and therefore the one
      * worth generating both ways.
      */
-    static byte[] exifApp1Segment(int orientation, String description, ByteOrder order) {
+    public static byte[] exifApp1Segment(int orientation, String description, ByteOrder order) {
         byte[] descriptionBytes = (description + "\0").getBytes(StandardCharsets.US_ASCII);
 
         // TIFF header (8) + entry count (2) + two entries (24) + next-IFD offset (4) = 38
@@ -193,7 +201,7 @@ final class TestImages {
     }
 
     /** {@code "Exif\0\0"}, the six bytes that tell an APP1 segment apart from XMP's. */
-    static byte[] exifHeader() {
+    public static byte[] exifHeader() {
         return new byte[]{'E', 'x', 'i', 'f', 0, 0};
     }
 

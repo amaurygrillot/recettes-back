@@ -1,13 +1,13 @@
 package ilenreste.unpeu.recettesback.controllers.reference;
 
 import ilenreste.unpeu.recettesback.models.reference.requests.IngredientRequest;
+import ilenreste.unpeu.recettesback.models.reference.requests.IngredientSearchRequest;
 import ilenreste.unpeu.recettesback.models.reference.responses.IngredientResponse;
 import ilenreste.unpeu.recettesback.services.reference.IngredientService;
 import jakarta.validation.Valid;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -17,7 +17,6 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
@@ -49,19 +48,24 @@ public class IngredientController {
     }
 
     /**
-     * @param namePrefix what the user has typed so far, matched against the
-     *                   normalized name — which is what makes typing {@code oeuf}
-     *                   find {@code Œuf}. A prefix and not a substring, because a
-     *                   trailing wildcard can use the index and a leading one
-     *                   cannot; the parameter is named for that, since {@code q}
-     *                   said nothing about either what is matched or how. Absent
-     *                   or blank returns everything, name-sorted
+     * Paginated, filtered by {@link IngredientSearchRequest} — which Spring binds
+     * from the query string field by field, so the criteria are still
+     * {@code ?namePrefix=oeuf} on the wire.
+     * <p>
+     * {@code @PageableDefault} carries the page size only. The <em>sort</em> is
+     * deliberately not left to {@code Pageable}: it only supplies a default, so a
+     * supplied {@code ?sort=} overrode it and reached Spring Data's property
+     * resolution directly — {@code ?sort=bogus} answered 500 on a public endpoint
+     * and {@code ?sort=createdBy.password} ordered the list by the bcrypt column.
+     * {@code sortBy} is an enum instead, and an unknown value is a 400. See
+     * {@code IngredientSortField}, and {@code RecipeController.search}, which has
+     * always done it this way.
      */
     @GetMapping
     public ResponseEntity<Page<IngredientResponse>> search(
-            @RequestParam(required = false) String namePrefix,
-            @PageableDefault(size = 20, sort = "name", direction = Sort.Direction.ASC) Pageable pageable) {
-        return ResponseEntity.ok(ingredientService.search(namePrefix, pageable));
+            @Valid IngredientSearchRequest request,
+            @PageableDefault(size = 20) Pageable pageable) {
+        return ResponseEntity.ok(ingredientService.search(request, pageable));
     }
 
     @GetMapping("/{id}")

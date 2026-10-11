@@ -256,3 +256,58 @@ the first step towards accidentally *reporting* them apart. Everything else keep
 made it safe for `UserService` to fail loudly when the `USER` role has not been seeded.
 
 `UserControllerTest` and `AuthenticationControllerTest` need their expected statuses updated accordingly.
+
+## Three failures that were answering the wrong status
+
+All three were 500s for conditions the caller caused, which `CLAUDE.md` reserves 500 for the opposite of.
+
+- **A truncated or corrupt image upload.** `ImageReencoder.reencode` documented `@throws InvalidInputException` for
+  bytes that "cannot be decoded at all" and actually threw `UncheckedIOException`, which no handler mapped — so it fell
+  to `@ExceptionHandler(Exception.class)` and answered **500** with a stack trace in the log. Five bytes are enough to
+  trigger it (`FF D8 FF 00 01`): `ImageFormat.detect` compares only the three-byte JPEG prefix, and `ImageIO` returns
+  the JPEG reader, so it is `getWidth(0)` that fails. Now `InvalidInputException` → **400**, with the decoder's
+  exception kept as the cause for the log.
+- **A `null` element inside `steps`, `ingredientGroups` or `coverPictures`.** Hibernate Validator treats cascading into
+  a `null` container element as a no-op, so `[null]` passed `@Valid` and was dereferenced in `RecipeService` —
+  **500**. `@NotNull` on the container element makes it the **400** it always was.
+- **A blank id inside `categoryIds`.** Not a wrong status but a wrong *outcome*: `""` is not an empty list, so
+  `@NotEmpty` passed, and `ReferenceResolver` ignores blanks, so the recipe was stored with no categories and answered
+  **201**. On `PUT` it answered **200** having silently cleared every category. `@NotBlank` on the element closes both.
+
+Genuine storage failures — a full disk, an unwritable media root — now have their own
+`@ExceptionHandler(UncheckedIOException.class)`. Still a 500, because it is the server that failed, but logged
+distinctly instead of being filed with the programming bugs.
+
+## `instance` is the framework's job
+
+The advice methods used to set it themselves:
+
+```java
+body.setInstance(URI.create(request.getRequestURI()));
+```
+
+Spring MVC's `HttpEntityMethodProcessor` already does this when a returned `ProblemDetail` has a null `instance`, so
+the line changed nothing — while forcing eight `@ExceptionHandler` methods to accept an `HttpServletRequest` they
+otherwise never read. The proof was already in the file: `handleMaxUploadSizeExceededException` never set it and always
+answered with a populated `instance`.
+
+Dropped, along with the parameter. Only `handleUnexpected` still takes the request, because it logs the method and URI.
+
+**`ProblemDetailErrorResponder` must keep setting it.** It writes through an `ObjectMapper` from inside the filter
+chain, above the `DispatcherServlet`, where no return-value handler runs.
+
+The unit tests can no longer assert `instance` — calling a handler directly never reaches the processor that fills it.
+It is asserted over real HTTP instead, in
+`RecipesIntegrationTest.problemResponsesCarryTheRequestUriAsTheirInstance`.
+
+## A rejected token now carries a body
+
+`JwtAuthenticationFilter` wrote `response.setStatus(SC_UNAUTHORIZED)` by hand, with no content type and no entity. That
+made the single most common auth failure — an expired token, which is routine, since `RsaKeyConfig` invalidates every
+token in circulation at each restart — the one error in the API with nothing to parse, while every other 401 and 403
+came back as `problem+json`. An SPA has to recognise exactly that case to trigger a silent re-login.
+
+The filter now calls `ProblemDetailErrorResponder.commence`, which is why that class is a `@Component` rather than
+something `SecurityFilterConfig` constructs inline. It cannot simply throw: the filter sits **before**
+`ExceptionTranslationFilter`, so an `AuthenticationException` from it would propagate past nothing that could turn it
+into a response.

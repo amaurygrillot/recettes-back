@@ -1,12 +1,10 @@
 package ilenreste.unpeu.recettesback.configuration;
 
 import ilenreste.unpeu.recettesback.exceptions.handlers.ProblemDetailErrorResponder;
-import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
-import ilenreste.unpeu.recettesback.entities.users.UserEntity;
-import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;
 import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UserRolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
+import ilenreste.unpeu.recettesback.support.TestAccount;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,8 +20,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
-import java.util.UUID;
 
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -41,7 +39,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @AutoConfigureTestRestTemplate
 class OptionalAuthenticationTest {
 
-    private static final String PASSWORD = "TestPassword123";
     /** Not a JWT at all, standing in for the expired tokens a restart leaves in every client. */
     private static final String STALE_TOKEN = "Bearer eyJhbGciOiJub25lIn0.e30.not-a-real-signature";
 
@@ -56,58 +53,35 @@ class OptionalAuthenticationTest {
     @Autowired
     private PasswordEncoder passwordEncoder;
 
-    private UserEntity user;
-    private UserRolesEntity userRoleLink;
+    /**
+     * Through {@link TestAccount} rather than hand-rolled here.
+     * <p>
+     * This suite used to create the account, find-or-create the USER role and
+     * unpick the role link itself — about forty lines that {@code TestAccount},
+     * added in the same change, already does, down to the same unique-suffix
+     * trick and the same comment explaining why the link is written through
+     * {@code UserRolesEntity}. Keeping the copy meant that the day the
+     * {@code user_roles} double-mapping is fixed, or {@code UserEntity} gains a
+     * NOT NULL column, {@code TestAccount} would be updated and this suite would
+     * keep inserting rows the old way — failing on a column nobody touched, in
+     * the one place that guards the security filter chain.
+     */
+    private TestAccount account;
 
     @BeforeEach
     void setUp() {
-        RoleEntity userRole = rolesRepository.findByNameEqualsIgnoreCase("USER");
-        if (userRole == null) {
-            userRole = new RoleEntity();
-            userRole.setName("USER");
-            userRole = rolesRepository.save(userRole);
-        }
-
-        // A unique account per run: this test drives a real HTTP call against the real database, so
-        // there is no transaction to roll back and nothing may collide with existing rows.
-        String suffix = UUID.randomUUID().toString().substring(0, 8);
-        UserEntity newUser = new UserEntity();
-        newUser.setUsername("auth-test-" + suffix);
-        newUser.setEmail("auth-test-" + suffix + "@example.com");
-        newUser.setPassword(passwordEncoder.encode(PASSWORD));
-        newUser.setEnabled(true);
-        user = usersRepository.save(newUser);
-
-        // The role link is written through UserRolesEntity, not through UserEntity.roles, because
-        // that is what UserService.createUser does. The user_roles table is mapped twice - as the
-        // @ManyToMany join table AND as an entity with its own id column - so a @ManyToMany insert
-        // leaves that NOT NULL id null and fails. Reads still go through the @ManyToMany side.
-        UserRolesEntity link = new UserRolesEntity();
-        link.setUser(user);
-        link.setRole(userRole);
-        userRolesRepository.save(link);
-        userRoleLink = link;
+        account = TestAccount.create(usersRepository, rolesRepository, userRolesRepository,
+                passwordEncoder, "USER");
     }
 
     @AfterEach
     void tearDown() {
-        // delete(entity), not deleteById: UserRolesRepository declares UUID as its id type
-        // while UserRolesEntity.id is a String, so deleteById does not compile.
-        userRolesRepository.delete(userRoleLink);
-        usersRepository.deleteById(user.getId());
-    }
-
-    private HttpEntity<String> body(String json, String authorization) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        if (authorization != null) {
-            headers.set(HttpHeaders.AUTHORIZATION, authorization);
-        }
-        return new HttpEntity<>(json, headers);
+        account.close();
     }
 
     private String loginBody() {
-        return "{\"username\":\"%s\",\"password\":\"%s\"}".formatted(user.getUsername(), PASSWORD);
+        return "{\"username\":\"%s\",\"password\":\"%s\"}"
+                .formatted(account.username(), TestAccount.PASSWORD);
     }
 
     /**
@@ -138,7 +112,7 @@ class OptionalAuthenticationTest {
     @Test
     void login_returns401_notServerError_whenTheCredentialsAreWrong() {
         String wrongPassword = "{\"username\":\"%s\",\"password\":\"definitely-not-it\"}"
-                .formatted(user.getUsername());
+                .formatted(account.username());
 
         ResponseEntity<String> response = restTemplate.postForEntity(
                 "/auth/login", body(wrongPassword, null), String.class);
@@ -201,6 +175,13 @@ class OptionalAuthenticationTest {
                 body("{\"firstname\":\"Janet\"}", STALE_TOKEN), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        // And with a body. The filter used to write the status by hand, so this - the single most
+        // common auth failure, and the one an SPA must recognise to trigger a silent re-login - was
+        // the one error in the API with nothing to parse, while every other 401 and 403 came back
+        // as problem+json from ProblemDetailErrorResponder. It now goes through that responder too.
+        assertThat(response.getHeaders().getContentType())
+                .isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(response.getBody()).contains(ProblemDetailErrorResponder.UNAUTHORIZED_DETAIL);
     }
 
     /**

@@ -9,8 +9,6 @@ import ilenreste.unpeu.recettesback.repositories.reference.TagsRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
-
 /**
  * Tags: open-ended, flat facets.
  * <p>
@@ -19,7 +17,7 @@ import java.util.List;
  * persistence graph, least of all after the transaction has closed.
  */
 @Service
-public class TagService extends AbstractReferenceService<TagEntity> {
+public class TagService extends AbstractReferenceService<TagEntity, TagResponse> {
 
     private final RecipesRepository recipesRepository;
     private final ReferenceMapper mapper;
@@ -46,14 +44,9 @@ public class TagService extends AbstractReferenceService<TagEntity> {
         return recipesRepository.isTagUsed(id);
     }
 
-    @Transactional(readOnly = true)
-    public List<TagResponse> list() {
-        return mapper.toTagResponses(findAll());
-    }
-
-    @Transactional(readOnly = true)
-    public TagResponse get(String id) {
-        return mapper.toResponse(findById(id));
+    @Override
+    protected TagResponse toResponse(TagEntity tag) {
+        return mapper.toResponse(tag);
     }
 
     @Transactional

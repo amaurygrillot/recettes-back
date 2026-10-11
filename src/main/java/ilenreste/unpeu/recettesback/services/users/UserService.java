@@ -3,6 +3,7 @@ package ilenreste.unpeu.recettesback.services.users;
 import ilenreste.unpeu.recettesback.entities.users.RoleEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserRolesEntity;
+import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.mappers.users.UserMapper;
@@ -17,6 +18,8 @@ import org.jspecify.annotations.NullMarked;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Optional;
 
 /**
  * Accounts.
@@ -70,6 +73,13 @@ public class UserService {
             log.info("Refusing to create an account: the username is already taken");
             throw new ResourceConflictException("Username already exists");
         }
+        // Checked for the same reason as the username, and previously missed: email is
+        // unique too, so registering with a taken address otherwise surfaced as an opaque
+        // DataIntegrityViolationException instead of a 409 naming the field.
+        if (usersRepository.existsByEmail(request.email())) {
+            log.info("Refusing to create an account: the email is already registered");
+            throw new ResourceConflictException("Email already exists");
+        }
 
         // Looked up before the insert, so a missing role row fails with a message naming the cause
         // rather than as a NOT NULL violation on user_roles.role_id two statements later.
@@ -99,26 +109,59 @@ public class UserService {
     }
 
     /**
+     * Applies a partial update to the calling account.
+     *
+     * <h2>Changing the password or the email needs the current password</h2>
+     * A bearer token proves the caller held a valid login at some point in the
+     * last hour. It does not prove they are the account holder, and these two
+     * fields are the ones where that difference is permanent: a password change
+     * outlives the token that authorised it, and an email change takes the
+     * account's only route back — {@code POST /auth/reinit-password} mails the
+     * stored address. Together they turn one leaked token into an account the
+     * owner cannot recover. Re-entering the current password costs a legitimate
+     * user one field and costs an attacker the one thing a stolen token does not
+     * carry.
+     * <p>
+     * The other fields are deliberately <em>not</em> gated. A wrong firstname is
+     * an annoyance the owner can undo; demanding a password to fix a typo would
+     * train people to type it into whatever asks.
+     * <p>
+     * <strong>This is not the forgotten-password path.</strong> Somebody who has
+     * forgotten their password cannot present it, so requiring it here would
+     * lock out exactly the people who need to get back in. That flow is
+     * {@code PUT /users/reinit-password} → {@code PasswordResetService} →
+     * {@link #applyNewPassword}, where the emailed one-time token is the proof
+     * instead. The two paths are separate methods rather than one method with a
+     * flag, because they answer "why may this caller set a password?"
+     * differently and a flag is one boolean away from answering it wrongly.
+     *
      * @return the account as stored after the update
-     * @throws ResourceNotFoundException if the id names no account — a 404 rather
-     *                                   than a silent no-op, which would tell a
-     *                                   caller their change was applied when
-     *                                   there was nothing to apply it to
+     * @throws ResourceNotFoundException   if the id names no account — a 404 rather
+     *                                     than a silent no-op, which would tell a
+     *                                     caller their change was applied when
+     *                                     there was nothing to apply it to
+     * @throws ForbiddenOperationException if a password or email change arrives
+     *                                     without the current password, or with the
+     *                                     wrong one. 403 and not 400: the payload is
+     *                                     well formed, the caller just has not proved
+     *                                     they may use it. Missing and wrong answer
+     *                                     identically, so the response cannot be used
+     *                                     to test passwords
+     * @throws ResourceConflictException   if the new username or email is already
+     *                                     taken by another account
      */
     @Transactional
     public UserResponse updateUser(String userId, UpdateUserRequest request) {
         UserEntity user = usersRepository.findById(userId)
                 .orElseThrow(() -> ResourceNotFoundException.of("user", userId));
-        return updateUser(user, request);
-    }
 
-    /**
-     * Same as {@link #updateUser(String, UpdateUserRequest)} but for a caller
-     * that already holds the {@link UserEntity} (e.g. after looking it up by
-     * some other key), sparing a redundant fetch-by-id.
-     */
-    @Transactional
-    public UserResponse updateUser(UserEntity user, UpdateUserRequest request) {
+        boolean changesCredentials = request.password().isPresent() || request.email().isPresent();
+        if (changesCredentials) {
+            requireCurrentPassword(user, request.currentPassword());
+        }
+        requireUnusedUsername(user, request.username());
+        requireUnusedEmail(user, request.email());
+
         request.email().ifPresent(user::setEmail);
         request.firstname().ifPresent(user::setFirstname);
         request.lastname().ifPresent(user::setLastname);
@@ -126,8 +169,80 @@ public class UserService {
         request.password().ifPresent(password -> user.setPassword(passwordEncoder.encode(password)));
 
         UserEntity saved = usersRepository.save(user);
+        if (changesCredentials) {
+            // Logged explicitly, and at warn: "the password or the email changed" is the line an
+            // owner reporting a hijacked account needs found, and "Updated user {id}" does not say
+            // it. Neither value is logged - the point is that it changed, not what to.
+            log.warn("Credentials changed for user {} (password: {}, email: {})", saved.getId(),
+                    request.password().isPresent(), request.email().isPresent());
+        }
         log.info("Updated user {}", saved.getId());
         return mapper.toResponse(saved);
+    }
+
+    /**
+     * Sets a new password for an account whose holder has proved themselves some
+     * other way — today, by presenting the one-time token mailed to the address
+     * on the account.
+     * <p>
+     * Narrow on purpose. It takes a password and nothing else, so the reset flow
+     * cannot reach the username or the email on the way past, and it asks for no
+     * current password because the whole premise is that the caller does not
+     * know it. The authorisation for this call happens in
+     * {@code PasswordResetService.resetPassword}, which consumes the token in
+     * the same transaction — so a failure here puts the token back.
+     */
+    @Transactional
+    public UserResponse applyNewPassword(UserEntity user, String newPassword) {
+        user.setPassword(passwordEncoder.encode(newPassword));
+        UserEntity saved = usersRepository.save(user);
+        log.warn("Password reset applied for user {} via a one-time token", saved.getId());
+        return mapper.toResponse(saved);
+    }
+
+    /**
+     * Both the absent and the wrong case throw the same exception with the same
+     * message. Distinguishing them would turn the endpoint into a password
+     * oracle for whoever already holds the token.
+     */
+    private void requireCurrentPassword(UserEntity user, Optional<String> currentPassword) {
+        boolean proved = currentPassword
+                .filter(supplied -> passwordEncoder.matches(supplied, user.getPassword()))
+                .isPresent();
+        if (!proved) {
+            log.warn("Refusing a credential change for user {}: the current password was not proved",
+                    user.getId());
+            throw new ForbiddenOperationException(
+                    "Changing your password or email requires your current password.");
+        }
+    }
+
+    /**
+     * Checked here rather than left to the unique constraint, for the same
+     * reason {@link #createUser} checks it: the constraint fires at commit, by
+     * which point the success has already been logged, and it surfaces as a
+     * {@code DataIntegrityViolationException} that names neither the field nor
+     * the colliding row.
+     * <p>
+     * Skipped when the value is unchanged, so re-sending your own username is
+     * not a conflict with yourself.
+     */
+    private void requireUnusedUsername(UserEntity user, Optional<String> username) {
+        username.filter(requested -> !requested.equals(user.getUsername()))
+                .filter(usersRepository::existsByUsername)
+                .ifPresent(taken -> {
+                    log.info("Refusing to update user {}: the username is already taken", user.getId());
+                    throw new ResourceConflictException("Username already exists");
+                });
+    }
+
+    private void requireUnusedEmail(UserEntity user, Optional<String> email) {
+        email.filter(requested -> !requested.equals(user.getEmail()))
+                .filter(usersRepository::existsByEmail)
+                .ifPresent(taken -> {
+                    log.info("Refusing to update user {}: the email is already registered", user.getId());
+                    throw new ResourceConflictException("Email already exists");
+                });
     }
 
     /**

@@ -3,12 +3,9 @@ package ilenreste.unpeu.recettesback.services.users;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
 import ilenreste.unpeu.recettesback.models.users.requests.ResetPasswordRequest;
-import ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
-import java.util.Optional;
 
 /**
  * Orchestrates the "forgot password" flow: requesting a reset email, then
@@ -54,6 +51,16 @@ public class PasswordResetService {
      * are all-or-nothing: without this, a failure in the password update after
      * the token was already deleted would burn the user's one reset token
      * without ever changing their password.
+     * <p>
+     * Calls {@link UserService#applyNewPassword} and not
+     * {@code UserService.updateUser}: that method requires the caller's
+     * <em>current</em> password before it will change a password, which is
+     * precisely what somebody in this flow does not have. The token consumed
+     * one line above is the proof of identity here, and it has already been
+     * checked. Routing a reset through the self-service method would either lock
+     * out everyone who has forgotten their password or force that method to
+     * accept "no current password" as valid, which would remove the guard for
+     * both callers.
      */
     @Transactional
     public void resetPassword(ResetPasswordRequest request) {
@@ -62,12 +69,6 @@ public class PasswordResetService {
 
         tokenService.consumeToken(user, request.token());
 
-        userService.updateUser(user, new UpdateUserRequest(
-                Optional.empty(),
-                Optional.of(request.newPassword()),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty()
-        ));
+        userService.applyNewPassword(user, request.newPassword());
     }
 }

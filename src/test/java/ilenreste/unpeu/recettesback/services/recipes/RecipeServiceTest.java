@@ -79,7 +79,8 @@ class RecipeServiceTest {
                 categoriesRepository, categoryRelationsRepository, mock(TagsRepository.class),
                 mock(IngredientsRepository.class), mock(UnitsRepository.class),
                 mediaRepository, new ReferenceResolver(), categoryService, new ReferenceNameNormalizer(),
-                currentUserService, new RecipeMapper(new ReferenceMapper()));
+                currentUserService, new RecipeMapper(new ReferenceMapper()),
+                mock(jakarta.persistence.EntityManager.class));
     }
 
     private RecipeEntity recipe(String id, String authorId, String title) {

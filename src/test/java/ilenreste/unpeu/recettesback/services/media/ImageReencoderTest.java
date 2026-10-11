@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
+import ilenreste.unpeu.recettesback.support.TestImages;
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import org.junit.jupiter.api.Test;
@@ -227,11 +228,29 @@ class ImageReencoderTest {
         assertThat(result.full()[1]).isEqualTo((byte) 0xD8);
     }
 
+    /**
+     * {@link InvalidInputException} specifically, not merely {@code RuntimeException}.
+     * <p>
+     * This used to assert the supertype, which {@code UncheckedIOException} also
+     * satisfies - and that is what {@code reencode} actually threw, so a truncated
+     * upload answered <strong>500</strong> while this test passed and the method
+     * javadoc promised a 400. The exception type <em>is</em> the status here, so
+     * the assertion has to name it.
+     * <p>
+     * These five bytes are the ordinary case rather than a contrived one:
+     * {@code ImageFormat.detect} compares only the three-byte JPEG magic prefix, so
+     * they are accepted as a JPEG, and {@code ImageIO.getImageReaders} returns the
+     * JPEG reader for them - it is {@code getWidth(0)} that falls over.
+     */
     @Test
-    void rejectsBytesThatCannotBeDecodedAtAll() {
+    void rejectsBytesThatCannotBeDecodedAtAll_asBadInputAndNotAsAServerError() {
         byte[] truncated = new byte[]{(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, 0x00, 0x01};
 
         assertThatThrownBy(() -> reencoder.reencode(truncated, ImageFormat.JPEG))
-                .isInstanceOf(RuntimeException.class);
+                .isInstanceOf(InvalidInputException.class)
+                .hasMessageContaining("could not be read")
+                // The decoder failure is kept as the cause: it never reaches the client, but it is
+                // what makes the logged warning actionable.
+                .hasCauseInstanceOf(java.io.IOException.class);
     }
 }

@@ -9,8 +9,6 @@ import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
-
 /**
  * Units of measure. Admin-curated by analogy with categories and tags: a small
  * closed set that shapes how every recipe reads, and not something a user
@@ -23,7 +21,7 @@ import java.util.List;
  * that reads as if it works.
  */
 @Service
-public class UnitService extends AbstractReferenceService<UnitEntity> {
+public class UnitService extends AbstractReferenceService<UnitEntity, UnitResponse> {
 
     private final RecipesRepository recipesRepository;
     private final ReferenceMapper mapper;
@@ -50,14 +48,9 @@ public class UnitService extends AbstractReferenceService<UnitEntity> {
         return recipesRepository.isUnitUsed(id);
     }
 
-    @Transactional(readOnly = true)
-    public List<UnitResponse> list() {
-        return mapper.toUnitResponses(findAll());
-    }
-
-    @Transactional(readOnly = true)
-    public UnitResponse get(String id) {
-        return mapper.toResponse(findById(id));
+    @Override
+    protected UnitResponse toResponse(UnitEntity unit) {
+        return mapper.toResponse(unit);
     }
 
     @Transactional

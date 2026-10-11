@@ -7,6 +7,7 @@ import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientGroupEntity
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeIntroductionEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeStepEntity;
 import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
+import ilenreste.unpeu.recettesback.entities.reference.ReferenceEntity;
 import ilenreste.unpeu.recettesback.entities.reference.TagEntity;
 import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeAuthorResponse;
@@ -16,6 +17,7 @@ import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeIntroductionR
 import ilenreste.unpeu.recettesback.models.recipes.responses.RecipePictureResponse;
 import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeResponse;
 import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeStepResponse;
+import ilenreste.unpeu.recettesback.services.reference.AbstractReferenceService;
 import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeSummaryResponse;
 import ilenreste.unpeu.recettesback.models.reference.responses.CategoryResponse;
 import ilenreste.unpeu.recettesback.models.reference.responses.TagResponse;
@@ -49,10 +51,14 @@ import java.util.Map;
 @Component
 public class RecipeMapper {
 
-    private static final Comparator<CategoryEntity> BY_CATEGORY_NAME =
-            Comparator.comparing(CategoryEntity::getName, String.CASE_INSENSITIVE_ORDER);
-    private static final Comparator<TagEntity> BY_TAG_NAME =
-            Comparator.comparing(TagEntity::getName, String.CASE_INSENSITIVE_ORDER);
+    /**
+     * One ordering for reference rows, shared with {@code AbstractReferenceService.findAll()}
+     * and {@code CategoryTaxonomy} rather than re-declared here per entity type. The three
+     * local copies this replaces agreed with each other and disagreed with the SQL sort, so
+     * {@code GET /tags} and the {@code tags} array below returned the same rows in different
+     * orders. {@code ReferenceEntity} already exposes the key, so one comparator covers both.
+     */
+    private static final Comparator<ReferenceEntity> BY_NAME = AbstractReferenceService.BY_NAME;
 
     private final ReferenceMapper referenceMapper;
 
@@ -124,14 +130,14 @@ public class RecipeMapper {
 
     private List<CategoryResponse> toCategories(RecipeEntity recipe,
                                                 Map<String, String> categoryParentIds) {
-        return recipe.getCategories().stream().sorted(BY_CATEGORY_NAME)
+        return recipe.getCategories().stream().sorted(BY_NAME)
                 .map(category -> referenceMapper.toResponse(
                         category, categoryParentIds.get(category.getId())))
                 .toList();
     }
 
     private List<TagResponse> toTags(RecipeEntity recipe) {
-        return recipe.getTags().stream().sorted(BY_TAG_NAME)
+        return recipe.getTags().stream().sorted(BY_NAME)
                 .map(referenceMapper::toResponse).toList();
     }
 

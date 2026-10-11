@@ -49,9 +49,12 @@ import java.util.stream.Collectors;
  *       uploader's.</li>
  *   <li><strong>Write</strong> under a server-generated key, atomically.</li>
  *   <li><strong>Insert</strong> the row, measuring every column from the
- *       artefact of steps 4 and 5. If the insert fails, the files just written
- *       are deleted.</li>
+ *       artefact of steps 4 and 5.</li>
  * </ol>
+ * Steps 6 and 7 share one {@code try}: if either file write <em>or</em> the
+ * insert fails, every file already written is deleted, so the claim above —
+ * a failure at any step stores nothing — holds for the thumbnail write too and
+ * not only for the insert.
  */
 @Log4j2
 @Service
@@ -111,18 +114,25 @@ public class MediaService {
         String storageKey = storageKeyFor(storageId, reencoded.format(), "");
         String thumbnailKey = storageKeyFor(storageId, reencoded.format(), "_thumb");
 
-        storageService.store(storageKey, reencoded.full());
-        storageService.store(thumbnailKey, reencoded.thumb());
-
+        // Both writes are inside the try, not just the insert. The thumbnail write can fail on its
+        // own - a full disk, a directory that turned unwritable between the two calls - and when it
+        // did, the full-size file written the line before stayed on disk with no row pointing at
+        // it. Nothing would ever find it again: the orphan sweep enumerates media rows, so a file
+        // with no row is invisible to it permanently. delete() is best-effort and swallows its own
+        // failures, so unwinding a file that was never written is harmless.
         try {
+            storageService.store(storageKey, reencoded.full());
+            storageService.store(thumbnailKey, reencoded.thumb());
+
             MediaEntity saved = mediaRepository.save(toEntity(reencoded, storageKey, thumbnailKey));
             log.info("Stored media {} as {}x{} {}", saved.getId(),
                     saved.getWidth(), saved.getHeight(), saved.getContentType());
             return mediaMapper.toResponse(saved);
         } catch (RuntimeException exception) {
-            // The files are already on disk and no transaction covers them, so unwind by hand -
-            // otherwise every failed insert leaves two orphans nothing will ever reference.
-            log.error("Rolling back the files written for a media row that could not be inserted", exception);
+            // The files may already be on disk and no transaction covers them, so unwind by hand -
+            // otherwise every failed upload leaves orphans nothing will ever reference.
+            log.error("Rolling back the files written for a media upload that could not be completed",
+                    exception);
             storageService.delete(storageKey);
             storageService.delete(thumbnailKey);
             throw exception;

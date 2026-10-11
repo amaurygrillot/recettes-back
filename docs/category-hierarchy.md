@@ -244,3 +244,21 @@ A fresh database needs none of it — Hibernate creates the table from the entit
 either way: no deployment of this API exists yet, so the only affected databases are local ones. That it needed a
 hand-written script at all is the cost of having no migration tool, paid for the first time here and noted in
 [recipes-domain-model.md](recipes-domain-model.md#still-open-after-implementation).
+
+## One ordering, shared
+
+Reference rows are ordered by `normalizedName`, through a single `AbstractReferenceService.BY_NAME` comparator that
+`RecipeMapper` and `CategoryTaxonomy` both use, and a matching `Sort.by("normalizedName")` in
+`AbstractReferenceService.findAll()`.
+
+There were four spellings before: `Comparator.comparing(CategoryEntity::getName, CASE_INSENSITIVE_ORDER)` declared in
+`RecipeMapper`, the same thing again for `TagEntity`, a third copy in `CategoryTaxonomy`, and `Sort.by("name")` in the
+base service. The Java copies agreed with each other and disagreed with the SQL one, which uses the PostgreSQL column
+collation — so `GET /tags` and the `tags` array inside `GET /recipes/{id}` returned the same rows in different orders.
+
+Sorting on the normalized column fixes more than the inconsistency. Normalization has already folded case *and*
+accents, so `Épices` sorts where a French reader looks for it; `CASE_INSENSITIVE_ORDER` folds only case and put it
+after `z`. The column already carries a unique index, so the ordering is free.
+
+`ReferenceEntity` exposes `getNormalizedName()`, so one `Comparator<ReferenceEntity>` covers every subclass — changing
+what "name-sorted" means is now one edit rather than four, one of which was a string literal inside a `Sort`.

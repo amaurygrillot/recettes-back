@@ -88,3 +88,11 @@ If any existing rows share an email, the `ddl-auto=update` schema update will fa
 - **Resetting the password doesn't revoke existing JWTs.** Since JWTs are stateless and self-contained (see root
   `CLAUDE.md`), any token issued before the reset stays valid until it expires (currently 1 hour, see
   `AuthenticationController.login`). Acceptable at today's scale; would need a revocation/deny-list to close.
+
+## The other way a password changes
+
+An authenticated user who *knows* their password changes it through `PUT /users/update`, which requires the current
+password in the same request and never touches this token machinery. That split — and why the reset flow deliberately
+calls `UserService.applyNewPassword` rather than `UserService.updateUser` — is in
+[credential-changes.md](credential-changes.md). Routing a reset through the self-service method would lock out exactly
+the people this feature exists for.

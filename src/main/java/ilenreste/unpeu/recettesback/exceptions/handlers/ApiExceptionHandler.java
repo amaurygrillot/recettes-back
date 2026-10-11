@@ -25,7 +25,7 @@ import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
-import java.net.URI;
+import java.io.UncheckedIOException;
 import java.sql.SQLException;
 import java.time.Duration;
 
@@ -67,10 +67,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     private static final String UNIQUE_VIOLATION_SQL_STATE = "23505";
 
     @ExceptionHandler(ResourceNotFoundException.class)
-    ResponseEntity<ProblemDetail> handleNotFound(ResourceNotFoundException exception,
-                                                 HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handleNotFound(ResourceNotFoundException exception) {
         log.debug("Resource not found: {}", exception.getMessage());
-        return problem(HttpStatus.NOT_FOUND, exception.getMessage(), request);
+        return problem(HttpStatus.NOT_FOUND, exception.getMessage());
     }
 
     /**
@@ -78,10 +77,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * handler rather than two identical ones.
      */
     @ExceptionHandler(InvalidInputException.class)
-    ResponseEntity<ProblemDetail> handleInvalidInput(InvalidInputException exception,
-                                                     HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handleInvalidInput(InvalidInputException exception) {
         log.debug("Rejecting an unusable request payload: {}", exception.getMessage());
-        return problem(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+        return problem(HttpStatus.BAD_REQUEST, exception.getMessage());
     }
 
     /**
@@ -111,11 +109,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * 500. Nothing is wrong with the request and repeating it shortly will work.
      */
     @ExceptionHandler(ServiceOverloadedException.class)
-    ResponseEntity<ProblemDetail> handleOverloaded(ServiceOverloadedException exception,
-                                                   HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handleOverloaded(ServiceOverloadedException exception) {
         log.warn("Refusing a request at capacity: {}", exception.getMessage());
-        return retryable(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage(),
-                exception.retryAfter(), request);
+        return retryable(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage(), exception.retryAfter());
     }
 
     /**
@@ -124,25 +120,21 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * it was throttled or queued.
      */
     @ExceptionHandler(RateLimitExceededException.class)
-    ResponseEntity<ProblemDetail> handleRateLimited(RateLimitExceededException exception,
-                                                    HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handleRateLimited(RateLimitExceededException exception) {
         log.warn("Refusing a request over its rate limit: {}", exception.getMessage());
-        return retryable(HttpStatus.TOO_MANY_REQUESTS, exception.getMessage(),
-                exception.retryAfter(), request);
+        return retryable(HttpStatus.TOO_MANY_REQUESTS, exception.getMessage(), exception.retryAfter());
     }
 
     @ExceptionHandler(ResourceConflictException.class)
-    ResponseEntity<ProblemDetail> handleConflict(ResourceConflictException exception,
-                                                 HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handleConflict(ResourceConflictException exception) {
         log.info("Request conflicts with existing state: {}", exception.getMessage());
-        return problem(HttpStatus.CONFLICT, exception.getMessage(), request);
+        return problem(HttpStatus.CONFLICT, exception.getMessage());
     }
 
     @ExceptionHandler(ForbiddenOperationException.class)
-    ResponseEntity<ProblemDetail> handleForbidden(ForbiddenOperationException exception,
-                                                  HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handleForbidden(ForbiddenOperationException exception) {
         log.warn("Operation refused: {}", exception.getMessage());
-        return problem(HttpStatus.FORBIDDEN, exception.getMessage(), request);
+        return problem(HttpStatus.FORBIDDEN, exception.getMessage());
     }
 
     /**
@@ -157,14 +149,17 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * Postgres-version specific and locale-dependent.
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
-    ResponseEntity<ProblemDetail> handleDataIntegrityViolation(DataIntegrityViolationException exception,
-                                                               HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handleDataIntegrityViolation(DataIntegrityViolationException exception) {
         if (isUniqueViolation(exception)) {
-            log.info("A unique constraint lost a create race", exception);
-            return problem(HttpStatus.CONFLICT, "That value already exists.", request);
+            // "lost a race" and not "lost a create race": the services now pre-check uniqueness on
+            // update as well as create, so whichever write reaches here did so by losing to a
+            // concurrent one. The old wording sent an operator looking at registrations for a
+            // conflict raised by PUT /users/update.
+            log.info("A unique constraint lost a race", exception);
+            return problem(HttpStatus.CONFLICT, "That value already exists.");
         }
         log.error("Unexpected data integrity violation", exception);
-        return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL, request);
+        return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL);
     }
 
     /**
@@ -187,11 +182,27 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         throw exception;
     }
 
+    /**
+     * Storage that could not be read or written: a full disk, a media root that
+     * turned unwritable, an upload the container could not stream to the end.
+     * <p>
+     * Still a 500, because it is the server that failed and not the request, but
+     * handled explicitly so the log says which kind of failure it was instead of
+     * filing it under {@link #handleUnexpected} with the programming bugs. Note
+     * this is no longer where an undecodable image lands: {@code ImageReencoder}
+     * raises {@link InvalidInputException} for that, which is a 400.
+     */
+    @ExceptionHandler(UncheckedIOException.class)
+    ResponseEntity<ProblemDetail> handleStorageFailure(UncheckedIOException exception) {
+        log.error("Storage or stream failure while serving a request", exception);
+        return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL);
+    }
+
     @ExceptionHandler(Exception.class)
     ResponseEntity<ProblemDetail> handleUnexpected(Exception exception, HttpServletRequest request) {
         log.error("Unhandled exception while serving {} {}",
                 request.getMethod(), request.getRequestURI(), exception);
-        return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL, request);
+        return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL);
     }
 
     /**
@@ -221,18 +232,29 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * asked it to slow down.
      */
     private ResponseEntity<ProblemDetail> retryable(HttpStatusCode status, String detail,
-                                                    Duration retryAfter, HttpServletRequest request) {
-        ProblemDetail body = ProblemDetail.forStatusAndDetail(status, detail);
-        body.setInstance(URI.create(request.getRequestURI()));
+                                                    Duration retryAfter) {
         return ResponseEntity.status(status)
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(Math.max(1, retryAfter.toSeconds())))
-                .body(body);
+                .body(ProblemDetail.forStatusAndDetail(status, detail));
     }
 
-    private ResponseEntity<ProblemDetail> problem(HttpStatusCode status, String detail,
-                                                  HttpServletRequest request) {
-        ProblemDetail body = ProblemDetail.forStatusAndDetail(status, detail);
-        body.setInstance(URI.create(request.getRequestURI()));
-        return ResponseEntity.status(status).body(body);
+    /**
+     * No {@code setInstance} here, and therefore no {@code HttpServletRequest}
+     * parameter on the handlers above.
+     * <p>
+     * Spring MVC fills a returned {@code ProblemDetail} instance field from the
+     * request URI when it is null, in {@code HttpEntityMethodProcessor}, so
+     * setting it by hand was a line that changed nothing while forcing eight
+     * handlers to accept an argument they never otherwise read.
+     * {@link #handleMaxUploadSizeExceededException} is the proof: it has never
+     * set it and has always answered with a populated instance field.
+     * <p>
+     * {@code ProblemDetailErrorResponder} is the one place that still must set it
+     * itself, because it writes through an {@code ObjectMapper} from inside the
+     * filter chain, above the {@code DispatcherServlet}, where no return-value
+     * handler runs.
+     */
+    private ResponseEntity<ProblemDetail> problem(HttpStatusCode status, String detail) {
+        return ResponseEntity.status(status).body(ProblemDetail.forStatusAndDetail(status, detail));
     }
 }

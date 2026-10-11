@@ -35,6 +35,7 @@ import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
 import ilenreste.unpeu.recettesback.services.reference.CategoryService;
 import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
+import jakarta.persistence.EntityManager;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
@@ -47,10 +48,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Collection;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Log4j2
 @Service
@@ -69,13 +71,20 @@ public class RecipeService {
     private final CurrentUserService currentUserService;
     private final RecipeMapper mapper;
 
+    /**
+     * Held for one reason: {@link #clearForReplacement} has to flush orphan DELETEs
+     * before the rows that re-use their {@code position} are inserted.
+     */
+    private final EntityManager entityManager;
+
     public RecipeService(RecipesRepository recipesRepository, CategoriesRepository categoriesRepository,
                          CategoryRelationsRepository categoryRelationsRepository,
                          TagsRepository tagsRepository, IngredientsRepository ingredientsRepository,
                          UnitsRepository unitsRepository, MediaRepository mediaRepository,
                          ReferenceResolver referenceResolver, CategoryService categoryService,
                          ReferenceNameNormalizer normalizer,
-                         CurrentUserService currentUserService, RecipeMapper mapper) {
+                         CurrentUserService currentUserService, RecipeMapper mapper,
+                         EntityManager entityManager) {
         this.recipesRepository = recipesRepository;
         this.categoriesRepository = categoriesRepository;
         this.categoryRelationsRepository = categoryRelationsRepository;
@@ -88,6 +97,7 @@ public class RecipeService {
         this.normalizer = normalizer;
         this.currentUserService = currentUserService;
         this.mapper = mapper;
+        this.entityManager = entityManager;
     }
 
     /**
@@ -122,12 +132,12 @@ public class RecipeService {
         Pageable sorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), request.sort());
         Collection<String> categoryIds = resolveCategoryFilter(request);
         Page<String> idPage = recipesRepository.searchIds(
-                blankToNull(request.title()),
-                blankToNull(request.authorId()),
-                blankToNull(request.authorName()),
+                request.title(),
+                request.authorId(),
+                request.authorName(),
                 categoryIds != null,
                 categoryIds == null ? Set.of() : categoryIds,
-                blankToNull(request.tagId()),
+                request.tagId(),
                 normalizedOrNull(request.tagName()),
                 sorted);
         if (idPage.isEmpty()) {
@@ -135,7 +145,7 @@ public class RecipeService {
         }
 
         Map<String, RecipeEntity> byId = recipesRepository.findAllForSummary(idPage.getContent()).stream()
-                .collect(java.util.stream.Collectors.toMap(RecipeEntity::getId, Function.identity()));
+                .collect(Collectors.toMap(RecipeEntity::getId, Function.identity()));
         Map<String, String> categoryParentIds = categoryRelationsRepository.parentIdsByCategoryId();
 
         List<RecipeSummaryResponse> ordered = idPage.getContent().stream()
@@ -276,12 +286,47 @@ public class RecipeService {
         managed.addAll(replacement);
     }
 
+    /**
+     * Empties a cascading child collection and <strong>pushes the DELETEs to the
+     * database before the replacements are built</strong>.
+     * <p>
+     * The flush is not an optimisation, it is the fix for a 409 on every ordinary
+     * edit. {@code recipe_steps}, {@code recipe_ingredient_groups} and
+     * {@code recipe_cover_pictures} each carry {@code UNIQUE (recipe_id, position)},
+     * and the replacements are renumbered from zero — so a three-step recipe edited
+     * down to two re-uses positions 0 and 1, which still belong to the rows being
+     * removed. Within a single flush Hibernate orders entity INSERTs <em>before</em>
+     * entity DELETEs, so the insert of the new position 0 hit the constraint while
+     * the old position 0 was still there, and the edit came back
+     * {@code 409 "That value already exists."}
+     * <p>
+     * ({@code ActionQueue} does have an {@code OrphanRemovalAction} ordered ahead of
+     * inserts, which is why reading the action ordering alone suggests this works.
+     * It is only used when the persistence context is in its remove-orphans-before-
+     * updates phase, which a cascade from a cleared collection is not — the deletes
+     * land in the ordinary {@code EntityDeleteAction} list, which runs last. The
+     * integration test that reuses the positions is what settles it either way.)
+     * <p>
+     * Flushing only when there is something to remove keeps the create path
+     * untouched: a new recipe's collections are already empty, and flushing a
+     * not-yet-persisted entity here would be a pointless early insert.
+     */
+    private void clearForReplacement(Collection<?> managed) {
+        if (managed.isEmpty()) {
+            return;
+        }
+        managed.clear();
+        entityManager.flush();
+    }
+
     private void replaceCoverPictures(RecipeEntity recipe, List<RecipePictureRequest> pictures) {
         List<RecipePictureRequest> requested = pictures == null ? List.of() : pictures;
         Map<String, MediaEntity> media = resolveMedia("coverPictures[].mediaId", requested);
 
-        // orphanRemoval on the association turns this clear() into DELETEs for the rows dropped.
-        recipe.getCoverPictures().clear();
+        // orphanRemoval on the association turns this clear() into DELETEs for the rows dropped,
+        // and the flush inside clearForReplacement is what gets them to the database before the
+        // new rows re-use their positions. See that method.
+        clearForReplacement(recipe.getCoverPictures());
         for (int position = 0; position < requested.size(); position++) {
             RecipePictureRequest request = requested.get(position);
             RecipeCoverPictureEntity cover = new RecipeCoverPictureEntity();
@@ -297,12 +342,12 @@ public class RecipeService {
     private void replaceSteps(RecipeEntity recipe, List<RecipeStepRequest> steps) {
         List<RecipeStepRequest> requested = steps == null ? List.of() : steps;
         List<RecipePictureRequest> allPictures = requested.stream()
-                .flatMap(step -> step.pictures() == null ? java.util.stream.Stream.<RecipePictureRequest>of()
+                .flatMap(step -> step.pictures() == null ? Stream.<RecipePictureRequest>of()
                         : step.pictures().stream())
                 .toList();
         Map<String, MediaEntity> media = resolveMedia("steps[].pictures[].mediaId", allPictures);
 
-        recipe.getSteps().clear();
+        clearForReplacement(recipe.getSteps());
         for (int position = 0; position < requested.size(); position++) {
             RecipeStepRequest request = requested.get(position);
             RecipeStepEntity step = new RecipeStepEntity();
@@ -329,7 +374,7 @@ public class RecipeService {
         List<RecipeIngredientGroupRequest> requested = groups == null ? List.of() : groups;
         List<RecipeIngredientRequest> allLines = requested.stream()
                 .flatMap(group -> group.ingredients() == null
-                        ? java.util.stream.Stream.<RecipeIngredientRequest>of()
+                        ? Stream.<RecipeIngredientRequest>of()
                         : group.ingredients().stream())
                 .toList();
 
@@ -344,7 +389,7 @@ public class RecipeService {
                 allLines.stream().map(RecipeIngredientRequest::unitId).toList(),
                 unitsRepository::findAllById);
 
-        recipe.getIngredientGroups().clear();
+        clearForReplacement(recipe.getIngredientGroups());
         for (int position = 0; position < requested.size(); position++) {
             RecipeIngredientGroupRequest request = requested.get(position);
             RecipeIngredientGroupEntity group = new RecipeIngredientGroupEntity();
@@ -399,6 +444,9 @@ public class RecipeService {
             introduction.setRecipe(recipe);
             recipe.setIntroduction(introduction);
         }
+        // Mutated in place rather than replaced, so there is no delete-then-insert on
+        // recipe_introductions.recipe_id - which is unique, being the owning side of a @OneToOne -
+        // and therefore none of the flush ordering that clearForReplacement exists to handle.
         introduction.setText(request.text());
     }
 
@@ -428,26 +476,22 @@ public class RecipeService {
      * cycles or depth.
      */
     private Collection<String> resolveCategoryFilter(RecipeSearchRequest request) {
-        String categoryId = blankToNull(request.categoryId());
-        String categoryName = blankToNull(request.categoryName());
+        // Both accessors answer null for a blank parameter - see RecipeSearchRequest, which is
+        // where that rule now lives instead of in a private helper on this class.
+        String categoryId = request.categoryId();
+        String categoryName = request.categoryName();
         if (categoryId == null && categoryName == null) {
             return null;
         }
         return categoryService.findMatchingIds(categoryId, categoryName, request.includesSubcategories());
     }
 
-    /** A blank query parameter means "no filter", not "match the empty string". */
-    private String blankToNull(String value) {
-        return value == null || value.isBlank() ? null : value;
-    }
-
     /**
      * Normalizes a name filter the same way the reference tables normalize what
-     * they store, so {@code entrees} matches {@code Entrées}. Null for a blank
-     * filter, which means "no filter".
+     * they store, so {@code entrees} matches {@code Entrées}. Null stays null,
+     * which means "no filter".
      */
     private String normalizedOrNull(String value) {
-        String trimmed = blankToNull(value);
-        return trimmed == null ? null : normalizer.normalize(trimmed);
+        return value == null ? null : normalizer.normalize(value);
     }
 }

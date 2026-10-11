@@ -10,8 +10,6 @@ import ilenreste.unpeu.recettesback.models.reference.responses.TagResponse;
 import ilenreste.unpeu.recettesback.models.reference.responses.UnitResponse;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-
 /**
  * Entity to response for the four reference tables.
  * <p>
@@ -57,11 +55,4 @@ public class ReferenceMapper {
                 ingredient.getIcon() == null ? null : ingredient.getIcon().getId());
     }
 
-    public List<TagResponse> toTagResponses(List<TagEntity> tags) {
-        return tags.stream().map(this::toResponse).toList();
-    }
-
-    public List<UnitResponse> toUnitResponses(List<UnitEntity> units) {
-        return units.stream().map(this::toResponse).toList();
-    }
 }

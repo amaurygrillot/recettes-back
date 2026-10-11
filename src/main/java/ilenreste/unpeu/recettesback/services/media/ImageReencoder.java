@@ -20,7 +20,6 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.Iterator;
 
 /**
@@ -88,7 +87,21 @@ public class ImageReencoder {
                 reader.dispose();
             }
         } catch (IOException exception) {
-            throw new UncheckedIOException("Failed to re-encode an uploaded image", exception);
+            // InvalidInputException (400) and not UncheckedIOException, which is what this used to
+            // throw and which nothing maps - so an upload that got past the magic-byte check and
+            // then failed to decode answered 500, blaming the server for the caller's file, and
+            // contradicting this method's own @throws above.
+            //
+            // Every IOException reachable here is a read of the caller's bytes: setInput,
+            // decodeWithinBudget and applyExifOrientation all read `source`, while encode() writes
+            // to a ByteArrayOutputStream and has no real IO to fail at. A three-byte JPEG magic
+            // prefix followed by garbage is the ordinary case - ImageIO.getImageReaders happily
+            // returns the JPEG reader for it, so the guard above passes and getWidth(0) is where
+            // it falls over.
+            log.warn("Refusing an upload that could not be decoded as a {} image", format.extension());
+            throw new InvalidInputException(
+                    "That file could not be read as a %s image. It may be truncated or corrupt."
+                            .formatted(format.extension()), exception);
         }
     }
 

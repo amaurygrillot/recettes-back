@@ -2,6 +2,8 @@ package ilenreste.unpeu.recettesback.models.recipes.requests;
 
 import ilenreste.unpeu.recettesback.validation.NotEmptyIfPresent;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import java.util.List;
@@ -76,16 +78,16 @@ public record UpdateRecipeRequest(
         Optional<String> recommendations,
 
         @NotEmptyIfPresent
-        Optional<List<String>> categoryIds,
+        Optional<List<@NotBlank String>> categoryIds,
 
-        Optional<List<String>> tagIds,
+        Optional<List<@NotBlank String>> tagIds,
 
-        Optional<List<@Valid RecipePictureRequest>> coverPictures,
-
-        @NotEmptyIfPresent
-        Optional<List<@Valid RecipeIngredientGroupRequest>> ingredientGroups,
+        Optional<List<@NotNull @Valid RecipePictureRequest>> coverPictures,
 
         @NotEmptyIfPresent
-        Optional<List<@Valid RecipeStepRequest>> steps
+        Optional<List<@NotNull @Valid RecipeIngredientGroupRequest>> ingredientGroups,
+
+        @NotEmptyIfPresent
+        Optional<List<@NotNull @Valid RecipeStepRequest>> steps
 ) {
 }

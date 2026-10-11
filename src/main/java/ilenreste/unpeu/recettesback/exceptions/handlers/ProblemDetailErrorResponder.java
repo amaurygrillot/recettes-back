@@ -10,6 +10,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.access.AccessDeniedHandler;
+import org.springframework.stereotype.Component;
 
 import tools.jackson.databind.ObjectMapper;
 
@@ -22,11 +23,18 @@ import java.net.URI;
  * and 403 as the two responses with no body.
  * <p>
  * It lives in {@code exceptions.handlers} next to {@link ApiExceptionHandler}
- * rather than in {@code configuration}: it configures nothing and declares no
- * bean — it is
- * the second half of "turn a failure into a {@code problem+json} body", the half
- * that runs above the {@code DispatcherServlet} where an {@code @ExceptionHandler}
- * cannot reach. {@code SecurityFilterConfig} is the configuration that wires it.
+ * rather than in {@code configuration}: it configures nothing — it is the second
+ * half of "turn a failure into a {@code problem+json} body", the half that runs
+ * above the {@code DispatcherServlet} where an {@code @ExceptionHandler} cannot
+ * reach. {@code SecurityFilterConfig} is the configuration that wires it into the
+ * chain.
+ * <p>
+ * It is a {@code @Component} rather than something {@code SecurityFilterConfig}
+ * constructs inline, because {@link ilenreste.unpeu.recettesback.filters.JwtAuthenticationFilter}
+ * needs it too. That filter sits <em>before</em> {@code ExceptionTranslationFilter}
+ * in the chain, so an {@code AuthenticationException} it threw would never be
+ * caught and turned into a response — it has to write one itself, through this
+ * class, or answer with a bare status and no body.
  *
  * <h2>Who calls {@link #commence} and {@link #handle}, and when</h2>
  * Neither is ever called by application code. Both are callbacks invoked by
@@ -62,6 +70,7 @@ import java.net.URI;
  * required or whether the target exists.
  */
 @Log4j2
+@Component
 public class ProblemDetailErrorResponder implements AuthenticationEntryPoint, AccessDeniedHandler {
 
     public static final String UNAUTHORIZED_DETAIL = "Authentication is required to access this resource.";

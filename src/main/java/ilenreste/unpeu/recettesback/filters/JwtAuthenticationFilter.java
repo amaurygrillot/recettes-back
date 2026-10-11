@@ -12,7 +12,9 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
+import org.springframework.security.oauth2.server.resource.InvalidBearerTokenException;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -82,8 +84,22 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtDecoder jwtDecoder;
 
-    public JwtAuthenticationFilter(JwtDecoder jwtDecoder) {
+    /**
+     * Writes the 401 body for a rejected token.
+     * <p>
+     * This filter sits before {@code ExceptionTranslationFilter} in the chain, so
+     * an {@code AuthenticationException} thrown here would propagate past nothing
+     * that could turn it into a response. Rejecting therefore means writing the
+     * response, and writing it through the same responder
+     * {@code SecurityFilterConfig} installs as the entry point is what keeps a
+     * rejected token answering in the same {@code problem+json} shape as every
+     * other 401 instead of a bare status with no body.
+     */
+    private final AuthenticationEntryPoint errorResponder;
+
+    public JwtAuthenticationFilter(JwtDecoder jwtDecoder, AuthenticationEntryPoint errorResponder) {
         this.jwtDecoder = jwtDecoder;
+        this.errorResponder = errorResponder;
     }
 
     @Override
@@ -110,7 +126,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             } else {
                 // Client-supplied input, and an expired token is a routine event: warn, not error.
                 log.warn("Rejecting request with an undecodable JWT", jwtException);
-                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                // Through the responder, not response.setStatus: a bare 401 carried no body and no
+                // content type, which made the single most common auth failure the one error in
+                // the API a client could not parse - and the expired-token case is exactly the one
+                // an SPA must recognise to trigger a silent re-login.
+                errorResponder.commence(request, response,
+                        new InvalidBearerTokenException(jwtException.getMessage(), jwtException));
                 return;
             }
         }

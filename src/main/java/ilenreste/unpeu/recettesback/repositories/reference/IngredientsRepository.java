@@ -17,6 +17,12 @@ public interface IngredientsRepository extends ReferenceRepository<IngredientEnt
      * Only this repository needs a paged search — its table is the one that grows.
      * Categories, tags and units are small enough that their endpoints return
      * everything.
+     * <p>
+     * No {@code OrderByName} in the name any more: the ordering now arrives on the
+     * {@link Pageable}, built from the closed {@code IngredientSortField} enum, and
+     * Spring Data appends a {@code Pageable}'s sort to whatever the method name
+     * already asked for. Keeping both meant two orderings in one query, with the
+     * static one silently winning the first position.
      */
-    Page<IngredientEntity> findByNormalizedNameStartingWithOrderByName(String prefix, Pageable pageable);
+    Page<IngredientEntity> findByNormalizedNameStartingWith(String prefix, Pageable pageable);
 }

@@ -32,6 +32,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.idOf;
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.unique;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -92,24 +95,6 @@ class ReferenceEndpointsIntegrationTest {
         admin.close();
     }
 
-    private HttpEntity<String> body(String json, String authorization) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        if (authorization != null) {
-            headers.set(HttpHeaders.AUTHORIZATION, authorization);
-        }
-        return new HttpEntity<>(json, headers);
-    }
-
-    private String uniqueName(String prefix) {
-        return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
-    }
-
-    private String idOf(String json) {
-        int start = json.indexOf("\"id\":\"") + 6;
-        return json.substring(start, json.indexOf('"', start));
-    }
-
     private String createCategoryAsAdmin(String name) {
         return createCategoryAsAdmin(name, null);
     }
@@ -136,20 +121,20 @@ class ReferenceEndpointsIntegrationTest {
 
         // A plain USER is authenticated but not permitted: 403, not 401.
         assertThat(restTemplate.postForEntity("/categories",
-                body("{\"name\":\"" + uniqueName("dessert") + "\"}", userToken), String.class)
+                body("{\"name\":\"" + unique("dessert") + "\"}", userToken), String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
 
         // No credential offered at all: 401, not 403.
         assertThat(restTemplate.postForEntity("/categories",
-                body("{\"name\":\"" + uniqueName("dessert") + "\"}", null), String.class)
+                body("{\"name\":\"" + unique("dessert") + "\"}", null), String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
 
-        createCategoryAsAdmin(uniqueName("dessert"));
+        createCategoryAsAdmin(unique("dessert"));
     }
 
     @Test
     void refusesADuplicateAndSaysWhichRowItCollidedWith() {
-        String name = uniqueName("dessert");
+        String name = unique("dessert");
         String id = createCategoryAsAdmin(name);
 
         // Different spelling, same normalized name - which is the whole reason that column exists.
@@ -170,8 +155,8 @@ class ReferenceEndpointsIntegrationTest {
 
     @Test
     void renamesAndThenDeletesAnUnusedCategory() {
-        String id = createCategoryAsAdmin(uniqueName("dessert"));
-        String newName = uniqueName("desserts-et-gouters");
+        String id = createCategoryAsAdmin(unique("dessert"));
+        String newName = unique("desserts-et-gouters");
 
         ResponseEntity<String> renamed = restTemplate.exchange("/categories/" + id, HttpMethod.PUT,
                 body("{\"name\":\"%s\"}".formatted(newName), adminToken), String.class);
@@ -189,7 +174,7 @@ class ReferenceEndpointsIntegrationTest {
 
     @Test
     void refusesToDeleteACategoryARecipeStillPointsAt() {
-        String categoryId = createCategoryAsAdmin(uniqueName("dessert"));
+        String categoryId = createCategoryAsAdmin(unique("dessert"));
         attachRecipeTo(categoryId);
 
         ResponseEntity<String> response = restTemplate.exchange("/categories/" + categoryId,
@@ -224,9 +209,9 @@ class ReferenceEndpointsIntegrationTest {
 
     @Test
     void placesACategoryUnderAnotherOneAndReadsTheTreeBackBothWays() {
-        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
-        String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
-        String tartesAuxPommes = createCategoryAsAdmin(uniqueName("tartes-aux-pommes"), tartes);
+        String desserts = createCategoryAsAdmin(unique("desserts"));
+        String tartes = createCategoryAsAdmin(unique("tartes"), desserts);
+        String tartesAuxPommes = createCategoryAsAdmin(unique("tartes-aux-pommes"), tartes);
 
         // A root reports MAIN and no parent - never the self-reference the schema actually holds.
         assertThat(restTemplate.getForObject("/categories/" + desserts, String.class))
@@ -257,7 +242,7 @@ class ReferenceEndpointsIntegrationTest {
     /** Reads stay public all the way down the hierarchy routes; writes stay admin-only. */
     @Test
     void hierarchyReadsArePublic() {
-        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
+        String desserts = createCategoryAsAdmin(unique("desserts"));
 
         assertThat(restTemplate.getForEntity("/categories/hierarchy", String.class).getStatusCode())
                 .isEqualTo(HttpStatus.OK);
@@ -284,7 +269,7 @@ class ReferenceEndpointsIntegrationTest {
         // 400 and not 404: /categories is perfectly reachable, it is the payload that is wrong.
         ResponseEntity<String> response = restTemplate.postForEntity("/categories",
                 body("{\"name\":\"%s\",\"parentCategoryId\":\"00000000-0000-0000-0000-000000000000\"}"
-                        .formatted(uniqueName("tartes")), adminToken), String.class);
+                        .formatted(unique("tartes")), adminToken), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody()).contains("parentCategoryId");
@@ -293,8 +278,8 @@ class ReferenceEndpointsIntegrationTest {
     @Test
     void refusesToCloseACycleInTheHierarchy() {
         // A cycle makes every walk below non-terminating - a hang, not an error.
-        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
-        String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
+        String desserts = createCategoryAsAdmin(unique("desserts"));
+        String tartes = createCategoryAsAdmin(unique("tartes"), desserts);
 
         ResponseEntity<String> response = restTemplate.exchange("/categories/" + desserts,
                 HttpMethod.PUT,
@@ -307,8 +292,8 @@ class ReferenceEndpointsIntegrationTest {
 
     @Test
     void refusesToDeleteACategoryThatStillHasSubcategories() {
-        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
-        createCategoryAsAdmin(uniqueName("tartes"), desserts);
+        String desserts = createCategoryAsAdmin(unique("desserts"));
+        createCategoryAsAdmin(unique("tartes"), desserts);
 
         ResponseEntity<String> response = restTemplate.exchange("/categories/" + desserts,
                 HttpMethod.DELETE, body(null, adminToken), String.class);
@@ -320,11 +305,11 @@ class ReferenceEndpointsIntegrationTest {
     /** An update is a full replacement, so dropping the field promotes the category to a root. */
     @Test
     void promotesASubcategoryToARootWhenTheParentIsOmitted() {
-        String desserts = createCategoryAsAdmin(uniqueName("desserts"));
-        String tartes = createCategoryAsAdmin(uniqueName("tartes"), desserts);
+        String desserts = createCategoryAsAdmin(unique("desserts"));
+        String tartes = createCategoryAsAdmin(unique("tartes"), desserts);
 
         ResponseEntity<String> response = restTemplate.exchange("/categories/" + tartes, HttpMethod.PUT,
-                body("{\"name\":\"%s\"}".formatted(uniqueName("tartes")), adminToken), String.class);
+                body("{\"name\":\"%s\"}".formatted(unique("tartes")), adminToken), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("\"categoryType\":\"MAIN\"");
@@ -340,13 +325,13 @@ class ReferenceEndpointsIntegrationTest {
     @Test
     void anyAuthenticatedUserMayAddAnIngredient_butOnlyAnAdminMayEditOne() {
         ResponseEntity<String> created = restTemplate.postForEntity("/ingredients",
-                body("{\"name\":\"%s\"}".formatted(uniqueName("farine")), userToken), String.class);
+                body("{\"name\":\"%s\"}".formatted(unique("farine")), userToken), String.class);
         assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         String id = idOf(created.getBody());
 
         try {
             ResponseEntity<String> edited = restTemplate.exchange("/ingredients/" + id, HttpMethod.PUT,
-                    body("{\"name\":\"%s\"}".formatted(uniqueName("farine-t55")), userToken), String.class);
+                    body("{\"name\":\"%s\"}".formatted(unique("farine-t55")), userToken), String.class);
             assertThat(edited.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
 
             ResponseEntity<String> deleted = restTemplate.exchange("/ingredients/" + id, HttpMethod.DELETE,
@@ -390,7 +375,7 @@ class ReferenceEndpointsIntegrationTest {
      */
     @Test
     void tagsFollowTheSameLifecycleAsCategories() {
-        String name = uniqueName("vegetarien");
+        String name = unique("vegetarien");
         ResponseEntity<String> created = restTemplate.postForEntity("/tags",
                 body("{\"name\":\"%s\"}".formatted(name), adminToken), String.class);
         assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
@@ -403,7 +388,7 @@ class ReferenceEndpointsIntegrationTest {
                 body("{\"name\":\"%s\"}".formatted(name.toUpperCase()), adminToken), String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
 
-        String renamed = uniqueName("vegetarien-strict");
+        String renamed = unique("vegetarien-strict");
         assertThat(restTemplate.exchange("/tags/" + id, HttpMethod.PUT,
                 body("{\"name\":\"%s\"}".formatted(renamed), adminToken), String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -417,7 +402,7 @@ class ReferenceEndpointsIntegrationTest {
 
     @Test
     void unitsCarryAnAbbreviationThroughCreateAndUpdate() {
-        String name = uniqueName("decilitre");
+        String name = unique("decilitre");
         ResponseEntity<String> created = restTemplate.postForEntity("/units",
                 body("{\"name\":\"%s\",\"abbreviation\":\"dl\"}".formatted(name), adminToken),
                 String.class);

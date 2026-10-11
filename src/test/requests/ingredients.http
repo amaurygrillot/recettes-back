@@ -8,6 +8,8 @@
 ### referencing it. Requests 6-8 are that asymmetry, and they are the point of this file.
 ###
 ### Also the only reference endpoint that is paginated: ingredients are the table that grows.
+### Ordering is chosen with `sortBy` (a closed enum) plus `direction`, never Spring Data's
+### free-text `sort` - requests 4b and 4c are why.
 
 @baseUrl = http://localhost:8080
 @adminUsername = jane
@@ -66,6 +68,41 @@ GET {{baseUrl}}/ingredients?size=100000
     client.test("Caps the page size at 100", function () {
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         client.assert(response.body.size <= 100, "Expected the page size to be capped, got " + response.body.size);
+    });
+%}
+
+### 4b. Sort by a field that is not offered -> 400 Bad Request
+### sortBy is a closed enum (IngredientSortField), not Spring Data's free-text `sort`. With the
+### free-text version, ?sort=bogus reached Spring Data's property resolution and threw
+### PropertyReferenceException, which nothing maps - a 500 on a PUBLIC endpoint from a typo.
+GET {{baseUrl}}/ingredients?sortBy=bogus
+
+> {%
+    client.test("Returns 400, not 500", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 4c. Try to order the public list by a private column -> 400 Bad Request
+### The other half of the same bug. Property paths resolve through associations, and
+### IngredientEntity inherits createdBy from AuditableEntity, so ?sort=createdBy.password was a
+### VALID path: an anonymous caller could order the public ingredient list by the bcrypt column.
+### The enum has no such member, so it cannot be named.
+GET {{baseUrl}}/ingredients?sortBy=createdBy.password
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 4d. Sort by an offered field, descending -> 200 OK
+### sortBy and direction are independent, so "newest first" needs nothing new.
+GET {{baseUrl}}/ingredients?sortBy=CREATED_AT&direction=DESC
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
     });
 %}
 

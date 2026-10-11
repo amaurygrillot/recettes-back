@@ -270,3 +270,30 @@ Content-Type: image/jpeg
             "Expected at least one second");
     });
 %}
+
+### Upload a truncated image -> 400 Bad Request
+### Three valid JPEG magic bytes followed by garbage. ImageFormat.detect accepts it (it compares
+### only the prefix) and ImageIO even returns the JPEG reader, so the failure happens at
+### getWidth(0). ImageReencoder used to wrap that IOException in an UncheckedIOException, which
+### nothing mapped, so a corrupt upload answered 500 - blaming the server for the caller's file,
+### and contradicting reencode's own @throws. It is InvalidInputException now.
+###
+### Not scriptable as a literal body: the HTTP Client cannot express raw bytes in a multipart part.
+### Produce the file first, then upload it:
+###   printf '\xFF\xD8\xFF\x00\x01' > truncated.jpg
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="truncated.jpg"
+Content-Type: image/jpeg
+
+< ./truncated.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400, not 500", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}

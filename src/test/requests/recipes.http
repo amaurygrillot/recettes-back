@@ -670,3 +670,70 @@ GET {{baseUrl}}/recipes?title=illustr
 ### 25. Clean up
 DELETE {{baseUrl}}/recipes/{{illustratedRecipeId}}
 Authorization: Bearer {{authorToken}}
+
+### Replacing a non-empty collection with another non-empty one -> 200 OK
+### The case that used to answer 409 "That value already exists." on every ordinary edit.
+### recipe_steps carries UNIQUE (recipe_id, position) and replacements are renumbered from zero, so
+### editing three steps down to two re-uses positions 0 and 1 while the old rows still hold them.
+### Hibernate orders entity INSERTs before entity DELETEs inside one flush, so the insert lost.
+### RecipeService now flushes the deletes before building the replacements.
+### Set {{recipeId}} to a recipe that already has two or more steps.
+PUT {{baseUrl}}/recipes/{{recipeId}}
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "steps": [
+    {"instruction": "Nouvelle premiere etape"},
+    {"instruction": "Nouvelle deuxieme etape"}
+  ]
+}
+
+> {%
+    client.test("Returns 200, not 409", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.steps.length === 2, "Expected exactly the two new steps");
+    });
+%}
+
+### A blank id inside categoryIds -> 400 Bad Request
+### "" is not an empty list, so @NotEmpty passed, and ReferenceResolver ignores blanks - so the
+### recipe used to be stored with NO categories and answered 201, which is the exact invariant
+### categoryIds exists to hold. @NotBlank on the element closes it.
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte sans categorie",
+  "categoryIds": [""],
+  "ingredientGroups": [{"ingredients": [{"ingredientId": "{{ingredientId}}"}]}],
+  "steps": [{"instruction": "Melanger"}]
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### A null element inside steps -> 400 Bad Request
+### Hibernate Validator treats cascading into a null container element as a no-op, so [null] used
+### to survive validation and then be dereferenced in RecipeService - a 500 for a bad payload.
+### @NotNull on the element makes it the 400 it always was.
+POST {{baseUrl}}/recipes
+Authorization: Bearer {{authorToken}}
+Content-Type: application/json
+
+{
+  "title": "Tarte avec une etape nulle",
+  "categoryIds": ["{{categoryId}}"],
+  "ingredientGroups": [{"ingredients": [{"ingredientId": "{{ingredientId}}"}]}],
+  "steps": [null]
+}
+
+> {%
+    client.test("Returns 400, not 500", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}

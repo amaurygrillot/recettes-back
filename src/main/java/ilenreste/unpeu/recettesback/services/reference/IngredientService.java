@@ -5,14 +5,17 @@ import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
 import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.reference.requests.IngredientRequest;
+import ilenreste.unpeu.recettesback.models.reference.requests.IngredientSearchRequest;
 import ilenreste.unpeu.recettesback.models.reference.responses.IngredientResponse;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 
@@ -29,7 +32,7 @@ import java.util.List;
  * {@code CategoryService}.
  */
 @Service
-public class IngredientService extends AbstractReferenceService<IngredientEntity> {
+public class IngredientService extends AbstractReferenceService<IngredientEntity, IngredientResponse> {
 
     private final IngredientsRepository ingredientsRepository;
     private final RecipesRepository recipesRepository;
@@ -66,22 +69,31 @@ public class IngredientService extends AbstractReferenceService<IngredientEntity
      * prefix is given.
      * <p>
      * The search runs against {@code normalized_name}, which is what makes typing
-     * {@code oeuf} find {@code Œuf}. Results are name-sorted for a stable list.
-     *
-     * @param namePrefix what the user has typed so far, or null/blank for no filter
+     * {@code oeuf} find {@code Œuf}.
+     * <p>
+     * <strong>The sort is rebuilt here, not taken from the incoming
+     * {@code Pageable}.</strong> The {@code Pageable} contributes the page number
+     * and size; the ordering comes from {@link IngredientSearchRequest#sort()},
+     * which can only name a column in the {@code IngredientSortField} enum. That
+     * is what stops a query string choosing an arbitrary entity property — see
+     * that enum for the 500 and the password-column ordering this closes. Same
+     * shape as {@code RecipeService.search}.
      */
     @Transactional(readOnly = true)
-    public Page<IngredientResponse> search(String namePrefix, Pageable pageable) {
-        Page<IngredientEntity> page = namePrefix == null || namePrefix.isBlank()
-                ? ingredientsRepository.findAll(pageable)
-                : ingredientsRepository.findByNormalizedNameStartingWithOrderByName(
-                        normalizer.normalize(namePrefix), pageable);
+    public Page<IngredientResponse> search(IngredientSearchRequest request, Pageable pageable) {
+        Pageable sorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), request.sort());
+
+        String namePrefix = request.namePrefix();
+        Page<IngredientEntity> page = namePrefix == null
+                ? ingredientsRepository.findAll(sorted)
+                : ingredientsRepository.findByNormalizedNameStartingWith(
+                        normalizer.normalize(namePrefix), sorted);
         return page.map(mapper::toResponse);
     }
 
-    @Transactional(readOnly = true)
-    public IngredientResponse get(String id) {
-        return mapper.toResponse(findById(id));
+    @Override
+    protected IngredientResponse toResponse(IngredientEntity ingredient) {
+        return mapper.toResponse(ingredient);
     }
 
     @Transactional
@@ -105,7 +117,7 @@ public class IngredientService extends AbstractReferenceService<IngredientEntity
      *                                   wrong
      */
     private MediaEntity resolveIcon(String mediaId) {
-        if (mediaId == null || mediaId.isBlank()) {
+        if (!StringUtils.hasText(mediaId)) {
             return null;
         }
         return mediaRepository.findById(mediaId)

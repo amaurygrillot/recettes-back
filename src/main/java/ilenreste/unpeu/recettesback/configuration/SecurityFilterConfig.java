@@ -11,7 +11,6 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import tools.jackson.databind.ObjectMapper;
 
 /**
  * The single source of truth for who may reach what.
@@ -25,10 +24,7 @@ public class SecurityFilterConfig {
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http, JwtDecoder jwtDecoder,
-                                            ObjectMapper objectMapper) throws Exception {
-
-        ProblemDetailErrorResponder errorResponder = new ProblemDetailErrorResponder(objectMapper);
-
+                                            ProblemDetailErrorResponder errorResponder) throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -83,8 +79,12 @@ public class SecurityFilterConfig {
                         .requestMatchers("/users/**").hasRole("USER")
                         .anyRequest().authenticated()
                 )
+                // The responder goes to the filter as well as to the entry point above: the filter
+                // runs before ExceptionTranslationFilter, so it cannot throw its way to a response
+                // and has to write one. Passing the same instance is what makes a rejected token
+                // answer in the same problem+json shape as every other 401.
                 .addFilterBefore(
-                        new JwtAuthenticationFilter(jwtDecoder),
+                        new JwtAuthenticationFilter(jwtDecoder, errorResponder),
                         UsernamePasswordAuthenticationFilter.class
                 );
 

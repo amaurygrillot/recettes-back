@@ -5,6 +5,8 @@ import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
 import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
 import ilenreste.unpeu.recettesback.models.reference.requests.IngredientRequest;
+import ilenreste.unpeu.recettesback.models.reference.requests.IngredientSearchRequest;
+import ilenreste.unpeu.recettesback.models.reference.requests.IngredientSortField;
 import ilenreste.unpeu.recettesback.models.reference.responses.IngredientResponse;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
@@ -15,6 +17,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 
 import java.util.Optional;
 
@@ -29,6 +32,19 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class IngredientServiceTest {
+
+    /**
+     * What the service must hand the repository: the caller's page number and size,
+     * and a sort built from {@link IngredientSortField} rather than whatever arrived
+     * on the incoming {@code Pageable}. Asserting this exact value is what pins the
+     * fix - a query string can no longer choose the ordering.
+     */
+    private static final Pageable SORTED_BY_NAME =
+            PageRequest.of(0, 20, Sort.by(Sort.Direction.ASC, "normalizedName"));
+
+    private static IngredientSearchRequest searchFor(String namePrefix) {
+        return new IngredientSearchRequest(namePrefix, null, null);
+    }
 
     private IngredientsRepository ingredientsRepository;
     private RecipesRepository recipesRepository;
@@ -126,27 +142,64 @@ class IngredientServiceTest {
     @Test
     void searchesTheNormalizedColumn_soAccentsAndCaseDoNotMatter() {
         Pageable pageable = PageRequest.of(0, 20);
-        when(ingredientsRepository.findByNormalizedNameStartingWithOrderByName(anyString(), any()))
+        when(ingredientsRepository.findByNormalizedNameStartingWith(anyString(), any()))
                 .thenReturn(Page.empty());
 
-        ingredientService.search("Œu", pageable);
+        ingredientService.search(searchFor("Œu"), pageable);
 
         // Prefix, not substring: a trailing wildcard uses the index on normalized_name and a
         // leading one cannot.
-        verify(ingredientsRepository).findByNormalizedNameStartingWithOrderByName(eq("œu"), eq(pageable));
+        verify(ingredientsRepository).findByNormalizedNameStartingWith(eq("œu"), eq(SORTED_BY_NAME));
     }
 
     @Test
     void returnsEverythingWhenNoQueryIsGiven() {
         Pageable pageable = PageRequest.of(0, 20);
-        when(ingredientsRepository.findAll(pageable)).thenReturn(Page.empty());
+        when(ingredientsRepository.findAll(SORTED_BY_NAME)).thenReturn(Page.empty());
 
-        ingredientService.search(null, pageable);
-        ingredientService.search("   ", pageable);
+        ingredientService.search(searchFor(null), pageable);
+        ingredientService.search(searchFor("   "), pageable);
 
-        verify(ingredientsRepository, org.mockito.Mockito.times(2)).findAll(pageable);
+        verify(ingredientsRepository, org.mockito.Mockito.times(2)).findAll(SORTED_BY_NAME);
         verify(ingredientsRepository, never())
-                .findByNormalizedNameStartingWithOrderByName(anyString(), any());
+                .findByNormalizedNameStartingWith(anyString(), any());
+    }
+
+    /**
+     * The defect this closes: {@code @PageableDefault} only supplies a default, so a
+     * supplied {@code ?sort=} reached Spring Data's property resolution directly -
+     * {@code ?sort=bogus} answered 500 on a public endpoint, and
+     * {@code ?sort=createdBy.password} ordered the list by the bcrypt column. The
+     * service must therefore ignore whatever sort arrives on the Pageable.
+     */
+    @Test
+    void ignoresTheSortOnTheIncomingPageable_soAQueryStringCannotChooseTheOrdering() {
+        Pageable hostile = PageRequest.of(0, 20, Sort.by("createdBy.password"));
+        when(ingredientsRepository.findAll(any(Pageable.class))).thenReturn(Page.empty());
+
+        ingredientService.search(searchFor(null), hostile);
+
+        ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+        verify(ingredientsRepository).findAll(captor.capture());
+        assertThat(captor.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.ASC, "normalizedName"));
+        // The page number and size still come from the caller - only the sort is overridden.
+        assertThat(captor.getValue().getPageNumber()).isZero();
+        assertThat(captor.getValue().getPageSize()).isEqualTo(20);
+    }
+
+    @Test
+    void honoursAnExplicitSortFieldAndDirection() {
+        when(ingredientsRepository.findAll(any(Pageable.class))).thenReturn(Page.empty());
+
+        ingredientService.search(
+                new IngredientSearchRequest(null, IngredientSortField.CREATED_AT, Sort.Direction.DESC),
+                PageRequest.of(2, 5));
+
+        ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+        verify(ingredientsRepository).findAll(captor.capture());
+        assertThat(captor.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.DESC, "createdAt"));
+        assertThat(captor.getValue().getPageNumber()).isEqualTo(2);
+        assertThat(captor.getValue().getPageSize()).isEqualTo(5);
     }
 
     @Test

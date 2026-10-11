@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
+import ilenreste.unpeu.recettesback.support.TestImages;
 import ilenreste.unpeu.recettesback.models.media.MediaType;
 import org.junit.jupiter.api.Test;
 

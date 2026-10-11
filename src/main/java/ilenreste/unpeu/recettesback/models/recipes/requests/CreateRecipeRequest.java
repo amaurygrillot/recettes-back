@@ -3,6 +3,7 @@ package ilenreste.unpeu.recettesback.models.recipes.requests;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import java.util.List;
@@ -25,9 +26,21 @@ import java.util.List;
  *                         ingredients
  * @param categoryIds      at least one, so every recipe is classified and
  *                         therefore browsable. A recipe that is honestly both a
- *                         dessert and a goûter carries both
+ *                         dessert and a goûter carries both.
+ *                         <p>
+ *                         {@code @NotBlank} on the <em>element</em> and not only
+ *                         {@code @NotEmpty} on the list: {@code ["" ]} is not an
+ *                         empty list, so it used to pass, and
+ *                         {@code ReferenceResolver} ignores blanks — the recipe
+ *                         was then stored with no categories at all and answered
+ *                         201, which is exactly the invariant this field exists
+ *                         to hold
  * @param tagIds           optional, and an empty list is fine
- * @param coverPictures    optional. A recipe with no photograph is still a recipe
+ * @param coverPictures    optional. {@code @NotNull} on the element because
+ *                         Hibernate Validator treats cascading into a {@code null}
+ *                         container element as a no-op, so {@code [null]} reached
+ *                         {@code RecipeService} and dereferenced there as a 500
+ *                         instead of a 400
  * @param ingredientGroups <strong>at least one, holding at least one line.</strong>
  *                         A recipe with no ingredients is not a recipe that has
  *                         not been finished — it is a recipe nobody can cook, and
@@ -48,16 +61,16 @@ public record CreateRecipeRequest(
         String recommendations,
 
         @NotEmpty
-        List<String> categoryIds,
+        List<@NotBlank String> categoryIds,
 
-        List<String> tagIds,
+        List<@NotBlank String> tagIds,
 
-        List<@Valid RecipePictureRequest> coverPictures,
-
-        @NotEmpty
-        List<@Valid RecipeIngredientGroupRequest> ingredientGroups,
+        List<@NotNull @Valid RecipePictureRequest> coverPictures,
 
         @NotEmpty
-        List<@Valid RecipeStepRequest> steps
+        List<@NotNull @Valid RecipeIngredientGroupRequest> ingredientGroups,
+
+        @NotEmpty
+        List<@NotNull @Valid RecipeStepRequest> steps
 ) {
 }

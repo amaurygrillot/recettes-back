@@ -2,7 +2,6 @@ package ilenreste.unpeu.recettesback.exceptions.handlers;
 
 import ilenreste.unpeu.recettesback.controllers.users.UserController;
 import ilenreste.unpeu.recettesback.exceptions.PasswordResetFailedException;
-import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -12,7 +11,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-import java.net.URI;
 
 /**
  * Keeps the password-reset endpoint's anti-enumeration guarantee intact through
@@ -63,11 +61,12 @@ public class UserExceptionHandler {
      * say which of the four it was and the log is the only place that can.
      */
     @ExceptionHandler(PasswordResetFailedException.class)
-    ResponseEntity<ProblemDetail> handlePasswordResetFailure(PasswordResetFailedException exception,
-                                                             HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> handlePasswordResetFailure(PasswordResetFailedException exception) {
         log.warn("Password reset refused", exception);
-        ProblemDetail body = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, RESET_FAILED_DETAIL);
-        body.setInstance(URI.create(request.getRequestURI()));
-        return ResponseEntity.badRequest().body(body);
+        // No setInstance, and so no HttpServletRequest parameter: Spring MVC fills a returned
+        // ProblemDetail instance field from the request URI when it is null. See the note on
+        // ApiExceptionHandler.problem.
+        return ResponseEntity.badRequest()
+                .body(ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, RESET_FAILED_DETAIL));
     }
 }

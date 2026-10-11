@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.controllers.media;
 
+import ilenreste.unpeu.recettesback.support.TestImages;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.users.RolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UserRolesRepository;
@@ -22,18 +23,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 
-import java.awt.Color;
-import java.awt.Graphics2D;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-import javax.imageio.ImageIO;
 
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.idOf;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -100,7 +95,7 @@ class MediaUploadIntegrationTest {
 
     private String uploadJpeg(int width, int height) {
         ResponseEntity<String> response = restTemplate.postForEntity("/media",
-                multipart(jpeg(width, height), "photo.jpg", MediaType.IMAGE_JPEG, token), String.class);
+                multipart(TestImages.jpeg(width, height), "photo.jpg", MediaType.IMAGE_JPEG, token), String.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
         String id = idOf(response.getBody());
@@ -111,7 +106,7 @@ class MediaUploadIntegrationTest {
     @Test
     void uploadRequiresAuthentication_andRecordsTheUploader() {
         ResponseEntity<String> anonymous = restTemplate.postForEntity("/media",
-                multipart(jpeg(50, 50), "photo.jpg", MediaType.IMAGE_JPEG, null), String.class);
+                multipart(TestImages.jpeg(50, 50), "photo.jpg", MediaType.IMAGE_JPEG, null), String.class);
 
         assertThat(anonymous.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
 
@@ -216,25 +211,4 @@ class MediaUploadIntegrationTest {
         });
     }
 
-    private String idOf(String json) {
-        int start = json.indexOf("\"id\":\"") + 6;
-        return json.substring(start, json.indexOf('"', start));
-    }
-
-    private byte[] jpeg(int width, int height) {
-        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-        Graphics2D graphics = image.createGraphics();
-        graphics.setColor(Color.WHITE);
-        graphics.fillRect(0, 0, width, height);
-        graphics.setColor(Color.BLUE);
-        graphics.fillRect(0, 0, Math.max(1, width / 3), Math.max(1, height / 3));
-        graphics.dispose();
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            ImageIO.write(image, "jpg", out);
-            return out.toByteArray();
-        } catch (IOException exception) {
-            throw new UncheckedIOException(exception);
-        }
-    }
 }

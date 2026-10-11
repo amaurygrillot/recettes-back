@@ -17,4 +17,14 @@ public class InvalidInputException extends RuntimeException {
     public InvalidInputException(String message) {
         super(message);
     }
+
+    /**
+     * Keeps the underlying failure attached when the 400 was decided by catching
+     * something lower down — a decoder's {@code IIOException} on truncated upload
+     * bytes, say. The cause never reaches the client (the advice sends only the
+     * message), but it is what makes the logged warning actionable.
+     */
+    public InvalidInputException(String message, Throwable cause) {
+        super(message, cause);
+    }
 }

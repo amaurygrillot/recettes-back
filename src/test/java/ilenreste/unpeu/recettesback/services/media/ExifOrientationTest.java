@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
+import ilenreste.unpeu.recettesback.support.TestImages;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;

@@ -15,7 +15,6 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
 
-import java.net.URI;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.List;
@@ -35,12 +34,15 @@ class ApiExceptionHandlerTest {
     @Test
     void resourceNotFound_mapsTo404_withTheOffendingIdInTheDetail() {
         ResponseEntity<ProblemDetail> response =
-                handler.handleNotFound(ResourceNotFoundException.of("recipe", "7b1c"), request("/recipes/7b1c"));
+                handler.handleNotFound(ResourceNotFoundException.of("recipe", "7b1c"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getDetail()).isEqualTo("No recipe with id 7b1c");
-        assertThat(response.getBody().getInstance()).isEqualTo(URI.create("/recipes/7b1c"));
+        // No assertion on getInstance(): the handlers no longer set it. Spring MVC's
+        // HttpEntityMethodProcessor fills it from the request URI when writing the response, which
+        // calling the handler directly never reaches. It is asserted over real HTTP instead, in
+        // RecipesIntegrationTest.problemResponsesCarryTheRequestUriAsTheirInstance.
     }
 
     @Test
@@ -48,7 +50,7 @@ class ApiExceptionHandlerTest {
         InvalidReferenceException exception =
                 new InvalidReferenceException("categoryIds", List.of("zzz", "aaa"));
 
-        ResponseEntity<ProblemDetail> response = handler.handleInvalidInput(exception, request("/recipes"));
+        ResponseEntity<ProblemDetail> response = handler.handleInvalidInput(exception);
 
         // 400, not 404: /recipes exists and is reachable - it is the payload that is wrong.
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
@@ -60,7 +62,7 @@ class ApiExceptionHandlerTest {
     @Test
     void resourceConflict_mapsTo409() {
         ResponseEntity<ProblemDetail> response =
-                handler.handleConflict(new ResourceConflictException("Tag is still in use"), request("/tags/1"));
+                handler.handleConflict(new ResourceConflictException("Tag is still in use"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
@@ -70,7 +72,7 @@ class ApiExceptionHandlerTest {
     @Test
     void forbiddenOperation_mapsTo403() {
         ResponseEntity<ProblemDetail> response = handler.handleForbidden(
-                new ForbiddenOperationException("Only the author may edit this recipe"), request("/recipes/1"));
+                new ForbiddenOperationException("Only the author may edit this recipe"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
         assertThat(response.getBody()).isNotNull();
@@ -82,8 +84,7 @@ class ApiExceptionHandlerTest {
         // 429 and not 503: the request is fine, this caller has simply made too many of them.
         // Telling them the server is unwell would send them looking in the wrong place.
         ResponseEntity<ProblemDetail> response = handler.handleRateLimited(
-                new RateLimitExceededException("Too many uploads.", Duration.ofMinutes(4)),
-                request("/media"));
+                new RateLimitExceededException("Too many uploads.", Duration.ofMinutes(4)));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
         assertThat(response.getBody()).isNotNull();
@@ -94,8 +95,7 @@ class ApiExceptionHandlerTest {
     @Test
     void serviceOverloaded_mapsTo503_withRetryAfter() {
         ResponseEntity<ProblemDetail> response = handler.handleOverloaded(
-                new ServiceOverloadedException("The server is busy.", Duration.ofSeconds(10)),
-                request("/media"));
+                new ServiceOverloadedException("The server is busy.", Duration.ofSeconds(10)));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
         assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("10");
@@ -106,8 +106,7 @@ class ApiExceptionHandlerTest {
         // The header is whole seconds, so a sub-second wait would floor to 0 and invite a hot retry
         // loop against the thing that just asked the caller to slow down.
         ResponseEntity<ProblemDetail> response = handler.handleRateLimited(
-                new RateLimitExceededException("Too many uploads.", Duration.ofMillis(120)),
-                request("/media"));
+                new RateLimitExceededException("Too many uploads.", Duration.ofMillis(120)));
 
         assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("1");
     }
@@ -120,7 +119,7 @@ class ApiExceptionHandlerTest {
                 "could not execute statement",
                 new RuntimeException("hibernate wrapper", new SQLException("duplicate key", "23505")));
 
-        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception, request("/tags"));
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
@@ -136,7 +135,7 @@ class ApiExceptionHandlerTest {
                 "null value in column violates not-null constraint",
                 new SQLException("not null violation", "23502"));
 
-        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception, request("/media"));
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         assertThat(response.getBody()).isNotNull();
@@ -146,7 +145,7 @@ class ApiExceptionHandlerTest {
     @Test
     void integrityViolationWithNoSqlExceptionAtAll_mapsTo500() {
         ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(
-                new DataIntegrityViolationException("no cause at all"), request("/media"));
+                new DataIntegrityViolationException("no cause at all"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
     }
@@ -161,7 +160,7 @@ class ApiExceptionHandlerTest {
         };
 
         ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(
-                new DataIntegrityViolationException("wrapped", selfReferencing), request("/media"));
+                new DataIntegrityViolationException("wrapped", selfReferencing));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
     }

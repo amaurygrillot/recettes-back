@@ -72,11 +72,30 @@ class PasswordResetServiceTest {
 
         verify(tokenService).consumeToken(user, "raw-token");
 
-        ArgumentCaptor<UpdateUserRequest> captor = ArgumentCaptor.forClass(UpdateUserRequest.class);
-        verify(userService).updateUser(eq(user), captor.capture());
-        assertThat(captor.getValue().password()).contains("NewPassword123");
-        assertThat(captor.getValue().email()).isEmpty();
-        assertThat(captor.getValue().username()).isEmpty();
+        // applyNewPassword, not updateUser: updateUser demands the caller's *current* password
+        // before it will change a password, which is exactly what somebody who has forgotten it
+        // cannot supply. The token consumed above is the proof of identity in this flow.
+        verify(userService).applyNewPassword(user, "NewPassword123");
+        verify(userService, never()).updateUser(any(), any());
+    }
+
+    /**
+     * The reset path must stay open without a current password - that is the whole point of a
+     * "forgot password" flow - while the authenticated self-service path
+     * ({@code PUT /users/update}) requires one. This asserts the reset side of that split; the
+     * {@code updateUser} side is asserted in {@code UserServiceTest}.
+     */
+    @Test
+    void resetPassword_neverNeedsTheCurrentPassword() {
+        UserEntity user = new UserEntity();
+        user.setId("user-1");
+        user.setEmail("jane@example.com");
+        when(usersRepository.findByEmail("jane@example.com")).thenReturn(Optional.of(user));
+
+        passwordResetService.resetPassword(
+                new ResetPasswordRequest("jane@example.com", "raw-token", "BrandNewPassword1"));
+
+        verify(userService).applyNewPassword(user, "BrandNewPassword1");
     }
 
     @Test

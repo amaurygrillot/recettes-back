@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.services.media;
 
+import ilenreste.unpeu.recettesback.support.TestImages;
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
 import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
@@ -32,6 +33,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -141,6 +143,34 @@ class MediaServiceTest {
         verify(storageService, org.mockito.Mockito.times(2)).delete(deleted.capture());
         assertThat(deleted.getAllValues()).hasSize(2)
                 .anySatisfy(key -> assertThat(key).endsWith("_thumb.jpg"));
+    }
+
+    /**
+     * The thumbnail write can fail on its own, and when it did the full-size file
+     * written the line before stayed on disk with no row pointing at it.
+     * <p>
+     * Nothing would ever find it again: the orphan sweep enumerates {@code media}
+     * rows, so a file with no row is invisible to it permanently. Both {@code store}
+     * calls now sit inside the same {@code try} as the insert, which is what makes
+     * the class javadoc's claim - a failure at any step stores nothing - true of
+     * this step too.
+     */
+    @Test
+    void deletesTheFullSizeFile_whenTheThumbnailWriteFails() {
+        org.mockito.Mockito.doThrow(new java.io.UncheckedIOException(
+                        new java.io.IOException("No space left on device")))
+                .when(storageService).store(argThat(key -> key != null && key.endsWith("_thumb.jpg")),
+                        any(byte[].class));
+
+        assertThatThrownBy(() -> mediaService.upload(upload(TestImages.jpeg(300, 300))))
+                .isInstanceOf(java.io.UncheckedIOException.class);
+
+        // No row, and no file left behind for it either.
+        verify(mediaRepository, never()).save(any());
+        ArgumentCaptor<String> deleted = ArgumentCaptor.forClass(String.class);
+        verify(storageService, org.mockito.Mockito.times(2)).delete(deleted.capture());
+        assertThat(deleted.getAllValues())
+                .anySatisfy(key -> assertThat(key).doesNotEndWith("_thumb.jpg"));
     }
 
     @Test

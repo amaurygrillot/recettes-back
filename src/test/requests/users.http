@@ -9,8 +9,11 @@
 ### said only "nothing threw": no id to follow, no Location to fetch, and no way to see what was
 ### actually persisted. The password hash and the `enabled` flag never cross - see UserResponse.
 ###
-### The "forgot password" flow lives in password-reset.http; it is a different feature with its
-### own, deliberately uninformative, error handling.
+### Changing the password or the email through THIS endpoint requires `currentPassword` as well -
+### see requests 9-14. Somebody who has FORGOTTEN their password obviously cannot supply it, and
+### that is a different flow: PUT /users/reinit-password, where the emailed one-time token is the
+### proof instead. It lives in password-reset.http, with its own deliberately uninformative error
+### handling, and it does not go through UpdateUserRequest at all.
 
 @baseUrl = http://localhost:8080
 @username = jane
@@ -160,8 +163,11 @@ Content-Type: application/json
     });
 %}
 
-### 9. Change the password -> 200 OK, and the old one stops working
-### Hashed on the way in; the stored value is never echoed back.
+### 9. Change the password with no currentPassword -> 403 Forbidden
+### A bearer token proves the caller held a valid login in the last hour, not that they are the
+### account holder. A password change outlives the token that authorised it, so one leaked token
+### would otherwise become permanent account takeover. 403 and not 400: the payload is well formed,
+### the caller just has not proved they may use it.
 PUT {{baseUrl}}/users/update
 Authorization: Bearer {{token}}
 Content-Type: application/json
@@ -171,13 +177,102 @@ Content-Type: application/json
 }
 
 > {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 10. Change the password with the WRONG currentPassword -> 403 Forbidden
+### Identical answer to the missing case above, deliberately: distinguishing them would make this
+### endpoint a password oracle for whoever already holds the token.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "password": "NewPassword123",
+  "currentPassword": "NotMyPassword9"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 16. Change the email with no currentPassword -> 403 Forbidden
+### Gated for the same reason: POST /auth/reinit-password mails the stored address, so replacing it
+### unverified takes away the account's only route back. Password and email are the two fields
+### whose change is permanent; the rest are not gated.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "email": "someone-else@example.com"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 17. Change the email to something that is not an email -> 400 Bad Request
+### @Email, not merely a length check: a stored address that is not an address breaks the reset
+### flow silently, and the failure surfaces as "no mail ever arrived", nowhere near this request.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "email": "not-an-email",
+  "currentPassword": "{{password}}"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 18. Change the username to one already taken -> 409 Conflict
+### Pre-checked rather than left to the unique constraint, which fires at commit - after the
+### success has already been logged - and names neither the field nor the colliding row.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "username": "someone-who-already-exists"
+}
+
+> {%
+    client.test("Returns 409 (or 200 if that username is genuinely free in your database)", function () {
+        client.assert(response.status === 409 || response.status === 200,
+            "Expected 409 but got " + response.status);
+    });
+%}
+
+### 19. Change the password WITH the current password -> 200 OK, and the old one stops working
+### The success case. Hashed on the way in; the stored value is never echoed back.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "password": "NewPassword123",
+  "currentPassword": "{{password}}"
+}
+
+> {%
     client.test("Returns 200", function () {
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         client.assert(response.body.password === undefined, "The hash must never be returned");
     });
 %}
 
-### 10. Log in with the OLD password -> 401 Unauthorized
+### 20. Log in with the OLD password -> 401 Unauthorized
 POST {{baseUrl}}/auth/login
 Content-Type: application/json
 
@@ -192,7 +287,7 @@ Content-Type: application/json
     });
 %}
 
-### 11. Log in with the NEW password -> 200 OK
+### 16. Log in with the NEW password -> 200 OK
 POST {{baseUrl}}/auth/login
 Content-Type: application/json
 
@@ -207,7 +302,7 @@ Content-Type: application/json
     });
 %}
 
-### 12. Update while carrying a token from BEFORE the last restart -> 401 Unauthorized
+### 17. Update while carrying a token from BEFORE the last restart -> 401 Unauthorized
 ### RsaKeyConfig mints a fresh key pair in memory at every startup, so every token in
 ### circulation is invalidated by a restart. A present-but-broken token is rejected rather than
 ### silently downgraded to anonymous: a caller who thinks they are authenticated and is not

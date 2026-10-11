@@ -16,6 +16,7 @@ import ilenreste.unpeu.recettesback.repositories.reference.CategoryRelationsRepo
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -50,7 +51,7 @@ import java.util.Set;
  */
 @Log4j2
 @Service
-public class CategoryService extends AbstractReferenceService<CategoryEntity> {
+public class CategoryService extends AbstractReferenceService<CategoryEntity, CategoryResponse> {
 
     private final CategoriesRepository categoriesRepository;
     private final CategoryRelationsRepository relationsRepository;
@@ -107,15 +108,30 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
         relationsRepository.deleteById(category.getId());
     }
 
+    /**
+     * Overrides the inherited {@code list()} rather than reusing it: the base
+     * maps row by row through {@link #toResponse(CategoryEntity)}, and each call
+     * of that builds a {@link CategoryTaxonomy} — two full-table queries. One
+     * snapshot for the whole list is the entire point of that class, so the
+     * listing builds it once and threads it through.
+     */
+    @Override
     @Transactional(readOnly = true)
     public List<CategoryResponse> list() {
         CategoryTaxonomy taxonomy = taxonomy();
         return findAll().stream().map(category -> toResponse(category, taxonomy)).toList();
     }
 
-    @Transactional(readOnly = true)
-    public CategoryResponse get(String id) {
-        return toResponse(findById(id), taxonomy());
+    /**
+     * Satisfies the base class's single-row mapping for the inherited
+     * {@code get(id)}. Builds its own snapshot because one row needs one parent
+     * id and there is nothing to share it with; every caller that maps more than
+     * one row passes a snapshot in instead, via
+     * {@link #toResponse(CategoryEntity, CategoryTaxonomy)}.
+     */
+    @Override
+    protected CategoryResponse toResponse(CategoryEntity category) {
+        return toResponse(category, taxonomy());
     }
 
     /**
@@ -227,11 +243,11 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
         CategoryTaxonomy taxonomy = taxonomy();
 
         Set<String> matches = new LinkedHashSet<>();
-        if (categoryId != null && !categoryId.isBlank()) {
+        if (StringUtils.hasText(categoryId)) {
             // Kept even when it names nothing: an unknown id must match no recipes, not every one.
             matches.add(categoryId);
         }
-        if (categoryName != null && !categoryName.isBlank()) {
+        if (StringUtils.hasText(categoryName)) {
             taxonomy.matchingNormalizedName(normalizer.normalize(categoryName))
                     .forEach(category -> matches.add(category.getId()));
         }
@@ -285,8 +301,7 @@ public class CategoryService extends AbstractReferenceService<CategoryEntity> {
      *                                   reachable, it is the payload that is wrong
      */
     private CategoryEntity resolveParent(String parentCategoryId, CategoryEntity category) {
-        if (parentCategoryId == null || parentCategoryId.isBlank()
-                || parentCategoryId.equals(category.getId())) {
+        if (!StringUtils.hasText(parentCategoryId) || parentCategoryId.equals(category.getId())) {
             return category;
         }
         return categoriesRepository.findById(parentCategoryId)

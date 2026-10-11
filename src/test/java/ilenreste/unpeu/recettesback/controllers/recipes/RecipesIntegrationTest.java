@@ -28,6 +28,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.unique;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -123,19 +125,6 @@ class RecipesIntegrationTest {
         categoriesRepository.deleteById(id);
     }
 
-    private String unique(String prefix) {
-        return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
-    }
-
-    private HttpEntity<String> body(String json, String authorization) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        if (authorization != null) {
-            headers.set(HttpHeaders.AUTHORIZATION, authorization);
-        }
-        return new HttpEntity<>(json, headers);
-    }
-
     private ResponseEntity<String> post(String path, String json, String token, HttpStatus expected) {
         ResponseEntity<String> response = restTemplate.postForEntity(path, body(json, token), String.class);
         assertThat(response.getStatusCode()).as("POST %s -> %s", path, response.getBody()).isEqualTo(expected);
@@ -146,10 +135,157 @@ class RecipesIntegrationTest {
         return restTemplate.exchange(path, HttpMethod.PUT, body(json, token), String.class);
     }
 
-    private String idOf(ResponseEntity<String> response) {
-        String json = response.getBody();
-        int start = json.indexOf("\"id\":\"") + 6;
-        return json.substring(start, json.indexOf('"', start));
+    /**
+     * Replacing a non-empty collection with another non-empty one, which nothing
+     * covered before: the only PUTs in this suite changed the title, set or cleared
+     * the introduction, or sent an empty array.
+     * <p>
+     * That left the one path that both deletes and re-inserts the same
+     * {@code (recipe_id, position)} keys unexercised. {@code replaceSteps} clears
+     * the collection and re-adds children renumbered {@code 0..n-1}, against
+     * {@code UNIQUE (recipe_id, position)} on {@code recipe_steps} — so it works
+     * only because Hibernate flushes orphan-removal DELETEs before INSERTs
+     * ({@code ActionQueue$OrderedActions} puts {@code OrphanRemovalAction} ahead of
+     * {@code EntityInsertAction}). That is internal ordering we do not control, and
+     * an upgrade that changed it would break every recipe edit with nothing to say
+     * so. Hence a test that actually reuses the positions.
+     */
+    @Test
+    void replacesANonEmptyStepListWithAnotherOne_reusingTheSamePositions() {
+        String id = createRecipe("""
+                {
+                  "title": "%s",
+                  "categoryIds": ["%s"],
+                  "ingredientGroups": [
+                    {"ingredients": [{"ingredientId": "%s", "quantity": 1}]}
+                  ],
+                  "steps": [
+                    {"instruction": "Premiere etape"},
+                    {"instruction": "Deuxieme etape"},
+                    {"instruction": "Troisieme etape"}
+                  ]
+                }
+                """.formatted(unique("Tarte a remplacer"), categoryId, ingredientId), authorToken);
+
+        // Three steps at positions 0,1,2 become two at positions 0,1 - both of which already exist.
+        ResponseEntity<String> response = put("/recipes/" + id, """
+                {"steps": [{"instruction": "Nouvelle premiere"}, {"instruction": "Nouvelle deuxieme"}]}
+                """, authorToken);
+
+        assertThat(response.getStatusCode()).as("PUT -> %s", response.getBody()).isEqualTo(HttpStatus.OK);
+
+        String read = restTemplate.getForObject("/recipes/" + id, String.class);
+        assertThat(read).contains("Nouvelle premiere", "Nouvelle deuxieme");
+        assertThat(read).doesNotContain("Premiere etape", "Deuxieme etape", "Troisieme etape");
+        // In the order sent, which is what @OrderBy("position") plus the renumbering guarantees.
+        assertThat(read.indexOf("Nouvelle premiere")).isLessThan(read.indexOf("Nouvelle deuxieme"));
+    }
+
+    /** The same reuse-the-positions case for the other two cascading collections. */
+    @Test
+    void replacesANonEmptyIngredientGroupListWithAnotherOne() {
+        String id = createRecipe("""
+                {
+                  "title": "%s",
+                  "categoryIds": ["%s"],
+                  "ingredientGroups": [
+                    {"title": "Pour la pate", "ingredients": [{"ingredientId": "%s", "quantity": 1}]},
+                    {"title": "Pour la garniture", "ingredients": [{"ingredientId": "%s", "quantity": 2}]}
+                  ],
+                  "steps": [{"instruction": "Melanger"}]
+                }
+                """.formatted(unique("Tarte groupes"), categoryId, ingredientId, ingredientId), authorToken);
+
+        ResponseEntity<String> response = put("/recipes/" + id, """
+                {"ingredientGroups": [
+                   {"title": "Tout ensemble", "ingredients": [{"ingredientId": "%s", "quantity": 3}]}
+                 ]}
+                """.formatted(ingredientId), authorToken);
+
+        assertThat(response.getStatusCode()).as("PUT -> %s", response.getBody()).isEqualTo(HttpStatus.OK);
+
+        String read = restTemplate.getForObject("/recipes/" + id, String.class);
+        assertThat(read).contains("Tout ensemble");
+        assertThat(read).doesNotContain("Pour la pate", "Pour la garniture");
+    }
+
+    /**
+     * A blank id inside {@code categoryIds} used to pass validation and then
+     * resolve to nothing, so the recipe was stored with no categories at all and
+     * answered 201 - the exact invariant {@code @NotEmpty} is there to hold.
+     * {@code ReferenceResolver} ignores blanks, so the list was non-empty on the way
+     * in and empty by the time it reached the entity.
+     */
+    @Test
+    void rejectsABlankCategoryId_ratherThanStoringAnUncategorisedRecipe() {
+        ResponseEntity<String> response = restTemplate.postForEntity("/recipes", body("""
+                {"title": "Tarte", "categoryIds": [""],
+                 "ingredientGroups": [{"ingredients": [{"ingredientId": "%s"}]}],
+                 "steps": [{"instruction": "Melanger"}]}
+                """.formatted(ingredientId), authorToken), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    /** And on update, where it would have silently uncategorised a working recipe with a 200. */
+    @Test
+    void rejectsABlankCategoryIdOnUpdate_ratherThanClearingEveryCategory() {
+        String id = createRecipe(minimalRecipeJson(unique("Tarte a garder")), authorToken);
+
+        assertThat(put("/recipes/" + id, "{\"categoryIds\": [\"\"]}", authorToken).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+
+        // Still classified, so still reachable from a category filter.
+        assertThat(restTemplate.getForObject("/recipes?categoryId=" + categoryId, String.class))
+                .contains(id);
+    }
+
+    /**
+     * A {@code null} element survived validation because Hibernate Validator treats
+     * cascading into one as a no-op, and then {@code RecipeService} dereferenced it
+     * - a 500 for what is plainly a bad payload.
+     */
+    @Test
+    void rejectsANullElementInsideACollection_asBadRequestAndNotAsAServerError() {
+        assertThat(restTemplate.postForEntity("/recipes", body("""
+                {"title": "Tarte", "categoryIds": ["%s"],
+                 "ingredientGroups": [{"ingredients": [{"ingredientId": "%s"}]}],
+                 "steps": [null]}
+                """.formatted(categoryId, ingredientId), authorToken), String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+
+        assertThat(restTemplate.postForEntity("/recipes", body("""
+                {"title": "Tarte", "categoryIds": ["%s"],
+                 "ingredientGroups": [null],
+                 "steps": [{"instruction": "Melanger"}]}
+                """.formatted(categoryId), authorToken), String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+
+        assertThat(restTemplate.postForEntity("/recipes", body("""
+                {"title": "Tarte", "categoryIds": ["%s"], "coverPictures": [null],
+                 "ingredientGroups": [{"ingredients": [{"ingredientId": "%s"}]}],
+                 "steps": [{"instruction": "Melanger"}]}
+                """.formatted(categoryId, ingredientId), authorToken), String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    /**
+     * Where the {@code instance} field is verified now that the handlers no longer
+     * set it by hand.
+     * <p>
+     * Spring MVC's {@code HttpEntityMethodProcessor} fills it from the request URI
+     * when it is null, which is why {@code ApiExceptionHandler} does not - but that
+     * only happens while writing a real response, so a unit test calling a handler
+     * directly cannot see it. This can.
+     */
+    @Test
+    void problemResponsesCarryTheRequestUriAsTheirInstance() {
+        ResponseEntity<String> response =
+                restTemplate.getForEntity("/recipes/no-such-recipe-id", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(response.getBody()).contains("\"instance\":\"/recipes/no-such-recipe-id\"");
     }
 
     private String minimalRecipeJson(String title) {
@@ -170,6 +306,11 @@ class RecipesIntegrationTest {
         String id = idOf(post("/recipes", json, token, HttpStatus.CREATED));
         createdRecipeIds.add(id);
         return id;
+    }
+
+    /** Adapts the shared {@code idOf(String)} to this suite, which asserts on whole responses. */
+    private String idOf(ResponseEntity<String> response) {
+        return ilenreste.unpeu.recettesback.support.HttpTestSupport.idOf(response.getBody());
     }
 
     @Test

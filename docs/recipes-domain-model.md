@@ -989,3 +989,58 @@ set or a size. `assertThat(response.steps()).extracting(Step::instruction).conta
   an entity, `RoleEntity`'s self-referential `roles` collection, and `RolesRepository`/`UserRolesRepository` declaring
   `UUID` id types for `String`-id entities. All out of scope here, all load-bearing for anything creating users or
   roles. See [optional-authentication.md](optional-authentication.md#pre-existing-warts-the-tests-had-to-work-around).
+
+## Replacing a child collection: why `RecipeService` flushes
+
+`PUT /recipes/{id}` replaces a whole collection when one is present — steps, ingredient groups, cover pictures. The
+implementation clears the managed collection and rebuilds it, renumbering `position` from zero, which is the contract
+the API advertises.
+
+That combination is in direct tension with the schema. `recipe_steps`, `recipe_ingredient_groups` and
+`recipe_cover_pictures` each carry `UNIQUE (recipe_id, position)` (and `recipe_step_pictures` carries
+`UNIQUE (step_id, position)`). Edit a three-step recipe down to two and the replacements want positions 0 and 1 —
+which the rows being deleted still hold.
+
+**Hibernate orders entity INSERTs before entity DELETEs inside a single flush.** So the insert of the new position 0
+reached the database while the old position 0 was still there, hit the constraint, and the edit came back
+`409 "That value already exists."` — on essentially every ordinary edit, because almost every edit re-uses position 0.
+
+`RecipeService.clearForReplacement` therefore clears the collection and calls `EntityManager.flush()` before the
+replacements are built, so the DELETEs go out in their own statement batch.
+
+### The analysis that got this wrong
+
+Worth recording, because reading the action ordering alone points the other way. `ActionQueue$OrderedActions` declares:
+
+```
+OrphanCollectionRemoveAction, OrphanRemovalAction, EntityInsertAction, EntityUpdateAction, ..., EntityDeleteAction
+```
+
+`OrphanRemovalAction` sits at position 2, *ahead* of inserts — which reads like a guarantee that orphan removal always
+precedes insertion. It is not. `DefaultDeleteEventListener` only queues an `OrphanRemovalAction` when the persistence
+context is in its remove-orphans-before-updates phase (`PersistenceContext.isRemovingOrphanBeforeUpdates()`); a cascade
+from a cleared collection is not in that phase, so the deletes land in the ordinary `EntityDeleteAction` list, which
+runs **last**.
+
+The lesson is the one already in `CLAUDE.md` about hand-written `@Query` methods, in a new place: this is not
+answerable by reading, only by running. The test that settles it is
+`RecipesIntegrationTest.replacesANonEmptyStepListWithAnotherOne_reusingTheSamePositions`, which deliberately re-uses
+the positions. Every PUT test before it changed the title, set or cleared the introduction, or sent an empty array —
+none of which ever re-inserts at an occupied position, which is why the bug shipped.
+
+### Alternatives rejected
+
+- **Drop the unique constraint.** It is the only thing stopping two steps claiming position 3, which would make
+  `@OrderBy("position")` non-deterministic — the exact failure the constraint was added for.
+- **`DEFERRABLE INITIALLY DEFERRED`.** Correct in principle and PostgreSQL supports it, but `ddl-auto=update` cannot
+  express it, so it would need a hand-run script in `docs/sql/` plus a matching note on every fresh clone. A one-line
+  flush in the one method that needs it is the smaller change.
+- **Diff the incoming list against the stored rows and mutate in place.** Avoids the delete entirely and would be the
+  right answer if these collections were large. They hold a handful of rows and the diffing code would be considerably
+  harder to read than the flush.
+- **Renumber from the current maximum instead of from zero.** Positions would then drift upwards forever and stop
+  meaning "the third step".
+
+The introduction is a `@OneToOne` whose owning FK (`recipe_introductions.recipe_id`) is also unique, so it would have
+the same problem — `replaceIntroduction` avoids it by mutating the existing row's text in place rather than deleting
+and re-creating, and only sets the association to `null` when the introduction is genuinely being removed.
