@@ -50,6 +50,8 @@ public class UserController {
     public ResponseEntity<UserResponse> createUser(@Valid @RequestBody CreateUserRequest request) {
         log.info("Creating a new user account");
         UserResponse created = userService.createUser(request);
+        // Here rather than in the service: this line runs after the transaction has committed.
+        log.info("Created user {}", created.id());
         return ResponseEntity.created(URI.create("/users/" + created.id())).body(created);
     }
 

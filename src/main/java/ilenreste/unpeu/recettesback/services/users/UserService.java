@@ -19,6 +19,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -97,15 +98,18 @@ public class UserService {
 
         // Written through UserRolesEntity, not user.getRoles().add(...): user_roles is mapped both
         // as the @ManyToMany join table and as an entity with its own id column, so a @ManyToMany
-        // insert leaves that NOT NULL id null and fails.
+        // insert leaves that NOT NULL id null and fails. That includes adding to the managed
+        // saved.getRoles() "just for the response": Hibernate flushes the dirty collection at
+        // commit, which is why the role is handed to the mapper instead.
         UserRolesEntity link = new UserRolesEntity();
         link.setUser(saved);
         link.setRole(role);
         userRolesRepository.save(link);
-        saved.getRoles().add(role);
 
-        log.info("Created user {} with role {}", saved.getId(), DEFAULT_ROLE);
-        return mapper.toResponse(saved);
+        // Debug, not info: the transaction has not committed yet, so "created" is not true until
+        // the service returns. The controller logs that.
+        log.debug("Linked user {} to role {}", saved.getId(), DEFAULT_ROLE);
+        return mapper.toResponse(saved, List.of(role));
     }
 
     /**
