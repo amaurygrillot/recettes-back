@@ -85,6 +85,10 @@ project drops below 90%. Whenever a request or response format is added or chang
 `lombok.config` sets `lombok.addLombokGeneratedAnnotation = true`, so JaCoCo skips generated getters and setters —
 without it the gate increasingly measures entity boilerplate instead of the hand-written code it exists to protect.
 
+**The tests run against the development PostgreSQL**, not an isolated database — there is no test profile yet. Tests
+that commit rows must clean up after themselves. This is a known, accepted limitation, written up in
+[docs/testing-database.md](docs/testing-database.md).
+
 Two conventions worth knowing before adding tests:
 
 - **Hand-written `@Query` methods need a `@DataJpaTest`**, run against the real PostgreSQL with
