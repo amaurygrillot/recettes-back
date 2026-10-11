@@ -235,15 +235,17 @@ is never created and **every read of the table fails**:
 ERROR: column cre1_0.parent_category_id does not exist
 ```
 
-Run [sql/rename-superior-category-to-parent.sql](sql/rename-superior-category-to-parent.sql) once against any database
-whose `categories_relation` predates the rename. It is a `RENAME COLUMN`, not an add-copy-drop: the type, the
-`NOT NULL` and the foreign key come across untouched and there is nothing left to clean up afterwards. The script is
-idempotent and also renames the one index this project names itself.
+No script for it is kept in the repository. No deployment of this API exists yet, so the only affected databases are
+local ones, and a local database can either be dropped and let Hibernate recreate the table under the new name, or have
+the column renamed by hand:
 
-A fresh database needs none of it — Hibernate creates the table from the entity, under the new name. This is a one-off
-either way: no deployment of this API exists yet, so the only affected databases are local ones. That it needed a
-hand-written script at all is the cost of having no migration tool, paid for the first time here and noted in
-[recipes-domain-model.md](recipes-domain-model.md#still-open-after-implementation).
+```sql
+ALTER TABLE categories_relation RENAME COLUMN superior_category_id TO parent_category_id;
+ALTER INDEX idx_categories_relation_superior RENAME TO idx_categories_relation_parent;
+```
+
+A fresh database needs none of it. That it needed hand-written SQL at all is the cost of having no migration tool,
+paid for the first time here and noted in [recipes-domain-model.md](recipes-domain-model.md#still-open-after-implementation).
 
 ## One ordering, shared
 

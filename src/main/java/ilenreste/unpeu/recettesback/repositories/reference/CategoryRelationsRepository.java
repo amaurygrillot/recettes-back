@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.repositories.reference;
 
+import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
 import ilenreste.unpeu.recettesback.entities.reference.CategoryRelationEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -11,9 +12,9 @@ import java.util.Map;
 /**
  * The category tree's edges.
  * <p>
- * Note what is <strong>not</strong> here: no {@code findChildrenOf}, no
- * {@code findDescendantsOf}. Every hierarchy read loads the whole edge list once
- * with {@link #findAllEdges()} and walks it in memory, because the alternative —
+ * There is a {@link #findChildrenOf(String)} for one level, and deliberately no
+ * {@code findDescendantsOf}. A whole-tree read loads the edge list once with
+ * {@link #findAllEdges()} and walks it in memory, because the alternative —
  * one query per level — is an N+1 whose depth is chosen by the data. Categories
  * are a closed set of tens of rows read on every navigation render, so a single
  * two-column scan is both cheaper and simpler than a recursive query. See
@@ -54,6 +55,22 @@ public interface CategoryRelationsRepository extends JpaRepository<CategoryRelat
         }
         return parents;
     }
+
+    /**
+     * The direct children of one category — a single level, not the subtree —
+     * ordered by name like every other reference listing.
+     * <p>
+     * The {@code <>} is load-bearing for the same reason as in
+     * {@link #hasSubcategories(String)}: a main category is its own parent, so
+     * without it a root would be returned as its own child. A category with no
+     * subcategories, and an id that matches nothing, both give an empty list.
+     */
+    @Query("""
+            SELECT r.category FROM CategoryRelationEntity r
+            WHERE r.parentCategory.id = :parentCategoryId AND r.categoryId <> :parentCategoryId
+            ORDER BY r.category.normalizedName
+            """)
+    List<CategoryEntity> findChildrenOf(String parentCategoryId);
 
     /**
      * Whether anything hangs off this category — the guard that stops a delete
