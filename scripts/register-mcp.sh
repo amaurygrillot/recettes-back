@@ -8,13 +8,14 @@
 # Usage: scripts/register-mcp.sh -u USERNAME [-p PASSWORD] [-b BASE_URL] [-n NAME] [-s SCOPE]
 #   -u  account to log in with (required)
 #   -p  its password; omit to be prompted without echo, which keeps it out of the shell history
-#   -b  where the API listens (default http://localhost:8080)
+#   -b  where the API listens (default: http://localhost:8080, or under WSL2 NAT, where localhost does not reach
+#       Windows, the Windows host's address)
 #   -n  name of the MCP server entry in Claude Code (default recettes)
 #   -s  Claude Code config scope: local, project or user (default local)
 
 set -euo pipefail
 
-base_url="http://localhost:8080"
+base_url=""
 name="recettes"
 scope="local"
 username=""
@@ -46,10 +47,24 @@ if [[ -z "$password" ]]; then
     echo
 fi
 
+# Any HTTP answer counts as reachable; only a failure to connect does not.
+reachable() { curl -s -o /dev/null --max-time 2 "$1/health"; }
+
+if [[ -z "$base_url" ]]; then
+    base_url="http://localhost:8080"
+    if ! reachable "$base_url"; then
+        # WSL2 in NAT mode: localhost is the Linux VM, Windows is the default gateway.
+        gateway="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+        if [[ -n "$gateway" ]] && reachable "http://$gateway:8080"; then
+            base_url="http://$gateway:8080"
+            echo "localhost:8080 is unreachable; using the Windows host at $base_url"
+        fi
+    fi
+fi
 base_url="${base_url%/}"
 
 # Minimal JSON string escaping: backslash first, then the double quote.
-json_escape() { printf '%s' "$1" | sed -e 's/\/\\/g' -e 's/"/\\"/g'; }
+json_escape() { printf '%s' "$1" | sed -e 's/[\]/&&/g' -e 's/"/\\"/g'; }
 
 echo "Logging in to $base_url/auth/login as $username..."
 body_file="$(mktemp)"
