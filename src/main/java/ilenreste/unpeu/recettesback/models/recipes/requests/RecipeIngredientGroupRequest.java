@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.models.recipes.requests;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.Size;
@@ -20,6 +21,7 @@ import java.util.List;
 public record RecipeIngredientGroupRequest(
 
         @Size(max = 200)
+        @JsonProperty(required = false)
         String title,
 
         @NotEmpty

@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.models.reference.requests;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
@@ -18,6 +19,7 @@ public record IngredientRequest(
         @Size(min = 1, max = 100)
         String name,
 
+        @JsonProperty(required = false)
         String iconMediaId
 ) {
 }
