@@ -7,6 +7,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.authentication.AccountStatusException;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.access.AccessDeniedHandler;
@@ -74,6 +76,11 @@ import java.net.URI;
 public class ProblemDetailErrorResponder implements AuthenticationEntryPoint, AccessDeniedHandler {
 
     public static final String UNAUTHORIZED_DETAIL = "Authentication is required to access this resource.";
+    /**
+     * Answers a failed login. Unknown username, wrong password and a disabled account all share
+     * it: telling them apart would let a caller discover which usernames exist.
+     */
+    public static final String INVALID_CREDENTIALS_DETAIL = "Invalid username or password.";
     public static final String FORBIDDEN_DETAIL = "You are not allowed to perform this operation.";
 
     private final ObjectMapper objectMapper;
@@ -85,6 +92,13 @@ public class ProblemDetailErrorResponder implements AuthenticationEntryPoint, Ac
     @Override
     public void commence(HttpServletRequest request, HttpServletResponse response,
                          AuthenticationException authenticationException) throws IOException {
+        if (authenticationException instanceof BadCredentialsException
+                || authenticationException instanceof AccountStatusException) {
+            log.warn("Login rejected on {}: {}", request.getRequestURI(),
+                    authenticationException.getClass().getSimpleName());
+            write(request, response, HttpStatus.UNAUTHORIZED, INVALID_CREDENTIALS_DETAIL);
+            return;
+        }
         log.debug("Unauthenticated request to {} {}", request.getMethod(), request.getRequestURI());
         write(request, response, HttpStatus.UNAUTHORIZED, UNAUTHORIZED_DETAIL);
     }

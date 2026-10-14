@@ -118,6 +118,22 @@ class OptionalAuthenticationTest {
                 "/auth/login", body(wrongPassword, null), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody()).contains(ProblemDetailErrorResponder.INVALID_CREDENTIALS_DETAIL);
+    }
+
+    /**
+     * A failed login must not claim "authentication is required" - it is the route that provides
+     * authentication. Unknown usernames answer exactly like wrong passwords, so the message does not
+     * reveal which usernames exist.
+     */
+    @Test
+    void login_returnsTheSameMessage_whenTheUsernameDoesNotExist() {
+        ResponseEntity<String> response = restTemplate.postForEntity("/auth/login",
+                body("{\"username\":\"no-such-user-%s\",\"password\":\"whatever\"}"
+                        .formatted(account.username()), null), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody()).contains(ProblemDetailErrorResponder.INVALID_CREDENTIALS_DETAIL);
     }
 
     /**

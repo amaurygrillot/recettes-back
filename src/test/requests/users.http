@@ -115,6 +115,24 @@ Content-Type: application/json
     });
 %}
 
+### 5b. Log in with an unknown username -> 401 "Invalid username or password."
+### Same body as a wrong password, so the response never reveals which usernames exist.
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "no-such-user",
+  "password": "whatever"
+}
+
+> {%
+    client.test("Returns 401 with the credentials message", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+        client.assert(response.body.detail === "Invalid username or password.",
+            "Unexpected detail: " + response.body.detail);
+    });
+%}
+
 ### 6. Update one field -> 200 OK, everything else untouched
 ### A partial update: an absent field means "leave it alone", never "clear it".
 PUT {{baseUrl}}/users/update
