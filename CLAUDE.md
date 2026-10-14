@@ -244,3 +244,10 @@ The API is a stateless resource server that also issues its own JWTs (self-conta
    `docs/security-error-handling.md`. This is also why a plain `MockMvcBuilders.standaloneSetup(...)` controller test
    (no security filter chain) can't catch this class of bug — it needs a real `@SpringBootTest` hitting the actual
    embedded server.
+
+### MCP server
+
+`POST /mcp` serves MCP tools (Spring AI, Streamable HTTP, stateless) over the same JWT filter chain; the tools in
+`RecipeMcpTools` / `ReferenceMcpTools` delegate to the services. When you add or change a request record those tools
+take, mark every genuinely optional component `@JsonProperty(required = false)` — the generated tool schema treats all
+components as required otherwise. See [docs/mcp-server.md](docs/mcp-server.md).

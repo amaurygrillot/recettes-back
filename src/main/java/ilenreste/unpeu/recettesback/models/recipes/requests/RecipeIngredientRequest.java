@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.models.recipes.requests;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
@@ -33,11 +34,14 @@ public record RecipeIngredientRequest(
         // without inviting nonsense precision, and rejecting it here beats a database error.
         @DecimalMin("0.0")
         @Digits(integer = 7, fraction = 3)
+        @JsonProperty(required = false)
         BigDecimal quantity,
 
+        @JsonProperty(required = false)
         String unitId,
 
         @Size(max = 200)
+        @JsonProperty(required = false)
         String note
 ) {
 }
