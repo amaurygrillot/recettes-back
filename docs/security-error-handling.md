@@ -33,7 +33,8 @@ Http403ForbiddenEntryPoint : Pre-authenticated entry point called. Rejecting acc
 This affects **every** `@Valid`-annotated endpoint, not just the password reset routes — it was just never exercised
 against the real running app (with its full security filter chain) until now. It does *not* affect the 400s controllers
 build by hand with `ResponseEntity.status(400).build()`
-(`UserController`/`AuthenticationController`'s `IllegalStateException` catches): those call
+(`UserController`/`AuthenticationController`'s `IllegalStateException` catches; today the advices in
+`exceptions`): those call
 `setStatus` directly, with no `sendError` and therefore no forward.
 
 ## Fix

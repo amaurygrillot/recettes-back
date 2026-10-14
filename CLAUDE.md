@@ -26,10 +26,28 @@ In particular, avoid collapsing every error into 400/500 — pick the code that 
 - `401 Unauthorized` — missing/invalid credentials or token.
 - `403 Forbidden` — authenticated but not allowed to perform the action (e.g. a disabled account, wrong role).
 - `400 Bad Request` — reserved for malformed/invalid input (validation failures).
+- `429 Too Many Requests` — the request is fine but *this caller* has made too many of them (`POST /media` is rate
+  limited per account). Distinct from `503`, which says the *server* is momentarily at capacity; both carry
+  `Retry-After`.
 - `500 Internal Server Error` — reserved for unexpected/unhandled failures, not for expected business-rule rejections.
 
 When adding or touching an endpoint, check that its error branches map to the specific status that matches what actually
 happened, rather than reusing a generic catch-all.
+
+### Query parameters
+
+Name a parameter for what goes in it. `q` is not a name — it says nothing about what is matched or how, and on this API
+the answer was not guessable either way (`/recipes?q=` matched the title only, `/ingredients?q=` was a prefix against
+the normalized name). They are `title` and `namePrefix` now.
+
+**Never let a query string choose a sort property against a hand-written `@Query`.** Spring Data's `Pageable` binding
+appends whatever property it is given, so `?sort=bogus` throws a `SemanticException` — a 500 on a public endpoint from
+a typo — and `?sort=some.private.column` orders by something no response exposes. Bind an enum instead, as
+`RecipeSortField` does; an unknown value is then a 400 and the sortable set has one place to live.
+
+Once an endpoint's criteria outgrow three or four `@RequestParam`s, bind them into a request **record** instead.
+Spring binds a non-annotated object from the query string by name, so the wire format is unchanged, and the criteria
+gain a place to be named, documented and validated together — see `RecipeSearchRequest`.
 
 ### Documentation
 
@@ -53,6 +71,8 @@ All commands use the Maven Wrapper (`mvnw.cmd` on Windows, `./mvnw` in a POSIX s
 
 There is no linter/formatter plugin configured in `pom.xml` (no Checkstyle/Spotless).
 
+`mvnw` needs `JAVA_HOME` pointed at a JDK 25 before it will run.
+
 ### Testing
 
 Testing is a priority for this project, with a target of >90% **line** coverage (not class coverage — a class with
@@ -61,6 +81,23 @@ the `jacoco-maven-plugin` in [pom.xml](pom.xml): `./mvnw test` (and therefore `.
 generates an HTML report at `target/site/jacoco/index.html`, and **fails the build** if line coverage across the whole
 project drops below 90%. Whenever a request or response format is added or changed (a controller endpoint, a DTO in
 `models`, etc.), add or update a matching sample request in `src/test/requests` alongside the actual test code.
+
+`lombok.config` sets `lombok.addLombokGeneratedAnnotation = true`, so JaCoCo skips generated getters and setters —
+without it the gate increasingly measures entity boilerplate instead of the hand-written code it exists to protect.
+
+**The tests run against the development PostgreSQL**, not an isolated database — there is no test profile yet. Tests
+that commit rows must clean up after themselves. This is a known, accepted limitation, written up in
+[docs/testing-database.md](docs/testing-database.md).
+
+Two conventions worth knowing before adding tests:
+
+- **Hand-written `@Query` methods need a `@DataJpaTest`**, run against the real PostgreSQL with
+  `@AutoConfigureTestDatabase(replace = NONE)`. A mocked repository proves nothing about JPQL, and the recipes listing
+  shipped with a query that failed on *every* unfiltered request until such a test caught it. `@Import` both
+  `JpaAuditingConfig` and `CurrentUserService`, or audited inserts fail on `NOT NULL` columns.
+- **Anything involving the security filter chain needs a real `@SpringBootTest`** with `RANDOM_PORT`. A
+  `standaloneSetup` MockMvc test has no filter chain at all. Those tests create real rows over real HTTP with no
+  transaction to roll back, so use `TestAccount`, which gives each run a unique account and cleans up after itself.
 
 Sample requests in `src/test/requests` are `.http` files (IntelliJ HTTP Client / VS Code REST Client syntax:
 `@variable = value` definitions, `###`-separated request blocks). They are organized **one file per endpoint or feature
@@ -77,7 +114,9 @@ the scenario.
 The app expects PostgreSQL reachable at the URL/credentials in
 [application.properties](src/main/resources/application.properties). `spring.jpa.hibernate.ddl-auto=update` means
 Hibernate creates/updates the schema automatically from the JPA entities — there are no migration scripts (no
-Flyway/Liquibase). A `USER` row must exist in the `roles` table for `POST /users/create` to succeed
+Flyway/Liquibase). Update mode only ever *adds*, so a change it cannot express — renaming a column, narrowing a type —
+needs SQL run by hand; those scripts live in `docs/sql/`, next to the document explaining the change, and each says at
+its top when it has to be run. A `USER` row must exist in the `roles` table for `POST /users/create` to succeed
 (`UserService.createUser` looks it up by name and assigns it to every new user; it does not create the role itself).
 
 ### Local secrets (`.env`)
@@ -93,23 +132,68 @@ parse the extension-less `.env` file as `key=value` Java `.properties` syntax. C
 
 ## Architecture
 
-Standard layered structure under `ilenreste.unpeu.recettesback`:
+Layered structure under `ilenreste.unpeu.recettesback`, with each layer **subdivided by domain**:
 
-- `controllers` — REST endpoints (`AuthenticationController`, `UserController`). Thin: validate/delegate to a service,
-  translate exceptions to HTTP statuses (`IllegalStateException` → 400, anything else → 500).
-- `services` — business logic (`UserService` for create/update, `DatabaseUserDetailsService` implementing Spring
-  Security's `UserDetailsService` for login lookups, `PasswordResetService`/`PasswordResetTokenService` for the
-  forgot-password flow, `MailService`/`SmtpMailService` for outgoing email). All service classes live directly under
-  `services` — do not create feature-specific packages (e.g. `mail`, `notifications`) for them, even for a single
-  interface + implementation pair.
-- `repositories` — Spring Data JPA repositories (`UsersRepository`, `RolesRepository`, `UserRolesRepository`).
-- `entities` — JPA entities (`UserEntity`, `RoleEntity`, `UserRolesEntity`). Users and roles are many-to-many via the
-  `user_roles` join table.
-- `models` — DTOs, split into `auth` (`AuthenticationRequest`) and `users` (`CustomUserDetails`, and
-  `users.requests` for `CreateUserRequest`/`UpdateUserRequest`). `UpdateUserRequest` uses `Optional<T>` fields for
-  partial updates — only present fields are applied in `UserService.updateUser`.
-- `configuration` — Spring `@Configuration` classes wiring security and JWT infrastructure.
-- `filters` — `JwtAuthenticationFilter`, a custom `OncePerRequestFilter`.
+- `controllers` — REST endpoints. Thin: validate/delegate to a service; they contain no `try/catch`, because
+  exception-to-status mapping is centralised (see [docs/api-error-handling.md](docs/api-error-handling.md)).
+- `services` — business logic.
+- `repositories` — Spring Data JPA repositories.
+- `entities` — JPA entities. `AuditableEntity` (`@MappedSuperclass`) stays at the `entities` root: it is the shared
+  supertype, owned by no domain.
+- `models` — DTOs (`requests`/`responses` sub-packages where a domain has both).
+- `mappers` — entity ↔ DTO translation.
+
+**A service returns DTOs, never entities, and a controller never holds a mapper.** An entity handed upwards is a handle
+on the whole object graph, and `spring.jpa.open-in-view=false` means the transaction is already closed by the time the
+controller runs, so touching any lazy association there is a `LazyInitializationException` — a 500 — with nothing in
+the controller to warn you which associations those are. Map inside the transaction that loaded the row.
+
+**Every service method returns a usable value or throws.** No `null` to mean failure, no boolean for the caller to
+test, every write transactional so a failure leaves nothing half-written. That contract is what lets controllers hold
+no `if (result == null)` branches without being optimistic about it; it is stated in full, with the reasoning and the
+four places the codebase did not honour it, in
+[docs/service-controller-contract.md](docs/service-controller-contract.md).
+
+### Domain sub-packages
+
+`controllers`, `services`, `repositories`, `entities`, `models` and `mappers` each split into **the same domain
+names** — `recipes`, `reference`, `media`, `users` — so the tree reads either way round: "all the recipe classes" or
+"all the repositories". A new class goes in `<layer>/<domain>/`.
+
+Use those four names; do not invent a per-feature package (e.g. `mail`, `notifications`) for one interface plus its
+implementation — `MailService`/`SmtpMailService` belong in `services/users`, next to the password-reset flow that is
+their only caller.
+
+> This supersedes the earlier rule that every service lived directly under a flat `services` package. That rule was
+> written when six flat files were perfectly readable; the recipes feature takes it to fourteen across four unrelated
+> domains, while every other layer is grouped. The trade-off inverted — see
+> [docs/recipes-domain-model.md](docs/recipes-domain-model.md#package-layout).
+
+`configuration`, `properties`, `bootstrap`, `filters` and `exceptions` are **not** split by domain. They are
+cross-cutting — `SecurityFilterConfig` is not a recipes class or a users class, and `ResourceNotFoundException` is
+thrown by every domain. Splitting *them* that way would produce single-class packages that answer no question. Four of
+the five are flat; `exceptions` has one sub-package, for the reason below.
+
+Each of those five holds one kind of thing, and `configuration` is the one that attracts strays. The test is **does
+this class declare a bean or wire something?** If not, it is not configuration:
+
+- `configuration` — `@Configuration` classes and nothing else: `SecurityFilterConfig`, `SecurityBeansConfig`,
+  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
+  anything reasoning about a *window* of time (`UploadRateLimiter`) injects it, because a test that cannot move the
+  clock can only assert a window by waiting it out.
+- `properties` — `@ConfigurationProperties` records. Bound data, no logic, no beans; picked up by the
+  `@ConfigurationPropertiesScan` on the application class. Not `models`, which is for the types — records *and* enums,
+  as `MediaVariant` and `MediaType` show — that cross the HTTP boundary.
+- `bootstrap` — `ApplicationRunner`s and anything else whose job is "put the rows in place that the rest of the code
+  assumes exist". `ReferenceDataSeeder` lives here; it is not optional and not a spent migration — it is the only thing
+  that populates an empty database, which happens on every fresh clone, every CI run and every VPS rebuild.
+- `exceptions` — the exception **types** and nothing else, with one sub-package:
+  - `exceptions/handlers` — the classes that *answer* a failure: **both** `@RestControllerAdvice` classes and
+    `ProblemDetailErrorResponder`. The split is between describing a failure and answering it, and the three answerers
+    stay together because which advice wins is decided by the `@Order` on each — a relationship that is invisible when
+    they sit in different packages. This is the one subdivision of the five flat packages, and it exists because
+    `exceptions` holds two kinds of thing; the other four hold one each.
+- `filters` — servlet filters.
 
 ### Authentication flow
 
@@ -128,11 +212,30 @@ The API is a stateless resource server that also issues its own JWTs (self-conta
    `JwtAuthenticationToken` in the `SecurityContextHolder`. Controllers read identity back out via
    `@AuthenticationPrincipal Jwt` and `jwt.getClaims().get("userId")` (see `UserController.updateUser`) rather than
    through `CustomUserDetails`, which is only used during the login step.
-4. `shouldNotFilter` in `JwtAuthenticationFilter` and the `authorizeHttpRequests` rules in `SecurityFilterConfig`
-   both hardcode the same public endpoints (`POST /users/create`, `POST /auth/**`) — keep both in sync when adding a new
-   public route. Session management is `STATELESS`; the `spring-boot-starter-session-jdbc` dependency is present but
-   unused by the current filter chain.
-5. `SecurityFilterConfig` also `permitAll()`s `/error`. A `@Valid` failure is reported via the servlet container's
+4. **The filter authenticates when it can and declines to decide when it cannot.** A missing or non-`Bearer`
+   `Authorization` header continues the chain unauthenticated, so `SecurityFilterConfig` — the single source of truth
+   for who may reach what — decides. A *present but broken* token is still rejected with 401, because a caller who
+   thinks they are authenticated and is not should not be silently downgraded to anonymous. There is no
+   `shouldNotFilter`: the filter runs on every request, which is what lets a public `GET` still know who its caller is.
+   **Add a new public route in `authorizeHttpRequests` only.**
+5. `JwtAuthenticationFilter.CREDENTIAL_ENDPOINTS` is the one exception, and it is small and stable
+   (`POST /auth/**`, `POST /users/create`, `PUT /users/reinit-password`). On those, a broken token is *ignored* rather
+   than rejected — otherwise, since `RsaKeyConfig` invalidates every token in circulation at each restart, a client
+   that still attaches its stale token could never reach the endpoints that would give it a new one. Do not "simplify"
+   this list away; `OptionalAuthenticationTest` guards it.
+6. An explicit `AuthenticationEntryPoint` is **required**, not decorative. With rejection handed to the filter chain and
+   none configured, Spring Security falls back to `Http403ForbiddenEntryPoint` and every anonymous request to a
+   protected route answers 403 where it must answer 401. `ProblemDetailErrorResponder` serves as both entry point and
+   access-denied handler, so 401 and 403 come back as `problem+json` like every other error.
+7. `ApiExceptionHandler` **rethrows** `AuthenticationException` and `AccessDeniedException` instead of answering them.
+   `@ExceptionHandler` methods run inside the `DispatcherServlet`, below `ExceptionTranslationFilter`, so handling them
+   there turns a wrong password into a 500.
+8. Ownership rules ("you may edit this recipe because you wrote it") live in the **service**, not in URL matchers — they
+   depend on a database row. `CurrentUserService` is the single answer to "who is calling, and are they an admin?";
+   its guard is a token *type* check, because an anonymous request carries an `AnonymousAuthenticationToken` whose
+   principal is the String `"anonymousUser"` and which reports `isAuthenticated() == true`.
+   Session management is `STATELESS`; the `spring-boot-starter-session-jdbc` dependency is present but unused.
+9. `SecurityFilterConfig` also `permitAll()`s `/error`. A `@Valid` failure is reported via the servlet container's
    `sendError`, which internally forwards to `GET /error` to render the body — that forward re-enters the security
    filter chain as its own request, and without this rule it gets rejected by the default
    `Http403ForbiddenEntryPoint` (no `AuthenticationEntryPoint` is configured), turning every validation failure into an

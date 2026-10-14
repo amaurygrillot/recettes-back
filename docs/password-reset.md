@@ -9,8 +9,14 @@ A user who forgot their password can:
 2. `PUT /users/reinit-password` with `{ "email", "token", "newPassword" }`. If the token is valid for that email, the
    password is updated.
 
-Both routes are public (no JWT) — see `SecurityFilterConfig` and
-`JwtAuthenticationFilter.PUBLIC_ENDPOINTS`.
+Both routes are public (no JWT) — declared `permitAll()` in `SecurityFilterConfig`, which is now the single source of
+truth for who may reach what.
+
+They also appear in `JwtAuthenticationFilter.CREDENTIAL_ENDPOINTS`, but for a different reason and with a different
+meaning: not "skip the filter here" but "on this route, never *reject* a broken token". A dead session is precisely why
+someone is on the password-reset screen, and `RsaKeyConfig` invalidates every token in circulation at every restart —
+so a client still attaching its stale token must not be locked out of the very endpoints that would give it a new one.
+See [optional-authentication.md](optional-authentication.md).
 
 ## Why the token isn't a JWT
 
@@ -44,6 +50,16 @@ unknown (see `PasswordResetService.requestReset`) — trades a bit of literal ac
 token issued to a different account all map to the same `400 Bad Request`, so a caller can't distinguish "wrong
 password" from "wrong email" from "expired link".
 
+All four are one exception type, `PasswordResetFailedException`, caught by `UserExceptionHandler`. **One type, not
+four**, and deliberately so: being able to throw them apart would be the first step towards someone accidentally
+reporting them apart, which is the whole property this endpoint is protecting.
+
+It used to be a bare `IllegalStateException`, and that was a real defect rather than a stylistic one. The advice
+applies to the whole of `UserController`, so every unrelated `IllegalStateException` under it — a missing `USER` role
+row on registration, a JVM without SHA-256 — also came back as `400 Invalid password reset request`, hiding genuine
+server errors behind this endpoint's deliberately uninformative response. See
+[api-error-handling.md](api-error-handling.md).
+
 ## Configuration
 
 | Property                                  | Meaning                                                                       | Default                                |
@@ -72,3 +88,11 @@ If any existing rows share an email, the `ddl-auto=update` schema update will fa
 - **Resetting the password doesn't revoke existing JWTs.** Since JWTs are stateless and self-contained (see root
   `CLAUDE.md`), any token issued before the reset stays valid until it expires (currently 1 hour, see
   `AuthenticationController.login`). Acceptable at today's scale; would need a revocation/deny-list to close.
+
+## The other way a password changes
+
+An authenticated user who *knows* their password changes it through `PUT /users/update`, which requires the current
+password in the same request and never touches this token machinery. That split — and why the reset flow deliberately
+calls `UserService.applyNewPassword` rather than `UserService.updateUser` — is in
+[credential-changes.md](credential-changes.md). Routing a reset through the self-service method would lock out exactly
+the people this feature exists for.

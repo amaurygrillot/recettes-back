@@ -1,6 +1,6 @@
 # Optional authentication — making public reads work
 
-Status: **design only**, nothing implemented yet. Prerequisite for the recipes feature, which is the first thing in
+Status: **implemented**. Prerequisite for the recipes feature, which is the first thing in
 this app with endpoints that are readable by anyone and writable only by an authenticated user. See
 [recipes-domain-model.md](recipes-domain-model.md).
 
@@ -141,6 +141,37 @@ So this change is not optional alongside the filter change:
 This is the correct semantics rather than a workaround, and it matches the status-code rules in the root `CLAUDE.md`:
 401 for missing or invalid credentials, 403 for authenticated but not permitted.
 
+**As implemented, both are one class**: `ProblemDetailErrorResponder` implements `AuthenticationEntryPoint` *and*
+`AccessDeniedHandler`, because the two differ only in the status they write. It answers in the same RFC 9457
+`problem+json` shape as every application error rather than `HttpStatusEntryPoint`'s empty body — otherwise 401 and 403
+would be the only two responses in the API a client has to special-case for having no body at all. Its detail strings
+are fixed, since these responses reach unauthenticated callers by definition and must not say what would have been
+required or whether the target exists.
+
+### The advice must hand Spring Security's exceptions back
+
+Not in the original design, and found while implementing: `ApiExceptionHandler`'s `Exception -> 500` branch **swallows
+`AuthenticationException` and `AccessDeniedException`**.
+
+`@ExceptionHandler` methods run inside the `DispatcherServlet`, which sits *below* `ExceptionTranslationFilter` — the
+filter that turns those two exceptions into a 401 or 403 via the entry point above. So an `AuthenticationException`
+thrown by `AuthenticationManager` during `POST /auth/login` never reaches it, and **a wrong password answers 500**.
+
+The fix is a handler that rethrows rather than answers:
+
+```java
+
+@ExceptionHandler({AuthenticationException.class, AccessDeniedException.class})
+ResponseEntity<ProblemDetail> rethrowSecurityException(RuntimeException exception) {
+    throw exception;
+}
+```
+
+`ExceptionHandlerExceptionResolver` treats a handler that throws the original exception as "not resolved" and lets it
+continue up the chain. This is easy to miss because it only shows up on the *unhappy* path of login, and a controller
+test that mocks `AuthenticationManager` never provokes it — `OptionalAuthenticationTest` asserts that a wrong password
+is 401 for exactly this reason.
+
 ## Resulting authorization rules
 
 ```java
@@ -224,6 +255,33 @@ against the real chain, asserting at minimum:
 | `PUT /recipes/{id}` by a non-author `USER`                | 403                                                   |
 | `PUT /recipes/{id}` by an `ADMIN`                         | 200                                                   |
 | `POST /tags` by a plain `USER`                            | 403                                                   |
+
+Implemented as `OptionalAuthenticationTest`, which creates a real account against the real database (there is no
+transaction to roll back behind a real HTTP call, so it uses a unique username per run and cleans up afterwards). The
+rows that need `/recipes` land with the recipes endpoints; until then the public-read rule is asserted through routes
+that are permitted but have no controller yet, where **404 rather than 401** is the proof the security chain let the
+request through.
+
+Two notes for anyone adding rows here. `POST /auth/login` with a stale token must assert **200**, not "not 401": with
+`CREDENTIAL_ENDPOINTS` removed, the filter's 401 is indistinguishable by status from a genuine bad-credentials 401, so
+the weaker assertion would not catch the regression. And the role link has to be written through `UserRolesEntity`, not
+`UserEntity.roles` — see below.
+
+### Pre-existing warts the tests had to work around
+
+`user_roles` is mapped **twice**: as the `@ManyToMany` join table on `UserEntity.roles`, and as an entity
+(`UserRolesEntity`) with its own `id` column. Hibernate therefore creates `user_roles.id NOT NULL`, which the
+`@ManyToMany` insert never populates — so writing a role through `user.setRoles(...)` fails at runtime, and
+`UserService.createUser` goes through `UserRolesRepository` instead. Reads still work, because they go through the
+`@ManyToMany` side.
+
+Two related defects sit next to it: `RoleEntity` carries a self-referential `@ManyToMany Set<RoleEntity> roles` mapped
+onto `user_roles` (almost certainly a copy-paste of the `UserEntity` mapping), and `RolesRepository` /
+`UserRolesRepository` both declare `UUID` as their id type while their entities use `String`, so `findById` /
+`deleteById` on them does not compile against a `String` id.
+
+All three are pre-existing and out of scope for the recipes work, but they are load-bearing for anything that creates
+users or roles — including the `ADMIN` bootstrap the reference-data seeder needs.
 
 Rows three and four exist as a pair on purpose: they are the two halves of the distinction drawn in
 [The change](#the-change), and a test suite that asserts only one of them will not notice if the filter starts rejecting

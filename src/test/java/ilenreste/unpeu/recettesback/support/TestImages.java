@@ -1,0 +1,219 @@
+package ilenreste.unpeu.recettesback.support;
+
+import javax.imageio.ImageIO;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.zip.CRC32;
+
+/**
+ * Lives in {@code support} next to {@code TestAccount}, not in
+ * {@code services.media}: {@code MediaUploadIntegrationTest} needs it too, and
+ * while it was package-private that suite grew its own copy of {@code jpeg} —
+ * which had already drifted to a different colour and a different asymmetry, so
+ * the HTTP-level test was uploading a different image than every unit test of the
+ * pipeline it exercises.
+ */
+/**
+ * Real image bytes for the media tests.
+ * <p>
+ * Everything here produces genuine files rather than fixtures on disk, so the
+ * tests state exactly what they feed the pipeline and a reader can see why each
+ * case matters.
+ */
+public final class TestImages {
+
+    private TestImages() {
+    }
+
+    /** A JPEG with visible structure, so a downscale that silently blanks the image would show. */
+    public static byte[] jpeg(int width, int height) {
+        return encode(paint(new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)), "jpg");
+    }
+
+    /** A PNG. With {@code alpha}, it carries a real transparent region. */
+    public static byte[] png(int width, int height, boolean alpha) {
+        BufferedImage image = new BufferedImage(width, height,
+                alpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB);
+        paint(image);
+        if (alpha) {
+            for (int x = 0; x < width / 2; x++) {
+                for (int y = 0; y < height / 2; y++) {
+                    image.setRGB(x, y, 0x00000000);
+                }
+            }
+        }
+        return encode(image, "png");
+    }
+
+    /**
+     * A JPEG carrying an EXIF APP1 segment with an orientation tag and an
+     * {@code ImageDescription} string.
+     * <p>
+     * The description stands in for the metadata a real phone photo carries — GPS
+     * coordinates, camera serial, timestamps — so a test can assert by substring
+     * that re-encoding actually drops it rather than trusting that it does.
+     */
+    public static byte[] jpegWithExif(int width, int height, int orientation, String description) {
+        return jpegWithExif(width, height, orientation, description, ByteOrder.LITTLE_ENDIAN);
+    }
+
+    /**
+     * The same, in a chosen TIFF byte order. {@code II} (little-endian) and
+     * {@code MM} (big-endian) are both legal and both shipped by real cameras, so
+     * the reader has to handle each.
+     */
+    public static byte[] jpegWithExif(int width, int height, int orientation, String description,
+                               ByteOrder order) {
+        return jpegWithSegment(jpeg(width, height), exifApp1Segment(orientation, description, order));
+    }
+
+    /** Splices {@code segment} in immediately after the SOI marker, where APP1 belongs. */
+    public static byte[] jpegWithSegment(byte[] baseJpeg, byte[] segment) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(baseJpeg, 0, 2);                       // SOI (FF D8)
+        out.write(segment, 0, segment.length);
+        out.write(baseJpeg, 2, baseJpeg.length - 2);
+        return out.toByteArray();
+    }
+
+    /** Wraps {@code payload} in an APP1 marker segment with the two-byte length JPEG requires. */
+    public static byte[] app1Segment(byte[] payload) {
+        int segmentLength = 2 + payload.length;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(0xFF);
+        out.write(0xE1);
+        out.write((segmentLength >> 8) & 0xFF);
+        out.write(segmentLength & 0xFF);
+        out.writeBytes(payload);
+        return out.toByteArray();
+    }
+
+    /**
+     * A PNG whose IHDR <em>declares</em> the given dimensions while the file
+     * itself stays a few dozen bytes — the shape of a decompression bomb.
+     * <p>
+     * Reaching a pixel raster from this would allocate width x height x 4 bytes;
+     * the point of the test using it is that the pipeline rejects it from the
+     * header and never gets that far.
+     */
+    public static byte[] pngHeaderClaiming(int width, int height) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.writeBytes(new byte[]{(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A});
+
+        ByteBuffer ihdr = ByteBuffer.allocate(13);
+        ihdr.putInt(width);
+        ihdr.putInt(height);
+        ihdr.put((byte) 8);     // bit depth
+        ihdr.put((byte) 2);     // colour type: truecolour
+        ihdr.put((byte) 0);     // compression
+        ihdr.put((byte) 0);     // filter
+        ihdr.put((byte) 0);     // interlace
+        writeChunk(out, "IHDR", ihdr.array());
+        writeChunk(out, "IEND", new byte[0]);
+        return out.toByteArray();
+    }
+
+    public static byte[] concat(byte[] first, byte[] second) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.writeBytes(first);
+        out.writeBytes(second);
+        return out.toByteArray();
+    }
+
+    public static boolean contains(byte[] haystack, String needle) {
+        byte[] pattern = needle.getBytes(StandardCharsets.ISO_8859_1);
+        outer:
+        for (int i = 0; i <= haystack.length - pattern.length; i++) {
+            for (int j = 0; j < pattern.length; j++) {
+                if (haystack[i + j] != pattern[j]) {
+                    continue outer;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static BufferedImage paint(BufferedImage image) {
+        Graphics2D graphics = image.createGraphics();
+        graphics.setColor(Color.WHITE);
+        graphics.fillRect(0, 0, image.getWidth(), image.getHeight());
+        graphics.setColor(Color.RED);
+        // Asymmetric on purpose: a rotation test can only tell 90 from 270 if the content does.
+        graphics.fillRect(0, 0, Math.max(1, image.getWidth() / 4), Math.max(1, image.getHeight() / 8));
+        graphics.dispose();
+        return image;
+    }
+
+    private static byte[] encode(BufferedImage image, String format) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            ImageIO.write(image, format, out);
+            return out.toByteArray();
+        } catch (IOException exception) {
+            throw new UncheckedIOException(exception);
+        }
+    }
+
+    /**
+     * A minimal but valid TIFF block wrapped in a JPEG APP1 segment: two IFD0
+     * entries, orientation inline and the description at an offset past the
+     * directory.
+     * <p>
+     * Generated in a chosen byte order because a SHORT's value sits in the
+     * <em>first two</em> of the entry's four value bytes, which makes reading it
+     * endianness-dependent rather than just "the first two bytes" - the one detail
+     * a hand-written reader is most likely to get wrong, and therefore the one
+     * worth generating both ways.
+     */
+    public static byte[] exifApp1Segment(int orientation, String description, ByteOrder order) {
+        byte[] descriptionBytes = (description + "\0").getBytes(StandardCharsets.US_ASCII);
+
+        // TIFF header (8) + entry count (2) + two entries (24) + next-IFD offset (4) = 38
+        int descriptionOffset = 38;
+        ByteBuffer tiff = ByteBuffer.allocate(descriptionOffset + descriptionBytes.length).order(order);
+        byte orderMark = (byte) (order == ByteOrder.LITTLE_ENDIAN ? 'I' : 'M');
+        tiff.put(orderMark).put(orderMark);
+        tiff.putShort((short) 42);
+        tiff.putInt(8);                       // offset of IFD0
+
+        tiff.putShort((short) 2);             // entry count
+        tiff.putShort((short) 0x0112);        // Orientation
+        tiff.putShort((short) 3);             // SHORT
+        tiff.putInt(1);
+        tiff.putShort((short) orientation);
+        tiff.putShort((short) 0);             // padding to four value bytes
+        tiff.putShort((short) 0x010E);        // ImageDescription
+        tiff.putShort((short) 2);             // ASCII
+        tiff.putInt(descriptionBytes.length);
+        tiff.putInt(descriptionOffset);
+        tiff.putInt(0);                       // no next IFD
+        tiff.put(descriptionBytes);
+
+        return app1Segment(concat(exifHeader(), tiff.array()));
+    }
+
+    /** {@code "Exif\0\0"}, the six bytes that tell an APP1 segment apart from XMP's. */
+    public static byte[] exifHeader() {
+        return new byte[]{'E', 'x', 'i', 'f', 0, 0};
+    }
+
+    private static void writeChunk(ByteArrayOutputStream out, String type, byte[] data) {
+        byte[] typeBytes = type.getBytes(StandardCharsets.US_ASCII);
+        out.writeBytes(ByteBuffer.allocate(4).putInt(data.length).array());
+        out.writeBytes(typeBytes);
+        out.writeBytes(data);
+
+        CRC32 crc = new CRC32();
+        crc.update(typeBytes);
+        crc.update(data);
+        out.writeBytes(ByteBuffer.allocate(4).putInt((int) crc.getValue()).array());
+    }
+}

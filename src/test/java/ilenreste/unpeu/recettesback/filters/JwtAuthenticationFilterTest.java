@@ -88,9 +88,9 @@ class JwtAuthenticationFilterTest {
         ResponseEntity<String> response = callProtectedEndpoint(headers);
 
         // A JWT that fails validation would short-circuit at 401 (no role) or 403 (wrong role); getting
-        // as far as 400 proves the filter authenticated the token and let the request reach
+        // as far as 404 proves the filter authenticated the token and let the request reach
         // UserController/UserService, which then rejected the unknown userId claim on its own merits.
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test

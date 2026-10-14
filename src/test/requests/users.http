@@ -1,0 +1,345 @@
+### Accounts
+### Covers: POST /users/create, PUT /users/update
+###
+### Registration is public; updating an account needs a login and always targets THE CALLER -
+### there is no id in the path and the body cannot name one, so there is no way to spell
+### "update somebody else".
+###
+### Both writes answer with the stored account. They used to answer with an empty body, which
+### said only "nothing threw": no id to follow, no Location to fetch, and no way to see what was
+### actually persisted. The password hash and the `enabled` flag never cross - see UserResponse.
+###
+### Changing the password or the email through THIS endpoint requires `currentPassword` as well -
+### see requests 9-14. Somebody who has FORGOTTEN their password obviously cannot supply it, and
+### that is a different flow: PUT /users/reinit-password, where the emailed one-time token is the
+### proof instead. It lives in password-reset.http, with its own deliberately uninformative error
+### handling, and it does not go through UpdateUserRequest at all.
+
+@baseUrl = http://localhost:8080
+@username = jane
+@password = Password123
+@email = jane@example.com
+
+### 1. Register -> 201 Created, with a Location header and the stored account
+### Public: this is the endpoint that creates the credential, so it cannot require one.
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}",
+  "email": "{{email}}",
+  "firstname": "Jane",
+  "lastname": "Doe"
+}
+
+> {%
+    client.test("Returns 201 with the account and its role", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.id !== undefined, "Expected an id to follow");
+        client.assert(response.headers.valueOf("Location").endsWith(response.body.id),
+            "Expected a Location pointing at the new account");
+        // Granted in the same transaction as the insert: an account without its role row can
+        // sign in and then fail every hasRole("USER") rule, which reads as a permissions bug.
+        client.assert(response.body.roles.includes("USER"), "Expected the USER role");
+        client.assert(response.body.password === undefined, "The hash must never be returned");
+        client.assert(response.body.enabled === undefined, "Moderation state must not be returned");
+    });
+%}
+
+### 2. Register the same username again -> 409 Conflict
+### 409 and not 400: the payload is well-formed, it conflicts with existing state.
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}",
+  "email": "someone-else@example.com",
+  "firstname": "Jane",
+  "lastname": "Doe"
+}
+
+> {%
+    client.test("Returns 409", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+    });
+%}
+
+### 3. Register with a password below the minimum -> 400 Bad Request
+### Reserved for malformed input, which this is.
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "shorty",
+  "password": "short",
+  "email": "shorty@example.com"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 4. Register with a blank username -> 400 Bad Request
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "   ",
+  "password": "{{password}}",
+  "email": "blank@example.com"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 5. Log in -> 200 OK, the body IS the raw JWT (no JSON wrapper)
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("token", response.body);
+    });
+%}
+
+### 5b. Log in with an unknown username -> 401 "Invalid username or password."
+### Same body as a wrong password, so the response never reveals which usernames exist.
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "no-such-user",
+  "password": "whatever"
+}
+
+> {%
+    client.test("Returns 401 with the credentials message", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+        client.assert(response.body.detail === "Invalid username or password.",
+            "Unexpected detail: " + response.body.detail);
+    });
+%}
+
+### 6. Update one field -> 200 OK, everything else untouched
+### A partial update: an absent field means "leave it alone", never "clear it".
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "firstname": "Janet"
+}
+
+> {%
+    client.test("Returns 200 with the stored account", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.firstname === "Janet", "Expected the new firstname");
+        client.assert(response.body.lastname === "Doe", "An absent field must be left alone");
+    });
+%}
+
+### 7. Update with no token at all -> 401 Unauthorized
+### 401 and not 403: no credential was offered. /users/** requires ROLE_USER.
+PUT {{baseUrl}}/users/update
+Content-Type: application/json
+
+{
+  "firstname": "Nobody"
+}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 8. Update with a password below the minimum -> 400 Bad Request
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "password": "short"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 9. Change the password with no currentPassword -> 403 Forbidden
+### A bearer token proves the caller held a valid login in the last hour, not that they are the
+### account holder. A password change outlives the token that authorised it, so one leaked token
+### would otherwise become permanent account takeover. 403 and not 400: the payload is well formed,
+### the caller just has not proved they may use it.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "password": "NewPassword123"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 10. Change the password with the WRONG currentPassword -> 403 Forbidden
+### Identical answer to the missing case above, deliberately: distinguishing them would make this
+### endpoint a password oracle for whoever already holds the token.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "password": "NewPassword123",
+  "currentPassword": "NotMyPassword9"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 16. Change the email with no currentPassword -> 403 Forbidden
+### Gated for the same reason: POST /auth/reinit-password mails the stored address, so replacing it
+### unverified takes away the account's only route back. Password and email are the two fields
+### whose change is permanent; the rest are not gated.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "email": "someone-else@example.com"
+}
+
+> {%
+    client.test("Returns 403", function () {
+        client.assert(response.status === 403, "Expected 403 but got " + response.status);
+    });
+%}
+
+### 17. Change the email to something that is not an email -> 400 Bad Request
+### @Email, not merely a length check: a stored address that is not an address breaks the reset
+### flow silently, and the failure surfaces as "no mail ever arrived", nowhere near this request.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "email": "not-an-email",
+  "currentPassword": "{{password}}"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 18. Change the username to one already taken -> 409 Conflict
+### Pre-checked rather than left to the unique constraint, which fires at commit - after the
+### success has already been logged - and names neither the field nor the colliding row.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "username": "someone-who-already-exists"
+}
+
+> {%
+    client.test("Returns 409 (or 200 if that username is genuinely free in your database)", function () {
+        client.assert(response.status === 409 || response.status === 200,
+            "Expected 409 but got " + response.status);
+    });
+%}
+
+### 19. Change the password WITH the current password -> 200 OK, and the old one stops working
+### The success case. Hashed on the way in; the stored value is never echoed back.
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "password": "NewPassword123",
+  "currentPassword": "{{password}}"
+}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.password === undefined, "The hash must never be returned");
+    });
+%}
+
+### 20. Log in with the OLD password -> 401 Unauthorized
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 16. Log in with the NEW password -> 200 OK
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "password": "NewPassword123"
+}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 17. Update while carrying a token from BEFORE the last restart -> 401 Unauthorized
+### RsaKeyConfig mints a fresh key pair in memory at every startup, so every token in
+### circulation is invalidated by a restart. A present-but-broken token is rejected rather than
+### silently downgraded to anonymous: a caller who thinks they are authenticated and is not
+### should be told. Paste a stale token below to see it.
+### (POST /auth/**, POST /users/create and PUT /users/reinit-password are the exception - on
+### those a broken token is ignored, or a stale client could never reach the endpoints that
+### would give it a new one. JwtAuthenticationFilter.CREDENTIAL_ENDPOINTS, guarded by
+### OptionalAuthenticationTest.)
+@staleToken = paste-a-token-issued-before-the-last-restart
+PUT {{baseUrl}}/users/update
+Authorization: Bearer {{staleToken}}
+Content-Type: application/json
+
+{
+  "firstname": "Janet"
+}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}

@@ -1,0 +1,497 @@
+package ilenreste.unpeu.recettesback.services.recipes;
+
+import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeCoverPictureEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientGroupEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeIntroductionEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeStepEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeStepPictureEntity;
+import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
+import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
+import ilenreste.unpeu.recettesback.entities.reference.TagEntity;
+import ilenreste.unpeu.recettesback.entities.reference.UnitEntity;
+import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
+import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
+import ilenreste.unpeu.recettesback.mappers.recipes.RecipeMapper;
+import ilenreste.unpeu.recettesback.models.recipes.requests.CreateRecipeRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeIngredientGroupRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeIngredientRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeIntroductionRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipePictureRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSearchRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeStepRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.UpdateRecipeRequest;
+import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeResponse;
+import ilenreste.unpeu.recettesback.models.recipes.responses.RecipeSummaryResponse;
+import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
+import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.CategoriesRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.CategoryRelationsRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.TagsRepository;
+import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
+import ilenreste.unpeu.recettesback.services.reference.CategoryService;
+import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
+import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
+import jakarta.persistence.EntityManager;
+import lombok.extern.log4j.Log4j2;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+@Log4j2
+@Service
+public class RecipeService {
+
+    private final RecipesRepository recipesRepository;
+    private final CategoriesRepository categoriesRepository;
+    private final CategoryRelationsRepository categoryRelationsRepository;
+    private final TagsRepository tagsRepository;
+    private final IngredientsRepository ingredientsRepository;
+    private final UnitsRepository unitsRepository;
+    private final MediaRepository mediaRepository;
+    private final ReferenceResolver referenceResolver;
+    private final CategoryService categoryService;
+    private final ReferenceNameNormalizer normalizer;
+    private final CurrentUserService currentUserService;
+    private final RecipeMapper mapper;
+
+    /**
+     * Held for one reason: {@link #clearForReplacement} has to flush orphan DELETEs
+     * before the rows that re-use their {@code position} are inserted.
+     */
+    private final EntityManager entityManager;
+
+    public RecipeService(RecipesRepository recipesRepository, CategoriesRepository categoriesRepository,
+                         CategoryRelationsRepository categoryRelationsRepository,
+                         TagsRepository tagsRepository, IngredientsRepository ingredientsRepository,
+                         UnitsRepository unitsRepository, MediaRepository mediaRepository,
+                         ReferenceResolver referenceResolver, CategoryService categoryService,
+                         ReferenceNameNormalizer normalizer,
+                         CurrentUserService currentUserService, RecipeMapper mapper,
+                         EntityManager entityManager) {
+        this.recipesRepository = recipesRepository;
+        this.categoriesRepository = categoriesRepository;
+        this.categoryRelationsRepository = categoryRelationsRepository;
+        this.tagsRepository = tagsRepository;
+        this.ingredientsRepository = ingredientsRepository;
+        this.unitsRepository = unitsRepository;
+        this.mediaRepository = mediaRepository;
+        this.referenceResolver = referenceResolver;
+        this.categoryService = categoryService;
+        this.normalizer = normalizer;
+        this.currentUserService = currentUserService;
+        this.mapper = mapper;
+        this.entityManager = entityManager;
+    }
+
+    /**
+     * Pages over ids, then loads exactly that page.
+     * <p>
+     * <strong>The reordering is not optional.</strong> {@code findAllForSummary}
+     * uses {@code IN}, which does not preserve order, so its rows come back in
+     * whatever order PostgreSQL likes. Mapping them straight through silently
+     * discards the sort the caller asked for — and the page still has the right
+     * rows and the right count, so nothing looks wrong until someone notices the
+     * "newest first" list is not.
+     * <p>
+     * The sort is taken from {@link RecipeSearchRequest#sort()} and applied to a
+     * fresh {@link PageRequest} rather than being carried in by the incoming
+     * {@code Pageable}. That is what keeps a query string from naming an arbitrary
+     * entity property: the {@code Pageable} contributes the page number and size,
+     * the request contributes an ordering chosen from a closed enum. See
+     * {@code RecipeSortField}.
+     * <p>
+     * The tag name filter is normalized the same way the reference tables normalize
+     * what they store, which is what makes {@code ?tagName=vegetarien} find
+     * {@code végétarien}. Doing it here rather than in the query is what lets the
+     * comparison stay a plain {@code LIKE} against an ordinary column.
+     * <p>
+     * The category filter is resolved to a set of ids before the query runs — by
+     * {@code CategoryService}, which owns the taxonomy — because "this category"
+     * may mean the whole subtree beneath it. See
+     * {@link #resolveCategoryFilter(RecipeSearchRequest)}.
+     */
+    @Transactional(readOnly = true)
+    public Page<RecipeSummaryResponse> search(RecipeSearchRequest request, Pageable pageable) {
+        Pageable sorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), request.sort());
+        Collection<String> categoryIds = resolveCategoryFilter(request);
+        Page<String> idPage = recipesRepository.searchIds(
+                request.title(),
+                request.authorId(),
+                request.authorName(),
+                categoryIds != null,
+                categoryIds == null ? Set.of() : categoryIds,
+                request.tagId(),
+                normalizedOrNull(request.tagName()),
+                sorted);
+        if (idPage.isEmpty()) {
+            return Page.empty(sorted);
+        }
+
+        Map<String, RecipeEntity> byId = recipesRepository.findAllForSummary(idPage.getContent()).stream()
+                .collect(Collectors.toMap(RecipeEntity::getId, Function.identity()));
+        Map<String, String> categoryParentIds = categoryRelationsRepository.parentIdsByCategoryId();
+
+        List<RecipeSummaryResponse> ordered = idPage.getContent().stream()
+                .map(byId::get)
+                .filter(Objects::nonNull)
+                .map(recipe -> mapper.toSummary(recipe, categoryParentIds))
+                .toList();
+
+        return new PageImpl<>(ordered, sorted, idPage.getTotalElements());
+    }
+
+    @Transactional(readOnly = true)
+    public RecipeResponse findById(String id) {
+        return toResponse(loadRecipe(id));
+    }
+
+    /**
+     * The author is never taken from the body — it is stamped by JPA auditing from
+     * the security context, so a recipe cannot be posted under someone else's name.
+     * <p>
+     * That stamping is checked here rather than left to the database. Auditing
+     * resolves an empty author for a request carrying no {@code JwtAuthenticationToken},
+     * and {@code recipes.author_id} is {@code NOT NULL}, so the insert would fail as a
+     * {@code DataIntegrityViolationException} reported as an opaque 500 — for what is
+     * in truth "you are not signed in". The URL rules already require
+     * {@code ROLE_USER} on {@code POST /recipes}, so this only fires if that rule is
+     * ever relaxed, which is precisely when a clear failure matters.
+     */
+    @Transactional
+    public RecipeResponse create(CreateRecipeRequest request) {
+        currentUserService.currentUserId().orElseThrow(() -> new ForbiddenOperationException(
+                "You must be signed in to create a recipe."));
+
+        RecipeEntity recipe = new RecipeEntity();
+        recipe.setTitle(request.title().trim());
+        recipe.setRecommendations(request.recommendations());
+        replaceIntroduction(recipe, request.introduction());
+
+        recipe.getCategories().addAll(resolveCategories(request.categoryIds()));
+        recipe.getTags().addAll(resolveTags(request.tagIds()));
+        replaceCoverPictures(recipe, request.coverPictures());
+        replaceIngredientGroups(recipe, request.ingredientGroups());
+        replaceSteps(recipe, request.steps());
+
+        RecipeEntity saved = recipesRepository.save(recipe);
+        log.info("Created recipe {} with {} step(s) and {} ingredient group(s)",
+                saved.getId(), saved.getSteps().size(), saved.getIngredientGroups().size());
+        return toResponse(saved);
+    }
+
+    /**
+     * Partial update: an absent field is left alone, a present collection
+     * replaces the whole collection.
+     */
+    @Transactional
+    public RecipeResponse update(String id, UpdateRecipeRequest request) {
+        RecipeEntity recipe = loadRecipe(id);
+        requireAuthorOrAdmin(recipe.getAuthor().getId(), id);
+
+        request.title().ifPresent(title -> recipe.setTitle(title.trim()));
+        request.introduction().ifPresent(introduction -> replaceIntroduction(recipe, introduction));
+        request.recommendations().ifPresent(recipe::setRecommendations);
+        request.categoryIds().ifPresent(ids -> replaceAll(recipe.getCategories(), resolveCategories(ids)));
+        request.tagIds().ifPresent(ids -> replaceAll(recipe.getTags(), resolveTags(ids)));
+        request.coverPictures().ifPresent(pictures -> replaceCoverPictures(recipe, pictures));
+        request.ingredientGroups().ifPresent(groups -> replaceIngredientGroups(recipe, groups));
+        request.steps().ifPresent(steps -> replaceSteps(recipe, steps));
+
+        RecipeEntity saved = recipesRepository.save(recipe);
+        log.info("Updated recipe {}", id);
+        return toResponse(saved);
+    }
+
+    /**
+     * Checks permission and existence in one scalar query rather than loading a
+     * recipe that is about to be thrown away.
+     * <p>
+     * Deletion cascades to steps, groups, ingredient lines and picture links, and
+     * merely dereferences ingredients, tags, categories and media.
+     */
+    @Transactional
+    public void delete(String id) {
+        String authorId = recipesRepository.findAuthorIdById(id)
+                .orElseThrow(() -> ResourceNotFoundException.of("recipe", id));
+        requireAuthorOrAdmin(authorId, id);
+
+        recipesRepository.deleteById(id);
+        log.info("Deleted recipe {}", id);
+    }
+
+    /**
+     * The rule a URL matcher cannot express: "you may edit this recipe because
+     * you wrote it" depends on a row in the database.
+     * <p>
+     * It lives in the service, not the controller, so a second caller reaching
+     * the same operation another way cannot bypass it.
+     * <p>
+     * An admin passes too, and the refusal message <strong>says so</strong>. It
+     * used to read "Only the author of this recipe may modify it", which is a
+     * statement about who may edit — and it was false: the condition below has
+     * always let an admin through. A refusal that misdescribes the rule sends the
+     * reader looking for a bug in the wrong place, and this one would have told an
+     * admin reading their own 403 that the server disagrees with its own code.
+     */
+    private void requireAuthorOrAdmin(String authorId, String recipeId) {
+        String currentUserId = currentUserService.currentUserId()
+                .orElseThrow(() -> new ForbiddenOperationException(
+                        "You must be signed in to modify a recipe."));
+        if (!currentUserId.equals(authorId) && !currentUserService.isAdmin()) {
+            log.warn("User {} attempted to modify recipe {} authored by {}",
+                    currentUserId, recipeId, authorId);
+            throw new ForbiddenOperationException(
+                    "Only the author of this recipe, or an administrator, may modify it.");
+        }
+    }
+
+    private RecipeEntity loadRecipe(String id) {
+        return recipesRepository.findById(id)
+                .orElseThrow(() -> ResourceNotFoundException.of("recipe", id));
+    }
+
+    private List<CategoryEntity> resolveCategories(Collection<String> ids) {
+        return List.copyOf(referenceResolver.resolve("categoryIds", ids,
+                categoriesRepository::findAllById).values());
+    }
+
+    private List<TagEntity> resolveTags(Collection<String> ids) {
+        return List.copyOf(referenceResolver.resolve("tagIds", ids,
+                tagsRepository::findAllById).values());
+    }
+
+    /**
+     * Mutates the existing collection in place rather than assigning a new one:
+     * reassigning a Hibernate-managed collection throws.
+     */
+    private <T> void replaceAll(Collection<T> managed, Collection<T> replacement) {
+        managed.clear();
+        managed.addAll(replacement);
+    }
+
+    /**
+     * Empties a cascading child collection and <strong>pushes the DELETEs to the
+     * database before the replacements are built</strong>.
+     * <p>
+     * The flush is not an optimisation, it is the fix for a 409 on every ordinary
+     * edit. {@code recipe_steps}, {@code recipe_ingredient_groups} and
+     * {@code recipe_cover_pictures} each carry {@code UNIQUE (recipe_id, position)},
+     * and the replacements are renumbered from zero — so a three-step recipe edited
+     * down to two re-uses positions 0 and 1, which still belong to the rows being
+     * removed. Within a single flush Hibernate orders entity INSERTs <em>before</em>
+     * entity DELETEs, so the insert of the new position 0 hit the constraint while
+     * the old position 0 was still there, and the edit came back
+     * {@code 409 "That value already exists."}
+     * <p>
+     * ({@code ActionQueue} does have an {@code OrphanRemovalAction} ordered ahead of
+     * inserts, which is why reading the action ordering alone suggests this works.
+     * It is only used when the persistence context is in its remove-orphans-before-
+     * updates phase, which a cascade from a cleared collection is not — the deletes
+     * land in the ordinary {@code EntityDeleteAction} list, which runs last. The
+     * integration test that reuses the positions is what settles it either way.)
+     * <p>
+     * Flushing only when there is something to remove keeps the create path
+     * untouched: a new recipe's collections are already empty, and flushing a
+     * not-yet-persisted entity here would be a pointless early insert.
+     */
+    private void clearForReplacement(Collection<?> managed) {
+        if (managed.isEmpty()) {
+            return;
+        }
+        managed.clear();
+        entityManager.flush();
+    }
+
+    private void replaceCoverPictures(RecipeEntity recipe, List<RecipePictureRequest> pictures) {
+        List<RecipePictureRequest> requested = pictures == null ? List.of() : pictures;
+        Map<String, MediaEntity> media = resolveMedia("coverPictures[].mediaId", requested);
+
+        // orphanRemoval on the association turns this clear() into DELETEs for the rows dropped,
+        // and the flush inside clearForReplacement is what gets them to the database before the
+        // new rows re-use their positions. See that method.
+        clearForReplacement(recipe.getCoverPictures());
+        for (int position = 0; position < requested.size(); position++) {
+            RecipePictureRequest request = requested.get(position);
+            RecipeCoverPictureEntity cover = new RecipeCoverPictureEntity();
+            cover.setRecipe(recipe);
+            cover.setMedia(media.get(request.mediaId()));
+            cover.setAltText(request.altText());
+            // Renumbered 0..n-1 from the order of the incoming array, which is the contract.
+            cover.setPosition(position);
+            recipe.getCoverPictures().add(cover);
+        }
+    }
+
+    private void replaceSteps(RecipeEntity recipe, List<RecipeStepRequest> steps) {
+        List<RecipeStepRequest> requested = steps == null ? List.of() : steps;
+        List<RecipePictureRequest> allPictures = requested.stream()
+                .flatMap(step -> step.pictures() == null ? Stream.<RecipePictureRequest>of()
+                        : step.pictures().stream())
+                .toList();
+        Map<String, MediaEntity> media = resolveMedia("steps[].pictures[].mediaId", allPictures);
+
+        clearForReplacement(recipe.getSteps());
+        for (int position = 0; position < requested.size(); position++) {
+            RecipeStepRequest request = requested.get(position);
+            RecipeStepEntity step = new RecipeStepEntity();
+            step.setRecipe(recipe);
+            step.setPosition(position);
+            step.setInstruction(request.instruction());
+
+            List<RecipePictureRequest> stepPictures =
+                    request.pictures() == null ? List.of() : request.pictures();
+            for (int picturePosition = 0; picturePosition < stepPictures.size(); picturePosition++) {
+                RecipePictureRequest picture = stepPictures.get(picturePosition);
+                RecipeStepPictureEntity entity = new RecipeStepPictureEntity();
+                entity.setStep(step);
+                entity.setMedia(media.get(picture.mediaId()));
+                entity.setAltText(picture.altText());
+                entity.setPosition(picturePosition);
+                step.getPictures().add(entity);
+            }
+            recipe.getSteps().add(step);
+        }
+    }
+
+    private void replaceIngredientGroups(RecipeEntity recipe, List<RecipeIngredientGroupRequest> groups) {
+        List<RecipeIngredientGroupRequest> requested = groups == null ? List.of() : groups;
+        List<RecipeIngredientRequest> allLines = requested.stream()
+                .flatMap(group -> group.ingredients() == null
+                        ? Stream.<RecipeIngredientRequest>of()
+                        : group.ingredients().stream())
+                .toList();
+
+        // One query for every ingredient across every group, and one for every unit - not one per
+        // line, which on a normal recipe is the difference between two queries and thirty.
+        Map<String, IngredientEntity> ingredients = referenceResolver.resolve(
+                "ingredientGroups[].ingredients[].ingredientId",
+                allLines.stream().map(RecipeIngredientRequest::ingredientId).toList(),
+                ingredientsRepository::findAllById);
+        Map<String, UnitEntity> units = referenceResolver.resolve(
+                "ingredientGroups[].ingredients[].unitId",
+                allLines.stream().map(RecipeIngredientRequest::unitId).toList(),
+                unitsRepository::findAllById);
+
+        clearForReplacement(recipe.getIngredientGroups());
+        for (int position = 0; position < requested.size(); position++) {
+            RecipeIngredientGroupRequest request = requested.get(position);
+            RecipeIngredientGroupEntity group = new RecipeIngredientGroupEntity();
+            group.setRecipe(recipe);
+            group.setPosition(position);
+            group.setTitle(request.title());
+
+            List<RecipeIngredientRequest> lines =
+                    request.ingredients() == null ? List.of() : request.ingredients();
+            for (int linePosition = 0; linePosition < lines.size(); linePosition++) {
+                RecipeIngredientRequest line = lines.get(linePosition);
+                RecipeIngredientEntity entity = new RecipeIngredientEntity();
+                entity.setGroup(group);
+                entity.setIngredient(ingredients.get(line.ingredientId()));
+                entity.setQuantity(line.quantity());
+                entity.setUnit(line.unitId() == null || line.unitId().isBlank()
+                        ? null : units.get(line.unitId()));
+                entity.setNote(line.note());
+                entity.setPosition(linePosition);
+                group.getIngredients().add(entity);
+            }
+            recipe.getIngredientGroups().add(group);
+        }
+    }
+
+    private Map<String, MediaEntity> resolveMedia(String field, List<RecipePictureRequest> pictures) {
+        return referenceResolver.resolve(field,
+                new ArrayList<>(pictures.stream().map(RecipePictureRequest::mediaId).toList()),
+                mediaRepository::findAllById);
+    }
+
+    /**
+     * Sets, replaces or removes the introduction block.
+     * <p>
+     * Blank text removes it, which is the only way a client can — see
+     * {@link RecipeIntroductionRequest} for why the API needs that spelling.
+     * Setting the association to null is what {@code orphanRemoval} turns into a
+     * DELETE; clearing the text of the existing row instead would leave an empty
+     * block rendered at the top of the recipe.
+     */
+    private void replaceIntroduction(RecipeEntity recipe, RecipeIntroductionRequest request) {
+        if (request == null || request.isBlank()) {
+            if (recipe.getIntroduction() != null) {
+                log.debug("Removing the introduction of recipe {}", recipe.getId());
+            }
+            recipe.setIntroduction(null);
+            return;
+        }
+        RecipeIntroductionEntity introduction = recipe.getIntroduction();
+        if (introduction == null) {
+            introduction = new RecipeIntroductionEntity();
+            introduction.setRecipe(recipe);
+            recipe.setIntroduction(introduction);
+        }
+        // Mutated in place rather than replaced, so there is no delete-then-insert on
+        // recipe_introductions.recipe_id - which is unique, being the owning side of a @OneToOne -
+        // and therefore none of the flush ordering that clearForReplacement exists to handle.
+        introduction.setText(request.text());
+    }
+
+    /**
+     * One extra two-column query per recipe read, so that a category can report
+     * its parent. See {@code RecipeMapper} for why the edges are not read once
+     * per category instead.
+     */
+    private RecipeResponse toResponse(RecipeEntity recipe) {
+        return mapper.toResponse(recipe, categoryRelationsRepository.parentIdsByCategoryId());
+    }
+
+    /**
+     * What "this category" means for one request, as a set of ids — or null when
+     * no category filter was asked for.
+     * <p>
+     * Null and empty are different answers and the distinction is load-bearing:
+     * <strong>null</strong> is "the caller named no category", which must not
+     * filter at all, and <strong>empty</strong> is "the caller named a category
+     * that does not exist", which must match nothing. Collapsing the second into
+     * the first would answer a search for a misspelled category with the entire
+     * library, which looks like the filter being ignored — and is, in a sense.
+     * <p>
+     * The widening itself belongs to {@code CategoryService}: it is a question
+     * about the taxonomy, and keeping it there means the subtree walk has exactly
+     * one implementation rather than a second copy that eventually disagrees about
+     * cycles or depth.
+     */
+    private Collection<String> resolveCategoryFilter(RecipeSearchRequest request) {
+        // Both accessors answer null for a blank parameter - see RecipeSearchRequest, which is
+        // where that rule now lives instead of in a private helper on this class.
+        String categoryId = request.categoryId();
+        String categoryName = request.categoryName();
+        if (categoryId == null && categoryName == null) {
+            return null;
+        }
+        return categoryService.findMatchingIds(categoryId, categoryName, request.includesSubcategories());
+    }
+
+    /**
+     * Normalizes a name filter the same way the reference tables normalize what
+     * they store, so {@code entrees} matches {@code Entrées}. Null stays null,
+     * which means "no filter".
+     */
+    private String normalizedOrNull(String value) {
+        return value == null ? null : normalizer.normalize(value);
+    }
+}

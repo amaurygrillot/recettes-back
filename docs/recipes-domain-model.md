@@ -1,9 +1,13 @@
 # Recipes — domain model and API design
 
-Status: **design only**, nothing implemented yet. This document is the specification the implementation session works
-from. Companion documents: [media-storage.md](media-storage.md) (images),
+Status: **implemented**. This document is the specification the implementation session worked
+from, updated in place where the implementation proved a decision wrong — and again after the PR review, which added a
+category hierarchy, an introduction section, and named filters on the listing. Companion documents:
+[media-storage.md](media-storage.md) (images),
 [api-error-handling.md](api-error-handling.md) (status codes and exception mapping),
-[optional-authentication.md](optional-authentication.md) (how public reads coexist with JWT auth).
+[optional-authentication.md](optional-authentication.md) (how public reads coexist with JWT auth),
+[category-hierarchy.md](category-hierarchy.md) (main categories and subcategories),
+[service-controller-contract.md](service-controller-contract.md) (what a controller may assume from a service).
 
 ## What the feature is
 
@@ -102,7 +106,10 @@ A recipe belongs to **one or more** categories, through a `recipe_categories` jo
 | `recipe_tags`       | `recipe_id`, `tag_id` — composite PK      |
 
 **At least one category is required.** `CreateRecipeRequest.categoryIds` is `@NotEmpty`; the "one or more" is enforced
-at the API layer, not by the schema, since a join table cannot express a minimum cardinality. This keeps the original
+at the API layer, not by the schema, since a join table cannot express a minimum cardinality. `ingredientGroups` and
+`steps` carry the same rule, for a different reason: a recipe with no ingredients or no steps is not a recipe somebody
+has not finished writing, it is one nobody can cook, and accepting it only moves the failure to the reader. All three
+rules hold on update too (`@NotEmptyIfPresent`), or an edit would be a back door around what a create forbids. This keeps the original
 intent (every recipe is classified and therefore browsable) while allowing the tarte that is honestly both a dessert and
 a goûter.
 
@@ -123,6 +130,68 @@ categories — nothing in the schema stops the two from converging into "two lis
 because you asked for both tables. **If in six months the category list has grown to twenty entries and recipes carry
 five each, that is the signal they have merged in practice and one of them should go.** Recorded here so that is a
 recognisable outcome rather than a surprise.
+
+> **Resolved by the PR review: they are no longer structurally identical.** Categories now form a hierarchy — a
+> `category_type` column and a `categories_relation` table giving every category exactly one direct parent — and tags
+> stay flat. Containment is the difference, and it is now in the schema rather than in convention.
+> See [category-hierarchy.md](category-hierarchy.md).
+
+### The introduction — a section, not a field
+
+`recipe_introductions` holds the block rendered above everything else on a recipe: the "here is what this dish is and
+where it comes from" paragraph, before the ingredients and the steps. Optional.
+
+| Table                   | Columns                                                    |
+|-------------------------|-------------------------------------------------------------|
+| `recipe_introductions`  | `recipe_id` (**PK**, FK to `recipes`), `text` (text, not null) |
+
+**Its own table rather than a column on `recipes`**, and the distinction is worth stating because `recommendations`
+went the other way. A recipe has two blocks of prose and they are not the same kind of thing:
+
+- `recommendations` is a **field**: a note rendered beside the recipe, never addressed on its own. A nullable `text`
+  column on `recipes` is exactly right for it.
+- The introduction is a **section**, in the same sense as a step or an ingredient group: an addressable block of
+  content with an id of its own, which is what lets an editor or a comment anchor refer to it. The response exposes
+  that id.
+
+Keeping the two shapes apart is also what stops "add another column to `recipes`" from being the answer to every
+future block of prose.
+
+The primary key is the recipe's own id (`@MapsId`), so "one introduction per recipe" is the primary key rather than a
+unique constraint bolted on beside a surrogate one. `orphanRemoval` is what makes removal work: setting the association
+to null has to DELETE the row, not detach it and leave an orphan the next read still finds.
+
+#### Blank text removes the section, and it has to
+
+`RecipeIntroductionRequest.text` is deliberately **not** `@NotBlank`. Blank — null, empty or whitespace — means "this
+recipe has no introduction", and on an update it deletes the row.
+
+That convention is not a shortcut; without it the section could be added but never removed. Jackson deserialises a
+*missing* property and an explicit `"introduction": null` to the **same** `Optional.empty()`, so `Optional` alone
+cannot distinguish "leave it alone" from "delete it". Whichever meaning `Optional.empty()` were given, the other would
+be unexpressible: either every partial update that does not mention the introduction wipes it, or nothing can ever
+remove one. Sending the object with blank text is the one spelling that says "delete" and cannot be confused with
+silence.
+
+`UpdateRecipeRequestValidationTest` pins this down, and `recipes.http` requests 12c and 12d walk the three states.
+
+### WYSIWYG text columns
+
+`recipe_steps.instruction`, `recipe_introductions.text` and `recipes.recommendations` are all declared
+`columnDefinition = "text"`. That is load-bearing and must not be "simplified" to a bare `@Column`: Hibernate's default
+for a `String` is `varchar(255)`, and these fields are authored in a rich-text editor, so they arrive wrapped in markup
+that spends most of that budget before the prose does. The failure mode is the worst kind — it appears only once a user
+writes a long step, and surfaces as a `DataIntegrityViolationException` reported as a generic 500, with their text
+lost.
+
+`text` rather than `@Lob`: in PostgreSQL `text` and `varchar` are the same storage with the same performance minus the
+length check, so unbounded costs nothing, while `@Lob` maps to a large object with a separate handle and its own
+transaction semantics — the wrong tool for a string that is at most a few kilobytes.
+
+Storing markup means it must be **escaped or sanitised where it is rendered**. Nothing here strips it: this API records
+what the author wrote, and a sanitiser that silently rewrote their formatting would be its own bug. The authors are
+authenticated friends and family, so the exposure is small, but it is a real stored-XSS surface and the frontend is
+where it has to be closed.
 
 ### Ordered child tables
 
@@ -204,12 +273,19 @@ classes" or "all the repositories".
 
 ```
 ilenreste.unpeu.recettesback
-├── configuration/           unchanged, flat (cross-cutting, not domain-owned)
+├── configuration/           flat, cross-cutting — and ONLY things that configure:
+│                            SecurityFilterConfig, SecurityBeansConfig, RsaKeyConfig,
+│                            JwtIssuerConfig, JpaAuditingConfig, TimeConfig
+├── properties/              flat — @ConfigurationProperties records (MediaProperties)
+├── bootstrap/               flat — ApplicationRunners (ReferenceDataSeeder)
 ├── filters/                 unchanged, flat
-├── exceptions/              ResourceNotFoundException, InvalidReferenceException,
-│                            ResourceConflictException, ForbiddenOperationException
+├── exceptions/              the exception TYPES, and nothing else
+│   └── handlers/            the classes that answer a failure: both advices
+│                            (ApiExceptionHandler, UserExceptionHandler) and
+│                            ProblemDetailErrorResponder          ← moved, see below
 ├── entities/
 │   ├── AuditableEntity      @MappedSuperclass, shared — stays at the root
+│   ├── Identifiable         "has an id" — also shared, also at the root
 │   ├── recipes/             RecipeEntity, RecipeStepEntity, RecipeStepPictureEntity,
 │   │                        RecipeCoverPictureEntity, RecipeIngredientGroupEntity,
 │   │                        RecipeIngredientEntity
@@ -246,13 +322,58 @@ ilenreste.unpeu.recettesback
 `models` already works this way (`models/auth`, `models/users`), so this generalises a convention the codebase has
 rather than inventing one.
 
-`configuration`, `filters` and `exceptions` stay flat. They are cross-cutting: `SecurityFilterConfig` is not a recipes
-class or a users class, and `ResourceNotFoundException` is thrown by every domain. Subdividing them would produce
-single-class packages that answer no question.
+`configuration`, `properties`, `bootstrap`, `filters` and `exceptions` stay flat. They are cross-cutting:
+`SecurityFilterConfig` is not a recipes class or a users class, and `ResourceNotFoundException` is thrown by every
+domain. Subdividing *them* would produce single-class packages that answer no question.
+
+#### `configuration` means "configures something" — three classes that did not
+
+The PR review caught `configuration` being used as a drawer for anything that was neither a controller, a service nor
+an entity. Three classes moved out, and the test for each is the same: *does it declare a bean or wire something?*
+
+| Class                        | Was            | Now         | Why                                                                                          |
+|------------------------------|----------------|-------------|-----------------------------------------------------------------------------------------------|
+| `MediaProperties`            | `configuration`| `properties`| Bound data, not wiring. No bean, no logic; picked up by `@ConfigurationPropertiesScan`. Not `models` either — those records cross the HTTP boundary and this one never leaves the server |
+| `ReferenceDataSeeder`        | `configuration`| `bootstrap` | An `ApplicationRunner`: behaviour that runs once the context is up. Configures nothing         |
+| `ProblemDetailErrorResponder`| `configuration`| `exceptions`| The half of exception-to-`problem+json` mapping that runs *above* the `DispatcherServlet`, where an `@ExceptionHandler` cannot reach. It belongs next to `ApiExceptionHandler`; `SecurityFilterConfig` is the configuration that wires it |
+
+`UserExceptionHandler` moved the same way, out of `controllers/users` into `exceptions`. It is not a controller and
+maps no route — it is a `@RestControllerAdvice`, and the pair of advices only makes sense read together, since the
+`@Order` on each is what decides which wins. That is impossible to notice when they live in different packages.
 
 `AuditableEntity` stays at the `entities` root for the same reason — it is the shared supertype, owned by no domain.
+`Identifiable` joined it there: one method, `getId()`, implemented by `ReferenceEntity` and `MediaEntity`, and it
+exists to bound `ReferenceResolver`'s type parameter. See [the resolver note](#referenceresolver-is-bounded-not-generic).
 
-### The `services` conflict — needs your call
+#### …and then all three answerers moved again, into `exceptions/handlers`
+
+A later round of the same review: *"the exception/error handlers should be in a dedicated package"*. They were already
+out of `configuration` and `controllers`, but `exceptions` was holding two kinds of thing — the types that **describe**
+a failure and the three classes that **answer** one. Those are different jobs with different reasons to change, so the
+answerers now sit in `exceptions/handlers` and `exceptions` holds types only.
+
+The three stay together rather than being split by what they serve, and that is the same argument as before: which
+advice wins is decided by the `@Order` on each, and `ProblemDetailErrorResponder` is the half of the same mapping that
+runs above the `DispatcherServlet`. Read apart, none of the three explains itself.
+
+This is the only sub-package among the five cross-cutting ones. The others hold one kind of thing each, so dividing
+them would produce packages that answer no question — the rule in `CLAUDE.md` is unchanged, this is the one place it
+did not apply.
+
+#### `ReferenceResolver` is bounded, not generic
+
+The review asked for its type parameter to extend `ReferenceEntity`, "since this is a Reference resolver". It cannot:
+`MediaEntity` is resolved by the same five-line batch loader and is deliberately *not* reference data — no name, no
+normalised name, and not an `AuditableEntity`, because media rows are immutable. The bound would have meant either a
+second copy of the resolver for media or no batch load for it, which is the one thing it exists to do.
+
+So the bound is `Identifiable`, which is the narrowest type that covers all five call sites and is exactly what the
+resolver uses. It paid for itself immediately: the bound lets the resolver read an id off a loaded row itself, which
+removed the `idExtractor` argument every call site used to pass — five copies of `SomeEntity::getId`, any one of which
+could have named a getter for the wrong entity with nothing to catch it. Locals are named for what they hold
+(`requestedIds`, `resolvedById`, `missingIds`) rather than `ids`, `found`, `missing`.
+
+### The `services` conflict — resolved: grouped, and `CLAUDE.md` amended
 
 The root `CLAUDE.md` currently says, verbatim:
 
@@ -280,9 +401,9 @@ classes. At 14 files across four unrelated domains that trade-off has inverted �
 *same four domain names* used everywhere else, not per-feature packages invented ad hoc, which is what the rule was
 actually guarding against.
 
-**Until you say otherwise, the implementation session should keep `services` flat and follow `CLAUDE.md`.** If you agree
-with the recommendation, `CLAUDE.md` line 103 needs updating in the same commit — a design doc must not be the only
-place a convention is recorded.
+**Decided: group by domain.** `CLAUDE.md`'s Architecture section was rewritten in the same commit as the package move
+— a design doc must not be the only place a convention is recorded — and now states the domain-sub-package rule
+directly, with the superseded flat-`services` rule kept as an explicit note so the change is not mistaken for drift.
 
 ### Moving the existing classes
 
@@ -339,6 +460,20 @@ size where the Criteria API costs more in ceremony than it returns. If filters k
 
 `LIKE '%q%'` cannot use a B-tree index, so title search is a sequential scan. Fine for hundreds of recipes; if it ever
 is not, the fix is a `pg_trgm` GIN index or PostgreSQL full-text search, not a different query shape.
+
+**`:q` needs an explicit `CAST`.** As first written, this query failed on every request that did not filter by title —
+which is the most common request the endpoint will ever serve:
+
+```
+ERROR: function lower(bytea) does not exist
+```
+
+A bare null parameter gives PostgreSQL nothing to infer a type from inside `CONCAT`, so it plans the argument as
+`bytea`. `CAST(:q AS string)`, in both the null check and the comparison, fixes it. The other three parameters are
+compared with `=` against a text column and take their type from that.
+
+This is the clearest argument for the `@DataJpaTest` requirement below: the bug is invisible to a mocked repository,
+and it breaks the endpoint's default behaviour completely.
 
 #### Detail — `GET /recipes/{id}`
 
@@ -492,6 +627,10 @@ five services each remembering to set `updated_at` is precisely the duplication 
   (`@CreatedBy`), `updatedAt` (`@LastModifiedDate`) and `updatedBy` (`@LastModifiedBy`). Recipes and the reference
   entities extend it, and it is annotated `@EntityListeners(AuditingEntityListener.class)` — without that listener the
   annotations are inert and every column silently stays null.
+- **Correction to the `recipes` table above:** `updated_by_id` is *not* null until the first update. Spring Data's
+  `AuditingHandler` stamps both pairs on insert, so a freshly created row has `updated_at == created_at` and
+  `updated_by_id == created_by_id`. That is the behaviour that keeps `updated_at` safely `NOT NULL`, and it is not
+  worth switching off — "never updated" is readable as `updated_at == created_at`.
 - **`@CreatedBy` is not optional here.** `ingredients.created_by_id` in
   the [reference tables](#reference-tables-shared-unique-values)
   above and `media.uploaded_by_id` both need it, and `ingredients` needs it precisely because ingredient creation is
@@ -547,17 +686,51 @@ separate schema change to their tables with no bearing on recipes.
 
 ### Recipes — `/recipes`
 
-| Method | Path            | Auth              | Success | Notes                                                               |
-|--------|-----------------|-------------------|---------|---------------------------------------------------------------------|
-| GET    | `/recipes`      | public            | 200     | paginated summaries; filters `categoryId`, `tagId`, `authorId`, `q` |
-| GET    | `/recipes/{id}` | public            | 200     | full recipe                                                         |
-| POST   | `/recipes`      | `USER`            | 201     | `Location` header; body is the created recipe                       |
-| PUT    | `/recipes/{id}` | author or `ADMIN` | 200     | partial update, see below                                           |
-| DELETE | `/recipes/{id}` | author or `ADMIN` | 204     | **not in your requirements — flagged below**                        |
+| Method | Path            | Auth              | Success | Notes                                          |
+|--------|-----------------|-------------------|---------|-------------------------------------------------|
+| GET    | `/recipes`      | public            | 200     | paginated summaries; criteria below             |
+| GET    | `/recipes/{id}` | public            | 200     | full recipe                                     |
+| POST   | `/recipes`      | `USER`            | 201     | `Location` header; body is the created recipe   |
+| PUT    | `/recipes/{id}` | author or `ADMIN` | 200     | partial update, see below                       |
+| DELETE | `/recipes/{id}` | author or `ADMIN` | 204     | **not in your requirements — flagged below**    |
+
+### The listing's criteria
+
+Bound from the query string into `RecipeSearchRequest` — a record, not nine `@RequestParam` arguments, so the criteria
+have one place to be named, documented and validated. The wire format is unchanged.
+
+| Parameter      | Matches                                                           |
+|----------------|--------------------------------------------------------------------|
+| `title`        | substring of the recipe title, case-insensitive                     |
+| `authorId`     | exactly that author                                                 |
+| `authorName`   | substring of the author's username, case-insensitive                |
+| `categoryId`   | that category, **and everything beneath it** unless told otherwise  |
+| `categoryName` | substring of a category's *normalized* name — `entrees` finds `Entrées`; widened the same way |
+| `includeSubcategories` | `true` (default) or `false` for exact membership            |
+| `tagId`        | exactly that tag                                                    |
+| `tagName`      | substring of a tag's *normalized* name                              |
+| `sortBy`       | `CREATED_AT` (default), `UPDATED_AT` or `TITLE`                     |
+| `direction`    | `ASC` or `DESC` (default)                                           |
+
+**Every criterion is optional, including all of them at once.** An unfiltered `GET /recipes` is the home page and
+returns the newest recipes, paginated. Requiring at least one filter would leave the application with no way to browse.
+
+**The name filters are not redundant with the id filters.** The original design had only ids, which assumed the caller
+already knew a UUID for the author, category or tag they wanted — true of a dropdown the UI just rendered, false of a
+search box and false of a hand-written link. Both are kept: names are the friendly path, ids are the exact one.
+
+**`sortBy` is a closed enum, and that is a bug fix rather than a style choice.** Spring Data's `Pageable` binding takes
+a free-text `sort` property and appends it to the query — and this listing pages over hand-written JPQL. `?sort=bogus`
+therefore failed to resolve and threw a `SemanticException`: a **500 on a public endpoint, caused by a typo in a query
+string**. `?sort=author.password` would have ordered by a column no response exposes. The enum makes an unknown value a
+400 and puts the set of sortable columns in one place; the direction is independent, so "oldest first" and "reverse
+alphabetical" were already expressible and needed nothing new.
 
 `categoryId` stays a single-value filter (match recipes carrying *that* category) even though a recipe now has several.
 Multi-category filtering — "desserts AND rapide" — needs an AND-vs-OR decision and a different query shape; out of scope
-until there is a UI asking for it.
+until there is a UI asking for it. By default it also reaches every subcategory of that category, at any depth, and
+`categoryId` and `categoryName` are unioned as two spellings of one filter — see
+[category-hierarchy.md](category-hierarchy.md#filtering-recipes-by-a-category-reaches-its-subcategories).
 
 `DELETE` was not in your list. A library with no way to remove a mistaken entry is awkward, and its permission rule is
 identical to update, so it is designed here — but say the word and it comes out. If it stays, deletion cascades to
@@ -568,14 +741,21 @@ categories.
 
 | Method | Path                | Auth              | Success | Failure notes                                    |
 |--------|---------------------|-------------------|---------|--------------------------------------------------|
-| GET    | `/ingredients`      | public            | 200     | paginated, `?q=` prefix search for the edit form |
+| GET    | `/ingredients`      | public            | 200     | paginated, `?namePrefix=` prefix search for the edit form |
 | POST   | `/ingredients`      | any authenticated | 201     | 409 if the normalized name exists                |
 | PUT    | `/ingredients/{id}` | `ADMIN`           | 200     | rename / change icon                             |
 | DELETE | `/ingredients/{id}` | `ADMIN`           | 204     | **409 if any recipe still references it**        |
-| GET    | `/categories`       | public            | 200     |                                                  |
-| POST   | `/categories`       | `ADMIN`           | 201     | 409 on duplicate                                 |
-| PUT    | `/categories/{id}`  | `ADMIN`           | 200     |                                                  |
-| DELETE | `/categories/{id}`  | `ADMIN`           | 204     | 409 if in use                                    |
+| GET    | `/categories`       | public            | 200     | flat, every level                                |
+| POST   | `/categories`       | `ADMIN`           | 201     | 409 on duplicate, 400 on an unknown parent       |
+| PUT    | `/categories/{id}`  | `ADMIN`           | 200     | 400 on a cycle                                   |
+| DELETE | `/categories/{id}`  | `ADMIN`           | 204     | 409 if in use **or** if it still has children    |
+
+Categories carry three further read routes — `/categories/hierarchy`, `/categories/{id}/subcategories` and
+`/categories/{id}/parent-categories` — documented in [category-hierarchy.md](category-hierarchy.md).
+
+`?q=` on `/ingredients` was renamed `?namePrefix=`: `q` said nothing about what was matched or how, and the answer was
+not guessable — it is a prefix, against the normalized name, so a trailing wildcard can use the index and a leading one
+cannot.
 | GET    | `/tags`             | public            | 200     |                                                  |
 | POST   | `/tags`             | `ADMIN`           | 201     | 409 on duplicate                                 |
 | PUT    | `/tags/{id}`        | `ADMIN`           | 200     |                                                  |
@@ -653,7 +833,39 @@ public record UpdateRecipeRequest(
 
 The constraint is a **type-use annotation on the type argument** — the Bean Validation 2.0 container-element form, and
 exactly how the existing `UpdateUserRequest` already writes it (`Optional<@Size(min = 3, max = 50) String> username`).
-That form is known to work in this codebase, which is reason enough to copy it.
+
+> ### Correction: this recommendation was wrong, and the suggested test is what proved it
+>
+> The three-line test suggested below was written first, and it failed — **for the recommended form**.
+>
+> Hibernate Validator's `OptionalValueExtractor` is `@UnwrapByDefault` and extracts `Optional.orElse(null)`. So an
+> **absent** field arrives at the constraint as `null`, and `@NotEmpty` rejects `null`. Every partial update that did
+> not mention categories would answer **400** — precisely the outcome the `Optional` was chosen to prevent.
+> `@NotBlank` on `title` broke identically. This is the "quiet" failure mode the section below feared, except it
+> afflicts the form the section recommended.
+>
+> `UpdateUserRequest` is **not** a precedent: `@Size` is null-tolerant by specification, so it passes the absent case
+> by accident rather than by design. That is why the existing code has never shown the problem.
+>
+> The fix is a small custom constraint, `@NotEmptyIfPresent`, that says what is actually meant — absent is fine,
+> supplied-but-empty is not — applied to the `Optional` itself:
+>
+> ```java
+> public record UpdateRecipeRequest(
+>         @NotEmptyIfPresent Optional<@Size(max = 200) String> title,
+>         @NotEmptyIfPresent Optional<List<String>> categoryIds,
+>         Optional<List<String>> tagIds,
+>         Optional<List<@Valid RecipeStepRequest>> steps,
+>         ...
+> ) {}
+> ```
+>
+> Null-tolerant constraints such as `@Size` still belong inside the diamond and are used there. Cascading with
+> `@Valid` also works inside the diamond, through both containers, and is asserted.
+>
+> The lesson generalises past this field: **inside an `Optional`, a constraint that implies non-null fires on the
+> absent case.** `@Size`, `@Pattern`, `@Min` and friends are safe there; `@NotNull`, `@NotBlank` and `@NotEmpty` are
+> not.
 
 Writing it in front of the field instead — `@NotEmpty Optional<List<String>> categoryIds` — looks equivalent and is not.
 `@NotEmpty` lists `TYPE_USE` among its targets, so the compiler binds it to the `Optional` type rather than to the
@@ -663,14 +875,11 @@ to `null`, which `@NotEmpty` rejects, turning every untouched-categories update 
 Validator internal — whether `OptionalValueExtractor` is declared `@UnwrapByDefault` — that is **not worth relying on
 either way**. Both outcomes are wrong and neither is what the table above asks for.
 
-> Unverified: which of those two failures actually occurs was not confirmed against the Hibernate Validator version on
-> this classpath. The recommendation does not depend on it — but if you want certainty before writing the code, a
-> three-line unit test that validates both record shapes against `Optional.empty()` settles it in one run, and is worth
-> keeping as documentation of the rule.
+> Resolved: it fails **quietly**, and so does the form recommended above — see the correction box. The test suggested
+> here is `UpdateRecipeRequestValidationTest`, and writing it before the code is what caught this.
 
-The rule generalises to every constrained field in every `Optional`-based request record: **the annotation belongs
-inside the diamond.** On the create side there is no `Optional` and no ambiguity — `CreateRecipeRequest.categoryIds`
-is a plain `@NotEmpty List<String>`.
+On the create side there is no `Optional` and no ambiguity — `CreateRecipeRequest.categoryIds` is a plain
+`@NotEmpty List<String>`.
 
 The alternative — per-element patching with client-supplied child ids and add/update/remove intent — is a much more
 complex contract that buys nothing here: the editing UI is a form holding the entire recipe, so it always knows the
@@ -750,16 +959,88 @@ The first one is worth spelling out because it is the easiest to write uselessly
 set or a size. `assertThat(response.steps()).extracting(Step::instruction).containsExactly(...)` fails on a shuffle;
 `containsExactlyInAnyOrder` does not, and neither does a count.
 
-## Open points to confirm
+## Open points — as resolved
 
-1. **`services` packaging** — grouping it by domain contradicts `CLAUDE.md` line 103. Recommendation above is to group
-   and amend the rule; until you say so, the implementation keeps `services` flat.
-2. **Moving existing classes** into the new domain folders — recommended, as its own commit.
-3. `DELETE /recipes/{id}` — not in your requirements; designed above unless you cut it.
-4. Ingredient **edit/delete** restricted to `ADMIN` while **create** is open to every authenticated user.
-5. `units` administered by `ADMIN`, like categories and tags.
-6. **Categories vs tags** are now structurally identical; the difference is convention plus the `@NotEmpty`. Kept as two
-   tables because you asked for both — flagged so the eventual convergence is recognisable.
-7. No `servings` / prep-time / cook-time fields — you did not list them, so they are out. All three are additive
-   later, but `servings` in particular is what makes the numeric quantities scalable, so it is worth deciding now
-   rather than after recipes exist.
+1. **`services` packaging** — resolved: grouped by domain, and `CLAUDE.md`'s Architecture section rewritten in the same
+   commit so the convention is not recorded only here.
+2. **Moving existing classes** into the new domain folders — done, as its own commit.
+3. `DELETE /recipes/{id}` — kept and implemented, with the same author-or-admin rule as update.
+4. Ingredient **edit/delete** restricted to `ADMIN` while **create** is open to every authenticated user — implemented,
+   and asserted end to end in `ReferenceEndpointsIntegrationTest`.
+5. `units` administered by `ADMIN`, like categories and tags — implemented.
+6. **Categories vs tags** are structurally identical; the difference is a product decision plus the emptiness rule on
+   categories. Kept as two tables — flagged so the eventual convergence stays recognisable.
+   **Resolved by the PR review:** categories gained a hierarchy, tags did not, so the two are no longer structurally
+   identical and the convergence is off the table. See [category-hierarchy.md](category-hierarchy.md).
+7. No `servings` / prep-time / cook-time fields — still out. `servings` in particular is what would make the numeric
+   quantities scalable, and it remains the most obvious next addition.
+
+## Still open after implementation
+
+- **No orphan-media cleanup job.** `MediaRepository.findOrphans` exists and is not scheduled; nothing deletes media
+  that was uploaded and never attached.
+- **No per-user upload quota.** `totalBytesUploadedBy` exists and is not called. See
+  [media-storage.md](media-storage.md).
+- **No rate limiting** anywhere, which is the gap `password-reset.md` already recorded.
+- **`ddl-auto=update` with no migration tool.** Unchanged by this work and still the thing most likely to hurt on the
+  VPS: it cannot drop or rename anything, it silently skips changes it cannot make, and nothing records what a given
+  database has had applied. Adding Flyway deserves its own session before the first real deployment.
+- **Three pre-existing defects in the users mapping** — `user_roles` mapped both as a `@ManyToMany` join table and as
+  an entity, `RoleEntity`'s self-referential `roles` collection, and `RolesRepository`/`UserRolesRepository` declaring
+  `UUID` id types for `String`-id entities. All out of scope here, all load-bearing for anything creating users or
+  roles. See [optional-authentication.md](optional-authentication.md#pre-existing-warts-the-tests-had-to-work-around).
+
+## Replacing a child collection: why `RecipeService` flushes
+
+`PUT /recipes/{id}` replaces a whole collection when one is present — steps, ingredient groups, cover pictures. The
+implementation clears the managed collection and rebuilds it, renumbering `position` from zero, which is the contract
+the API advertises.
+
+That combination is in direct tension with the schema. `recipe_steps`, `recipe_ingredient_groups` and
+`recipe_cover_pictures` each carry `UNIQUE (recipe_id, position)` (and `recipe_step_pictures` carries
+`UNIQUE (step_id, position)`). Edit a three-step recipe down to two and the replacements want positions 0 and 1 —
+which the rows being deleted still hold.
+
+**Hibernate orders entity INSERTs before entity DELETEs inside a single flush.** So the insert of the new position 0
+reached the database while the old position 0 was still there, hit the constraint, and the edit came back
+`409 "That value already exists."` — on essentially every ordinary edit, because almost every edit re-uses position 0.
+
+`RecipeService.clearForReplacement` therefore clears the collection and calls `EntityManager.flush()` before the
+replacements are built, so the DELETEs go out in their own statement batch.
+
+### The analysis that got this wrong
+
+Worth recording, because reading the action ordering alone points the other way. `ActionQueue$OrderedActions` declares:
+
+```
+OrphanCollectionRemoveAction, OrphanRemovalAction, EntityInsertAction, EntityUpdateAction, ..., EntityDeleteAction
+```
+
+`OrphanRemovalAction` sits at position 2, *ahead* of inserts — which reads like a guarantee that orphan removal always
+precedes insertion. It is not. `DefaultDeleteEventListener` only queues an `OrphanRemovalAction` when the persistence
+context is in its remove-orphans-before-updates phase (`PersistenceContext.isRemovingOrphanBeforeUpdates()`); a cascade
+from a cleared collection is not in that phase, so the deletes land in the ordinary `EntityDeleteAction` list, which
+runs **last**.
+
+The lesson is the one already in `CLAUDE.md` about hand-written `@Query` methods, in a new place: this is not
+answerable by reading, only by running. The test that settles it is
+`RecipesIntegrationTest.replacesANonEmptyStepListWithAnotherOne_reusingTheSamePositions`, which deliberately re-uses
+the positions. Every PUT test before it changed the title, set or cleared the introduction, or sent an empty array —
+none of which ever re-inserts at an occupied position, which is why the bug shipped.
+
+### Alternatives rejected
+
+- **Drop the unique constraint.** It is the only thing stopping two steps claiming position 3, which would make
+  `@OrderBy("position")` non-deterministic — the exact failure the constraint was added for.
+- **`DEFERRABLE INITIALLY DEFERRED`.** Correct in principle and PostgreSQL supports it, but `ddl-auto=update` cannot
+  express it, so it would need a hand-run script in `docs/sql/` plus a matching note on every fresh clone. A one-line
+  flush in the one method that needs it is the smaller change.
+- **Diff the incoming list against the stored rows and mutate in place.** Avoids the delete entirely and would be the
+  right answer if these collections were large. They hold a handful of rows and the diffing code would be considerably
+  harder to read than the flush.
+- **Renumber from the current maximum instead of from zero.** Positions would then drift upwards forever and stop
+  meaning "the third step".
+
+The introduction is a `@OneToOne` whose owning FK (`recipe_introductions.recipe_id`) is also unique, so it would have
+the same problem — `replaceIntroduction` avoids it by mutating the existing row's text in place rather than deleting
+and re-creating, and only sets the association to `null` when the introduction is genuinely being removed.

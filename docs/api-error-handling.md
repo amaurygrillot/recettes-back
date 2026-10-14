@@ -1,11 +1,15 @@
 # API error handling — exception mapping and status codes
 
-Status: **design only**, nothing implemented yet. Introduced for the recipes feature; see
+Status: **implemented**. Introduced for the recipes feature; see
 [recipes-domain-model.md](recipes-domain-model.md). Distinct from
 [security-error-handling.md](security-error-handling.md), which explains why `/error` must be `permitAll()` — that
 document covers the servlet-container plumbing, this one covers the application's own exception-to-status mapping.
 
 ## The problem this solves
+
+> **Status: implemented.** Companion document:
+> [service-controller-contract.md](service-controller-contract.md), which states the other half — what a controller may
+> assume from a service, so that no controller needs a `try/catch` or a null check in the first place.
 
 Today every controller method wraps its service call in its own `try/catch` and maps `IllegalStateException → 400`,
 `Exception → 500`. That is workable when a request has exactly two outcomes. Recipes have at least five distinct
@@ -107,6 +111,43 @@ ResponseEntity<ProblemDetail> handle(DataIntegrityViolationException exception) 
 `isUniqueViolation` tests the SQLState (`23505`), not the message text — constraint messages are Postgres-version
 specific and locale-dependent, and string-matching them is the same anti-pattern this whole document exists to remove.
 
+As implemented it **walks the whole cause chain** looking for a `java.sql.SQLException` carrying that SQLState, rather
+than inspecting only `getCause()`. How deeply Spring and Hibernate nest the driver's exception is an implementation
+detail of versions we do not control, and a one-level check silently degrades to "everything is a 500" when that
+nesting changes — the failure mode being that the create-race 409 quietly stops happening and no test that only
+provokes the happy path notices. The loop is also guarded against a self-referencing cause, which some drivers
+produce.
+
+Where the handler classes live: **both advices and `ProblemDetailErrorResponder` sit in `exceptions/handlers`**, one
+package below the exception types they map.
+
+The targeted `UserExceptionHandler` originally lived beside the controller it serves, in `controllers/users`, on the
+grounds that it is meaningless without it. The PR review moved it, and that is the better call: it is not a controller
+and it maps no route, and — more to the point — the two advices only make sense **read together**. Which of them wins
+is decided by the `@Order` on each, `HIGHEST_PRECEDENCE` against `LOWEST_PRECEDENCE`, and that relationship is
+impossible to notice when they are two packages apart. `ProblemDetailErrorResponder` joined them for the same reason:
+it is the third piece of the same mechanism, the one that runs above the `DispatcherServlet` where an
+`@ExceptionHandler` cannot reach.
+
+A later round of review asked for the handlers to have a package of their own, which is where `exceptions/handlers`
+comes from. `exceptions` was holding two kinds of thing: the types that **describe** a failure and the three classes
+that **answer** one. The three move as a unit, for the reason above — splitting them is what the `@Order` argument
+rules out — so the only change is that they now sit together one level down, with the types left alone above them.
+
+### The retryable statuses
+
+Two handlers answer with a `Retry-After` header, and they are not interchangeable:
+
+| Status | Exception                     | Means                                                     |
+|--------|-------------------------------|-----------------------------------------------------------|
+| `503`  | `ServiceOverloadedException`  | the **server** is momentarily at capacity (decode pool full) |
+| `429`  | `RateLimitExceededException`  | the **caller** has made too many of these requests          |
+
+Collapsing them would tell a throttled client the server is unwell and a queued client that it is being throttled, each
+sending the reader to the wrong place. They share one private helper, which floors the header at one second: the header
+is whole seconds, and a sub-second wait renders as `0`, which a client reads as "retry immediately" — a hot loop
+against the thing that just asked it to slow down.
+
 The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
 `media.created_at NOT NULL` trap in [recipes-domain-model.md](recipes-domain-model.md#auditing) and any missed
 `@NotBlank` on a child request record both surface as `DataIntegrityViolationException` and would otherwise be
@@ -200,4 +241,73 @@ an oversight — it is the anti-enumeration guarantee documented in [password-re
 survive this refactor. A targeted advice on `UserController` is the right place to enforce it, and the test asserting
 it should say why.
 
+### That advice caught far too much, and the PR review fixed it
+
+As first written it caught `IllegalStateException`, because that is what the reset flow threw. But
+`@RestControllerAdvice(assignableTypes = UserController.class)` applies to the **whole controller**, so *any*
+`IllegalStateException` raised anywhere beneath it came back as `400 Invalid password reset request`: a missing `USER`
+role row on registration, a JVM without SHA-256, an ordinary bug in unrelated code. Wrong status, wrong endpoint, and a
+message that sends whoever is debugging it to the wrong flow — while quietly hiding a genuine 500 behind a plausible
+400.
+
+The reset flow now throws a dedicated `PasswordResetFailedException` and the advice catches only that. One type for all
+four failures, because all four must stay indistinguishable in the response; being able to *throw* them apart would be
+the first step towards accidentally *reporting* them apart. Everything else keeps the 500 it deserves — which is what
+made it safe for `UserService` to fail loudly when the `USER` role has not been seeded.
+
 `UserControllerTest` and `AuthenticationControllerTest` need their expected statuses updated accordingly.
+
+## Three failures that were answering the wrong status
+
+All three were 500s for conditions the caller caused, which `CLAUDE.md` reserves 500 for the opposite of.
+
+- **A truncated or corrupt image upload.** `ImageReencoder.reencode` documented `@throws InvalidInputException` for
+  bytes that "cannot be decoded at all" and actually threw `UncheckedIOException`, which no handler mapped — so it fell
+  to `@ExceptionHandler(Exception.class)` and answered **500** with a stack trace in the log. Five bytes are enough to
+  trigger it (`FF D8 FF 00 01`): `ImageFormat.detect` compares only the three-byte JPEG prefix, and `ImageIO` returns
+  the JPEG reader, so it is `getWidth(0)` that fails. Now `InvalidInputException` → **400**, with the decoder's
+  exception kept as the cause for the log.
+- **A `null` element inside `steps`, `ingredientGroups` or `coverPictures`.** Hibernate Validator treats cascading into
+  a `null` container element as a no-op, so `[null]` passed `@Valid` and was dereferenced in `RecipeService` —
+  **500**. `@NotNull` on the container element makes it the **400** it always was.
+- **A blank id inside `categoryIds`.** Not a wrong status but a wrong *outcome*: `""` is not an empty list, so
+  `@NotEmpty` passed, and `ReferenceResolver` ignores blanks, so the recipe was stored with no categories and answered
+  **201**. On `PUT` it answered **200** having silently cleared every category. `@NotBlank` on the element closes both.
+
+Genuine storage failures — a full disk, an unwritable media root — now have their own
+`@ExceptionHandler(UncheckedIOException.class)`. Still a 500, because it is the server that failed, but logged
+distinctly instead of being filed with the programming bugs.
+
+## `instance` is the framework's job
+
+The advice methods used to set it themselves:
+
+```java
+body.setInstance(URI.create(request.getRequestURI()));
+```
+
+Spring MVC's `HttpEntityMethodProcessor` already does this when a returned `ProblemDetail` has a null `instance`, so
+the line changed nothing — while forcing eight `@ExceptionHandler` methods to accept an `HttpServletRequest` they
+otherwise never read. The proof was already in the file: `handleMaxUploadSizeExceededException` never set it and always
+answered with a populated `instance`.
+
+Dropped, along with the parameter. Only `handleUnexpected` still takes the request, because it logs the method and URI.
+
+**`ProblemDetailErrorResponder` must keep setting it.** It writes through an `ObjectMapper` from inside the filter
+chain, above the `DispatcherServlet`, where no return-value handler runs.
+
+The unit tests can no longer assert `instance` — calling a handler directly never reaches the processor that fills it.
+It is asserted over real HTTP instead, in
+`RecipesIntegrationTest.problemResponsesCarryTheRequestUriAsTheirInstance`.
+
+## A rejected token now carries a body
+
+`JwtAuthenticationFilter` wrote `response.setStatus(SC_UNAUTHORIZED)` by hand, with no content type and no entity. That
+made the single most common auth failure — an expired token, which is routine, since `RsaKeyConfig` invalidates every
+token in circulation at each restart — the one error in the API with nothing to parse, while every other 401 and 403
+came back as `problem+json`. An SPA has to recognise exactly that case to trigger a silent re-login.
+
+The filter now calls `ProblemDetailErrorResponder.commence`, which is why that class is a `@Component` rather than
+something `SecurityFilterConfig` constructs inline. It cannot simply throw: the filter sits **before**
+`ExceptionTranslationFilter`, so an `AuthenticationException` from it would propagate past nothing that could turn it
+into a response.

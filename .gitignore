@@ -35,3 +35,6 @@ build/
 ### Environment
 
 .env
+
+### Uploaded media (app.media.storage-path default) ###
+/media/
