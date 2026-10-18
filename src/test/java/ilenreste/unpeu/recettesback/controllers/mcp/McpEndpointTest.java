@@ -28,9 +28,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * The MCP endpoint through the real security filter chain and the real MCP server.
  * <p>
- * Two things are worth pinning: that {@code /mcp} is closed to anonymous callers
- * (it is reachable only because nobody listed it as public, so a careless
- * {@code permitAll} would open the write tools), and that the tools are actually
+ * Two things are worth pinning: that {@code /mcp} is closed to everyone but an administrator
+ * (anonymous gets 401, a plain user 403, read tools included, since a careless
+ * {@code permitAll} or a missing rule would open the write tools), and that the tools are actually
  * registered and run under the caller's identity.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -64,7 +64,7 @@ class McpEndpointTest {
 
     @BeforeEach
     void setUp() {
-        account = TestAccount.create(usersRepository, rolesRepository, userRolesRepository, passwordEncoder, "USER");
+        account = TestAccount.create(usersRepository, rolesRepository, userRolesRepository, passwordEncoder, "USER", "ADMIN");
     }
 
     @AfterEach
@@ -106,22 +106,22 @@ class McpEndpointTest {
     }
 
     @Test
-    void adminToolsAreRefusedToANonAdmin() {
-        String body = callRaw("create_tag", "{\"tag\":{\"name\":\"mcp-forbidden\"}}", account.bearerToken(restTemplate));
+    void nonAdminCallerIsAnsweredForbiddenEvenOnReadTools() {
+        try (TestAccount user = TestAccount.create(usersRepository, rolesRepository, userRolesRepository,
+                passwordEncoder, "USER")) {
+            ResponseEntity<String> response = post(CALL_LIST_UNITS, user.bearerToken(restTemplate));
 
-        assertThat(body).contains("\"isError\":true").contains("restricted to administrators");
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        }
     }
 
     @Test
-    void adminToolsWorkForAnAdmin() {
-        try (TestAccount admin = TestAccount.create(usersRepository, rolesRepository, userRolesRepository,
-                passwordEncoder, "USER", "ADMIN")) {
-            String token = admin.bearerToken(restTemplate);
-            String tagId = call("create_tag", "{\"tag\":{\"name\":\"mcp-tag-" + UUID.randomUUID() + "\"}}", token)
-                    .get("id").asString();
+    void adminCanCurateReferenceData() {
+        String token = account.bearerToken(restTemplate);
+        String tagId = call("create_tag", "{\"tag\":{\"name\":\"mcp-tag-" + UUID.randomUUID() + "\"}}", token)
+                .get("id").asString();
 
-            assertThat(callRaw("delete_tag", "{\"id\":\"" + tagId + "\"}", token)).doesNotContain("\"isError\":true");
-        }
+        assertThat(callRaw("delete_tag", "{\"id\":\"" + tagId + "\"}", token)).doesNotContain("\"isError\":true");
     }
 
     @Test

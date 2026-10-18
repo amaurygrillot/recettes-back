@@ -5,7 +5,7 @@
 @username = your-username
 @password = your-password
 
-### Login - 200, body is the JWT. Paste it below.
+### Login as an ADMIN account - 200, body is the JWT. Paste it below.
 POST {{host}}/auth/login
 Content-Type: application/json
 
@@ -17,7 +17,7 @@ Content-Type: application/json
 @categoryId = PASTE_CATEGORY_ID_HERE
 @ingredientId = PASTE_INGREDIENT_ID_HERE
 
-### No token - 401
+### No token - 401 (a logged-in non-admin gets 403)
 POST {{host}}/mcp
 Content-Type: application/json
 Accept: application/json, text/event-stream

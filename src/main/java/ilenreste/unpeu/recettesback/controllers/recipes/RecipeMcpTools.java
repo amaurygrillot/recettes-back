@@ -27,8 +27,8 @@ import java.util.List;
  * The one thing a controller gets for free and a tool does not is {@code @Valid},
  * hence {@link RequestValidator}.
  * <p>
- * Reaching these tools needs a valid JWT: {@code /mcp} is not among the public
- * routes in {@code SecurityFilterConfig}. See {@code docs/mcp-server.md}.
+ * Reaching these tools needs a valid JWT <strong>of an administrator</strong>: {@code /mcp} has its own ADMIN rule
+ * in {@code SecurityFilterConfig}. See {@code docs/mcp-server.md}.
  */
 @Log4j2
 @Component
@@ -93,7 +93,7 @@ public class RecipeMcpTools {
     @McpTool(name = "delete_recipe",
             description = "Permanently delete a recipe the caller wrote (or any, for an admin), with its "
                     + "introduction, steps and ingredient lines. Cannot be undone.",
-            annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
+            annotations = @McpTool.McpAnnotations(destructiveHint = true, openWorldHint = false))
     public String deleteRecipe(@McpToolParam(description = "The recipe id") String id) {
         log.info("MCP delete_recipe {}", id);
         recipeService.delete(id);

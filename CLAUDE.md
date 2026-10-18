@@ -247,7 +247,7 @@ The API is a stateless resource server that also issues its own JWTs (self-conta
 
 ### MCP server
 
-`POST /mcp` serves MCP tools (Spring AI, Streamable HTTP, stateless) over the same JWT filter chain; the tools in
+`POST /mcp` serves MCP tools (Spring AI, Streamable HTTP, stateless) over the same JWT filter chain, **admin-only**; the tools in
 `RecipeMcpTools` / `ReferenceMcpTools` delegate to the services. When you add or change a request record those tools
 take, mark every genuinely optional component `@JsonProperty(required = false)` — the generated tool schema treats all
 components as required otherwise. See [docs/mcp-server.md](docs/mcp-server.md).

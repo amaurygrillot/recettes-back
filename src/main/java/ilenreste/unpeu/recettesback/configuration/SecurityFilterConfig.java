@@ -75,6 +75,10 @@ public class SecurityFilterConfig {
                         .requestMatchers(HttpMethod.PUT, "/users/reinit-password").permitAll()
                         .requestMatchers(HttpMethod.POST, "/auth/**").permitAll()
 
+                        // The MCP server is an administrator's tool, read tools included: one rule covers every
+                        // tool because they all share this URL. See docs/mcp-server.md.
+                        .requestMatchers("/mcp", "/mcp/**").hasRole("ADMIN")
+
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .requestMatchers("/users/**").hasRole("USER")
                         .anyRequest().authenticated()
