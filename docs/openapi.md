@@ -157,13 +157,17 @@ and the shape of the page. The YAML lists the criteria as individual query param
 
 ### The response media types the generator writes are wrong, so the served spec corrects them
 
-The generator writes every response of an operation with the operation's *whole* list of media types, so a `201`
-claims to be `application/problem+json` and a `404` claims to be `application/json`. `OpenApiConfig.servedSpecCustomizer`
-fixes that in what springdoc serves: a 4xx/5xx keeps only `application/problem+json`, anything else drops it. Having no `produces` to read, springdoc labels the body of the two
-hand-written searches `*/*`; it is JSON, and is relabelled. A `304` has no body, and springdoc's habit of copying the return
-type onto it is undone. A multipart request body is marked required
-when its schema has required parts, which springdoc does not do on its own. And `Pageable` expands to `page`, `size`
-**and `sort`**: the services ignore `sort` on purpose (see `RecipeSortField`), so it is removed rather than advertised.
+The generator writes every response of an operation with the operation's *whole* list of media types, so a `201` claims
+to be `application/problem+json` and a `404` claims to be `application/json`. `OpenApiConfig.servedSpecCustomizer` fixes
+that in what springdoc serves: a 4xx/5xx keeps only `application/problem+json`, anything else drops it. Four more
+corrections go through the same place:
+
+- Having no `produces` to read, springdoc labels the body of the two hand-written searches `*/*`; it is JSON, and is
+  relabelled.
+- A `304` has no body, and springdoc's habit of copying the return type onto it is undone.
+- A multipart request body is marked required when its schema has required parts, which springdoc does not do on its own.
+- `Pageable` expands to `page`, `size` **and `sort`**: the services ignore `sort` on purpose (see `RecipeSortField`), so it
+  is removed rather than advertised.
 
 ### The generated `produces` and `consumes` conditions are dropped, so a client's headers still work
 
@@ -216,6 +220,19 @@ decision, not a side effect.
 The contract test is what makes this safe to leave alone: it fails when a controller is changed without the YAML (an
 endpoint added, a parameter dropped), when the YAML is changed without the code (for the parts the generated interfaces
 cannot enforce: the hand-written searches, the schemas), and when a DTO record gains or loses a field.
+
+### How "no behaviour changed" was checked
+
+Beyond the existing suite passing untouched, the original `master` build and this branch were run side by side against the
+same database and sent the same 302 requests: every `Accept` header, requests with no body, an empty body, a malformed body
+and the wrong content type, the upload shapes, and each of anonymous, `USER` and `ADMIN`. Status, content type and error
+text were compared. The first run found two differences (the `produces` and `consumes` conditions above), both fixed; the
+last found none. The two 500s both builds share - a non-multipart `POST /media`, where `MultipartException` reaches the
+catch-all handler - are an existing bug, left alone because fixing it changes a status; mapping it to a 400 or 415 is a
+small follow-up.
+
+Repeat the exercise when the generator or springdoc is upgraded: it is the only check that sees the mappings Spring really
+builds.
 
 ## When the tools are upgraded
 
