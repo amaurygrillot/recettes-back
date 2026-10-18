@@ -122,6 +122,19 @@ class GeneratedMappingsNegotiationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
+    @Test
+    void anInvalidSearchParameterIsStillA400WhateverTheClientAccepts() {
+        // The hand-written searches must not declare a produces either: with one, the mapping would answer 406
+        // for a client that accepts HTML before the bad parameter was ever looked at.
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.ACCEPT, MediaType.TEXT_HTML_VALUE);
+
+        ResponseEntity<String> response = restTemplate.exchange("/recipes?sortBy=bogus", HttpMethod.GET,
+                new HttpEntity<>(null, headers), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
     private static HttpHeaders jsonOnly(String authorization) {
         HttpHeaders headers = new HttpHeaders();
         headers.set(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE);

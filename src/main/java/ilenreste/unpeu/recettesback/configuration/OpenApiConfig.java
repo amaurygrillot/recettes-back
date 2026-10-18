@@ -76,6 +76,10 @@ public class OpenApiConfig {
      * nothing else is, so a 4xx or 5xx keeps only that type and anything else drops
      * it.
      * <p>
+     * <strong>Wildcard.</strong> The generated mappings have no {@code produces} (see
+     * {@code GeneratedMappingsConfig}), and neither do the two hand-written searches, so springdoc has no
+     * media type to give their body and writes {@code *}{@code /*}; it is JSON.
+     * <p>
      * <strong>Paging.</strong> {@code Pageable} expands to {@code page}, {@code size}
      * and {@code sort}. The services read the first two and ignore the third &mdash;
      * ordering is {@code sortBy}/{@code direction}, a closed enum, deliberately not
@@ -108,6 +112,12 @@ public class OpenApiConfig {
             // is "your copy is still current": it never has a body.
             response.setContent(null);
             return;
+        }
+        // With no produces on a mapping, springdoc labels a body */*. The two hand-written searches are the
+        // only mappings without one that have a body, and it is JSON.
+        io.swagger.v3.oas.models.media.MediaType anyType = content.remove(MediaType.ALL_VALUE);
+        if (anyType != null) {
+            content.addMediaType(MediaType.APPLICATION_JSON_VALUE, anyType);
         }
         boolean error = status.startsWith("4") || status.startsWith("5");
         content.keySet().removeIf(mediaType -> error != PROBLEM_JSON.equals(mediaType));

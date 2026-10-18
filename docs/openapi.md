@@ -159,8 +159,9 @@ and the shape of the page. The YAML lists the criteria as individual query param
 
 The generator writes every response of an operation with the operation's *whole* list of media types, so a `201`
 claims to be `application/problem+json` and a `404` claims to be `application/json`. `OpenApiConfig.servedSpecCustomizer`
-fixes that in what springdoc serves: a 4xx/5xx keeps only `application/problem+json`, anything else drops it. A `304` has
-no body, and springdoc's habit of copying the return type onto it is undone. A multipart request body is marked required
+fixes that in what springdoc serves: a 4xx/5xx keeps only `application/problem+json`, anything else drops it. Having no `produces` to read, springdoc labels the body of the two
+hand-written searches `*/*`; it is JSON, and is relabelled. A `304` has no body, and springdoc's habit of copying the return
+type onto it is undone. A multipart request body is marked required
 when its schema has required parts, which springdoc does not do on its own. And `Pageable` expands to `page`, `size`
 **and `sort`**: the services ignore `sort` on purpose (see `RecipeSortField`), so it is removed rather than advertised.
 
@@ -175,8 +176,8 @@ always been into a 415. Both are behaviour changes made in the name of documenta
 
 `GeneratedMappingsConfig` removes both conditions from every method a generated interface declares, so a mapping is again
 a method and a path, and content negotiation is exactly what it was. Only those methods: Spring Boot's `BasicErrorController`
-needs its own `produces` to start, and the hand-written searches keep theirs. `GeneratedMappingsNegotiationTest` pins every
-shape that broke.
+needs its own `produces` to start, and nothing written by hand declares either condition, so the hand-written searches are
+back to a method and a path as well. `GeneratedMappingsNegotiationTest` pins every shape that broke.
 
 ### Login does not validate its body, and still must not
 

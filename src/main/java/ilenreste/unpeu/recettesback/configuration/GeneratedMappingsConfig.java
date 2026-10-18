@@ -33,7 +33,7 @@ import java.lang.reflect.Method;
  * <p>
  * Only those mappings, and not every one: Spring Boot's own {@code BasicErrorController} tells its HTML
  * and JSON handlers for {@code /error} apart by {@code produces}, and the application will not start
- * without it. The two paged searches are written by hand and keep the {@code produces} they declare.
+ * without it. Nothing written by hand declares either condition, so there is nothing else to strip.
  */
 @Configuration
 public class GeneratedMappingsConfig {
@@ -59,10 +59,7 @@ public class GeneratedMappingsConfig {
         };
     }
 
-    /**
-     * A controller method the generated interface declares, as opposed to one written beside it: the
-     * two paged searches carry their own {@code produces}, by hand, and keep it.
-     */
+    /** A controller method a generated interface declares, as opposed to one written beside it. */
     private static boolean isDeclaredByGeneratedApi(Method method, Class<?> handlerType) {
         Method declared = ClassUtils.getInterfaceMethodIfPossible(method, handlerType);
         return GENERATED_API_PACKAGE.equals(declared.getDeclaringClass().getPackageName());

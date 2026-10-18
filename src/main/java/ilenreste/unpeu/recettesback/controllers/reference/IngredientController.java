@@ -77,14 +77,13 @@ public class IngredientController implements IngredientsApi {
      */
     @Operation(operationId = "searchIngredients", tags = "Ingredients", summary = "Search ingredients",
             responses = {
-                    // No content here: springdoc builds it from the return type and the produces below, which is
-                    // the one place a generic Page<T> can be described. See above on why this method is not generated.
+                    // No content here: springdoc builds it from the return type, which is the one place a generic
+                    // Page<T> can be described. It labels the body */*, as there is no produces; OpenApiConfig corrects it.
                     @ApiResponse(responseCode = "200", description = "A page of ingredients."),
                     @ApiResponse(responseCode = "400", description = "Invalid input.",
                             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
                                     schema = @Schema(implementation = ProblemDetail.class)))})
-    @GetMapping(value = "/ingredients",
-            produces = {MediaType.APPLICATION_JSON_VALUE, MediaType.APPLICATION_PROBLEM_JSON_VALUE})
+    @GetMapping("/ingredients")
     public ResponseEntity<Page<IngredientResponse>> searchIngredients(
             @Valid @ParameterObject IngredientSearchRequest request,
             @ParameterObject @PageableDefault(size = 20) Pageable pageable) {
