@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.controllers.users;
 
+import ilenreste.unpeu.recettesback.api.UsersApi;
 import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.handlers.UserExceptionHandler;
 import ilenreste.unpeu.recettesback.models.users.requests.CreateUserRequest;
@@ -9,13 +10,8 @@ import ilenreste.unpeu.recettesback.models.users.responses.UserResponse;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
 import ilenreste.unpeu.recettesback.services.users.UserService;
-import jakarta.validation.Valid;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
@@ -29,11 +25,14 @@ import java.net.URI;
  * failure cases are typed exceptions mapped centrally — 409 for a taken username,
  * 404 for an account that no longer exists — so there is still nothing to check
  * here by hand.
+ * <p>
+ * The routes, parameters, status codes and security of every method here are
+ * declared in {@code openapi.yaml} and reach this class through the generated
+ * {@link UsersApi}; see {@code docs/openapi.md}.
  */
 @Log4j2
-@RequestMapping("/users")
 @RestController
-public class UserController {
+public class UserController implements UsersApi {
 
     private final UserService userService;
     private final PasswordResetService passwordResetService;
@@ -46,8 +45,8 @@ public class UserController {
         this.currentUserService = currentUserService;
     }
 
-    @PostMapping("/create")
-    public ResponseEntity<UserResponse> createUser(@Valid @RequestBody CreateUserRequest request) {
+    @Override
+    public ResponseEntity<UserResponse> createUser(CreateUserRequest request) {
         log.info("Creating a new user account");
         UserResponse created = userService.createUser(request);
         // Here rather than in the service: this line runs after the transaction has committed.
@@ -66,8 +65,8 @@ public class UserController {
      * instead of being re-derived per controller. See that class for why a null
      * check is the wrong guard.
      */
-    @PutMapping("/update")
-    public ResponseEntity<UserResponse> updateUser(@Valid @RequestBody UpdateUserRequest request) {
+    @Override
+    public ResponseEntity<UserResponse> updateUser(UpdateUserRequest request) {
         String userId = currentUserService.currentUserId()
                 .orElseThrow(() -> new ForbiddenOperationException(
                         "You must be signed in to update your account."));
@@ -82,8 +81,8 @@ public class UserController {
      * Every way this can fail answers identically — see
      * {@link UserExceptionHandler}.
      */
-    @PutMapping("/reinit-password")
-    public ResponseEntity<Void> reinitPassword(@Valid @RequestBody ResetPasswordRequest request) {
+    @Override
+    public ResponseEntity<Void> resetPassword(ResetPasswordRequest request) {
         log.info("Applying a password reset");
         passwordResetService.resetPassword(request);
         return ResponseEntity.ok().build();

@@ -1,5 +1,7 @@
 package ilenreste.unpeu.recettesback.models.recipes.requests;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 /**
  * The block of text shown above everything else on a recipe.
  * <p>
@@ -31,7 +33,14 @@ package ilenreste.unpeu.recettesback.models.recipes.requests;
  */
 public record RecipeIntroductionRequest(String text) {
 
-    /** Blank in the {@code String.isBlank} sense, treating a missing value as blank. */
+    /**
+     * Blank in the {@code String.isBlank} sense, treating a missing value as blank.
+     * <p>
+     * {@code @JsonIgnore} because this is behaviour, not a field of the body: it looks
+     * like a bean getter, so without it the published schema listed a {@code blank}
+     * property that clients neither send nor receive.
+     */
+    @JsonIgnore
     public boolean isBlank() {
         return text == null || text.isBlank();
     }
