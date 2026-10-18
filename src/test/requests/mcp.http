@@ -1,0 +1,96 @@
+# MCP server (see docs/mcp-server.md). Stateless Streamable HTTP: no initialize handshake needed.
+# Run the login request first; the token is lost whenever the app restarts.
+
+@host = http://localhost:8080
+@username = your-username
+@password = your-password
+
+### Login as an ADMIN account - 200, body is the JWT. Paste it below.
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{username}}", "password": "{{password}}" }
+
+###
+@token = PASTE_JWT_HERE
+@recipeId = PASTE_RECIPE_ID_HERE
+@categoryId = PASTE_CATEGORY_ID_HERE
+@ingredientId = PASTE_INGREDIENT_ID_HERE
+
+### No token - 401 (a logged-in non-admin gets 403)
+POST {{host}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }
+
+### List the tools - 200
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }
+
+### Category tree, to pick an id - 200
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "list_categories", "arguments": {} } }
+
+### Ingredient lookup by prefix - 200
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "search_ingredients", "arguments": { "namePrefix": "far" } } }
+
+### Create a recipe - 200, result.content[0].text holds the recipe JSON
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "create_recipe", "arguments": { "recipe": {
+  "title": "Tarte aux pommes",
+  "categoryIds": ["{{categoryId}}"],
+  "ingredientGroups": [ { "ingredients": [ { "ingredientId": "{{ingredientId}}", "quantity": 200 } ] } ],
+  "steps": [ { "instruction": "Melanger puis cuire." } ]
+} } } }
+
+### Create with an empty title - 200 but result.isError is true (validation), nothing saved
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "create_recipe", "arguments": { "recipe": {
+  "title": "", "categoryIds": [], "ingredientGroups": [], "steps": []
+} } } }
+
+### Partial update - only the title changes - 200
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "update_recipe", "arguments": { "id": "{{recipeId}}", "changes": { "title": "Tarte aux poires" } } } }
+
+### Search - 200
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "search_recipes", "arguments": { "criteria": { "title": "tarte" }, "size": 10 } } }
+
+### Delete - 200; someone else's recipe or an unknown id gives isError true (403 / 404 in REST terms)
+POST {{host}}/mcp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{ "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": { "name": "delete_recipe", "arguments": { "id": "{{recipeId}}" } } }

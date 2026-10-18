@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.models.recipes.requests;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.Size;
 import org.springframework.data.domain.Sort;
 import org.springframework.util.StringUtils;
@@ -86,27 +87,37 @@ import org.springframework.util.StringUtils;
 public record RecipeSearchRequest(
 
         @Size(max = 200)
+        @JsonProperty(required = false)
         String title,
 
+        @JsonProperty(required = false)
         String authorId,
 
         @Size(max = 100)
+        @JsonProperty(required = false)
         String authorName,
 
+        @JsonProperty(required = false)
         String categoryId,
 
         @Size(max = 100)
+        @JsonProperty(required = false)
         String categoryName,
 
+        @JsonProperty(required = false)
         Boolean includeSubcategories,
 
+        @JsonProperty(required = false)
         String tagId,
 
         @Size(max = 100)
+        @JsonProperty(required = false)
         String tagName,
 
+        @JsonProperty(required = false)
         RecipeSortField sortBy,
 
+        @JsonProperty(required = false)
         Sort.Direction direction
 ) {
 

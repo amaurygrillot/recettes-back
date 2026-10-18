@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.models.recipes.requests;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
@@ -56,15 +57,19 @@ public record CreateRecipeRequest(
         @Size(max = 200)
         String title,
 
+        @JsonProperty(required = false)
         RecipeIntroductionRequest introduction,
 
+        @JsonProperty(required = false)
         String recommendations,
 
         @NotEmpty
         List<@NotBlank String> categoryIds,
 
+        @JsonProperty(required = false)
         List<@NotBlank String> tagIds,
 
+        @JsonProperty(required = false)
         List<@NotNull @Valid RecipePictureRequest> coverPictures,
 
         @NotEmpty
