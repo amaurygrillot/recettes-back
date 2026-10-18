@@ -5,7 +5,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.0.1</version>
+        <version>4.1.1</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>ilenreste.unpeu</groupId>
@@ -29,6 +29,9 @@
     <properties>
         <java.version>25</java.version>
         <spring-ai.version>2.0.1</spring-ai.version>
+        <!-- Newer than the versions the Spring Boot BOM manages; see docs/openapi.md#dependency-upgrades. -->
+        <postgresql.version>42.7.14</postgresql.version>
+        <lombok.version>1.18.48</lombok.version>
     </properties>
     <dependencies>
         <dependency>
