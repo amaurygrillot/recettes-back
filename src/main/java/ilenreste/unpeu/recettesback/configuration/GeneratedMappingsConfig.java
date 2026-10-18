@@ -10,7 +10,7 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 import java.lang.reflect.Method;
 
 /**
- * Keeps the mappings generated from {@code openapi.yaml} from restricting what a client may
+ * Keeps the mappings generated from {@code openapi.yaml} from restricting what a client may send or
  * {@code Accept}. See {@code docs/openapi.md}.
  * <p>
  * The generator copies every media type that appears in <em>any</em> response of an operation into a
@@ -18,19 +18,22 @@ import java.lang.reflect.Method;
  * that list is only {@code application/problem+json}, so a client that asks for
  * {@code Accept: application/json} - which is what most HTTP wrappers send on every call - is refused
  * with a 406 by the handler mapping before the controller runs, where the hand-written controllers
- * answered 204. The same goes for {@code POST /auth/login}, whose token is plain text. A condition like
- * that is a negotiation rule the API never had, and adding one in the name of documenting it would be a
- * behaviour change.
+ * answered 204. The same goes for {@code POST /auth/login}, whose token is plain text.
  * <p>
- * So the condition is dropped from every method a generated interface declares. Content negotiation is
- * then exactly what it always was: Spring's message converters decide whether they can write the body
- * for the {@code Accept} the client sent. The media types stay in the contract, where they belong, and
- * in the response annotations springdoc reads; only the runtime restriction goes. {@code consumes} is kept: it only turns a
- * request body of the wrong type from a 415 raised by the converter into the same 415 raised sooner.
+ * It adds a {@code consumes} condition too, and that one turns a request with no body and no
+ * {@code Content-Type} (a bare {@code curl -X POST}) from the 400 "required request body is missing"
+ * it has always been into a 415.
+ * <p>
+ * Neither is a rule the API ever had, and adding them in the name of documenting the API would be a
+ * behaviour change. So both conditions are dropped from every method a generated interface declares,
+ * and the mapping is back to what it always was: a method and a path. Content negotiation is then
+ * Spring's message converters deciding whether they can read the body that was sent and write the one
+ * that was asked for. The media types stay in the contract, where they belong, and in the annotations
+ * springdoc reads; only the runtime restriction goes.
  * <p>
  * Only those mappings, and not every one: Spring Boot's own {@code BasicErrorController} tells its HTML
  * and JSON handlers for {@code /error} apart by {@code produces}, and the application will not start
- * without it.
+ * without it. The two paged searches are written by hand and keep the {@code produces} they declare.
  */
 @Configuration
 public class GeneratedMappingsConfig {
@@ -39,7 +42,7 @@ public class GeneratedMappingsConfig {
     private static final String GENERATED_API_PACKAGE = "ilenreste.unpeu.recettesback.api";
 
     @Bean
-    WebMvcRegistrations mappingsWithoutProducesConditions() {
+    WebMvcRegistrations mappingsWithoutMediaTypeConditions() {
         return new WebMvcRegistrations() {
             @Override
             public RequestMappingHandlerMapping getRequestMappingHandlerMapping() {
@@ -48,7 +51,7 @@ public class GeneratedMappingsConfig {
                     protected RequestMappingInfo getMappingForMethod(Method method, Class<?> handlerType) {
                         RequestMappingInfo mapping = super.getMappingForMethod(method, handlerType);
                         return mapping != null && isDeclaredByGeneratedApi(method, handlerType)
-                                ? mapping.mutate().produces().build()
+                                ? mapping.mutate().produces().consumes().build()
                                 : mapping;
                     }
                 };

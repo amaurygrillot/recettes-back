@@ -28,7 +28,7 @@ running app ──(springdoc)──▶ /v3/api-docs  +  Swagger UI at /swagger-u
 | Generator configuration | the `openapi-generator-maven-plugin` block in `pom.xml` |
 | Generated interfaces (never edit, never commit) | `target/generated-sources/openapi`, package `ilenreste.unpeu.recettesback.api` |
 | What springdoc serves, and its two corrections | `configuration/OpenApiConfig` |
-| Dropping the generated `produces` condition | `configuration/GeneratedMappingsConfig` |
+| Dropping the generated `produces` and `consumes` conditions | `configuration/GeneratedMappingsConfig` |
 | Dev-only switch | `springdoc.*` in `application.properties`, off in `application-prod.properties` |
 | The tests | `src/test/java/.../contract/` |
 
@@ -164,16 +164,19 @@ no body, and springdoc's habit of copying the return type onto it is undone. A m
 when its schema has required parts, which springdoc does not do on its own. And `Pageable` expands to `page`, `size`
 **and `sort`**: the services ignore `sort` on purpose (see `RecipeSortField`), so it is removed rather than advertised.
 
-### The generated `produces` condition is dropped, so a client's `Accept` still works
+### The generated `produces` and `consumes` conditions are dropped, so a client's headers still work
 
-The same union of media types goes into a `produces` condition on each mapping. For an operation with no success body,
-that is only `application/problem+json`, and a client that sends `Accept: application/json` (most HTTP wrappers do, on
-every call) would get a **406** from the handler mapping where it used to get a 204. `POST /auth/login`, whose token is
-plain text, would get one too. That would have been a behaviour change made in the name of documentation.
+The generator copies every media type that appears in any response of an operation into a `produces` condition on each
+mapping. For an operation with no success body, that is only `application/problem+json`, and a client that sends
+`Accept: application/json` (most HTTP wrappers do, on every call) would get a **406** from the handler mapping where it
+used to get a 204. `POST /auth/login`, whose token is plain text, would get one too. It also adds `consumes`, which turns a
+request with no body and no `Content-Type` (a bare `curl -X POST`) from the 400 "required request body is missing" it has
+always been into a 415. Both are behaviour changes made in the name of documentation.
 
-`GeneratedMappingsConfig` removes the condition from every method a generated interface declares, so content negotiation
-is exactly what it was. Only those: Spring Boot's `BasicErrorController` needs its own `produces`, and the hand-written
-searches keep theirs. `consumes` is kept. `GeneratedMappingsNegotiationTest` pins the three shapes that broke.
+`GeneratedMappingsConfig` removes both conditions from every method a generated interface declares, so a mapping is again
+a method and a path, and content negotiation is exactly what it was. Only those methods: Spring Boot's `BasicErrorController`
+needs its own `produces` to start, and the hand-written searches keep theirs. `GeneratedMappingsNegotiationTest` pins every
+shape that broke.
 
 ### Login does not validate its body, and still must not
 
@@ -207,7 +210,7 @@ decision, not a side effect.
 | `OpenApiContractTest` | The served `/v3/api-docs` and `openapi.yaml` agree on every operation (id, tags, access, parameters, request bodies, statuses and media types) and every schema (properties, types, required, enums). It reduces each to a set of one-line facts, so a failure lists exactly what is in one and not the other. |
 | `OpenApiSecurityConformanceTest` | Every operation in the YAML is sent, harmlessly, to the real filter chain as an anonymous caller, a logged-in caller with no role, a `USER` and an `ADMIN`; the answer must be what `security` and `x-required-role` promise. |
 | `OpenApiProdProfileTest` | Under `prod`, the spec and Swagger UI answer 404. |
-| `GeneratedMappingsNegotiationTest` | A client that only accepts JSON still gets through to operations with no success body, and to login. |
+| `GeneratedMappingsNegotiationTest` | A client that only accepts JSON still gets through to operations with no success body and to login, and a request with no body and no `Content-Type` is still a 400. |
 
 The contract test is what makes this safe to leave alone: it fails when a controller is changed without the YAML (an
 endpoint added, a parameter dropped), when the YAML is changed without the code (for the parts the generated interfaces

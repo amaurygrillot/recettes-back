@@ -30,7 +30,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * answer with no body, and the hand-written controllers served all of them. A generated
  * {@code produces} condition listing only {@code application/problem+json} (all an operation with no
  * success body has) turns that into a 406 raised by the handler mapping, before the controller runs.
- * These are the three shapes that went wrong, against the real server.
+ * The generated {@code consumes} condition does the same to a request with no body and no
+ * {@code Content-Type}, turning a 400 into a 415. These are the shapes that went wrong, against the
+ * real server.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureTestRestTemplate
@@ -105,6 +107,19 @@ class GeneratedMappingsNegotiationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getHeaders().getContentType()).isNotNull();
         assertThat(response.getHeaders().getContentType().isCompatibleWith(MediaType.TEXT_PLAIN)).isTrue();
+    }
+
+    @Test
+    void aRequestWithNoBodyAndNoContentTypeIsStillAMissingBodyAndNotAnUnsupportedMediaType() {
+        // A bare `curl -X POST` sends neither. It has always been a 400 from the missing @RequestBody; a
+        // generated consumes condition would answer 415 first.
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.AUTHORIZATION, adminToken);
+
+        ResponseEntity<String> response = restTemplate.exchange("/tags", HttpMethod.POST,
+                new HttpEntity<>(null, headers), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     private static HttpHeaders jsonOnly(String authorization) {
