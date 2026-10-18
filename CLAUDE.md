@@ -49,6 +49,22 @@ Once an endpoint's criteria outgrow three or four `@RequestParam`s, bind them in
 Spring binds a non-annotated object from the query string by name, so the wire format is unchanged, and the criteria
 gain a place to be named, documented and validated together — see `RecipeSearchRequest`.
 
+### OpenAPI contract
+
+**`src/main/resources/openapi/openapi.yaml` is the contract for the whole REST API, and it is edited first.** The build
+generates the Spring `*Api` interfaces from it (`target/generated-sources`, package `ilenreste.unpeu.recettesback.api`,
+interfaces only), the controllers implement them, and the DTOs stay the hand-written records in `models`, which the
+generator is mapped onto in `pom.xml` (`schemaMappings`). Do not add a route by writing a `@GetMapping` and a controller:
+add the operation to the YAML, build, then implement the method the compiler now asks for. A new request or response
+record also needs its schema in the YAML (same name as the record) and one `schemaMapping` line in `pom.xml`.
+
+Every status an operation can answer, who may call it and what it takes are written there, so the status-code rules above
+apply to the YAML as much as to the code. `OpenApiContractTest` fails when the running application and the YAML disagree,
+and `OpenApiSecurityConformanceTest` when the YAML's access rules disagree with `SecurityFilterConfig`, which still has to
+grant access to a new route. Swagger UI and `/v3/api-docs` are a development aid: on by default, off under the `prod`
+profile. The exceptions (the two paged searches are hand-written) and the reasoning are in
+[docs/openapi.md](docs/openapi.md).
+
 ### Documentation
 
 There is no external wiki (no Confluence) for this project — all product and architectural knowledge has to live in the
@@ -63,8 +79,9 @@ changes. This file (`CLAUDE.md`) stays focused on operational guidance for worki
 All commands use the Maven Wrapper (`mvnw.cmd` on Windows, `./mvnw` in a POSIX shell).
 
 ```bash
-./mvnw clean package        # build (compiles, runs tests, packages jar)
-./mvnw spring-boot:run      # run the app locally (needs PostgreSQL, see below)
+./mvnw clean package        # build (generates the *Api interfaces, compiles, runs tests, packages jar)
+./mvnw compile              # regenerate the *Api interfaces from openapi.yaml and compile
+./mvnw spring-boot:run      # run the app locally (needs PostgreSQL, see below); Swagger UI at /swagger-ui.html
 ./mvnw test                 # run the full test suite
 ./mvnw test -Dtest=RecettesBackApplicationTests#contextLoads   # run a single test
 ```
@@ -135,7 +152,9 @@ parse the extension-less `.env` file as `key=value` Java `.properties` syntax. C
 Layered structure under `ilenreste.unpeu.recettesback`, with each layer **subdivided by domain**:
 
 - `controllers` — REST endpoints. Thin: validate/delegate to a service; they contain no `try/catch`, because
-  exception-to-status mapping is centralised (see [docs/api-error-handling.md](docs/api-error-handling.md)).
+  exception-to-status mapping is centralised (see [docs/api-error-handling.md](docs/api-error-handling.md)). They
+  implement the interfaces generated from `openapi.yaml`, so routing, parameters and return types are declared there, not
+  by annotations on the controller.
 - `services` — business logic.
 - `repositories` — Spring Data JPA repositories.
 - `entities` — JPA entities. `AuditableEntity` (`@MappedSuperclass`) stays at the `entities` root: it is the shared
@@ -178,7 +197,7 @@ Each of those five holds one kind of thing, and `configuration` is the one that 
 this class declare a bean or wire something?** If not, it is not configuration:
 
 - `configuration` — `@Configuration` classes and nothing else: `SecurityFilterConfig`, `SecurityBeansConfig`,
-  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
+  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`, `OpenApiConfig`, `GeneratedMappingsConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
   anything reasoning about a *window* of time (`UploadRateLimiter`) injects it, because a test that cannot move the
   clock can only assert a window by waiting it out.
 - `properties` — `@ConfigurationProperties` records. Bound data, no logic, no beans; picked up by the
@@ -217,7 +236,7 @@ The API is a stateless resource server that also issues its own JWTs (self-conta
    for who may reach what — decides. A *present but broken* token is still rejected with 401, because a caller who
    thinks they are authenticated and is not should not be silently downgraded to anonymous. There is no
    `shouldNotFilter`: the filter runs on every request, which is what lets a public `GET` still know who its caller is.
-   **Add a new public route in `authorizeHttpRequests` only.**
+   **Add a new public route in `authorizeHttpRequests` only** (and `security: []` on its operation in `openapi.yaml`).
 5. `JwtAuthenticationFilter.CREDENTIAL_ENDPOINTS` is the one exception, and it is small and stable
    (`POST /auth/**`, `POST /users/create`, `PUT /users/reinit-password`). On those, a broken token is *ignored* rather
    than rejected — otherwise, since `RsaKeyConfig` invalidates every token in circulation at each restart, a client
