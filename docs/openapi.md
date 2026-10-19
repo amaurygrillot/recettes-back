@@ -17,7 +17,7 @@ openapi.yaml ──(openapi-generator, every build)──▶ target/generated-so
                                                                   │
 controllers/*  implement the *Api interfaces ◀────────────────────┘
 
-running app ──(springdoc)──▶ /v3/api-docs  +  Swagger UI at /swagger-ui.html       dev only
+running app ──(springdoc)──▶ /v3/api-docs  +  Swagger UI at /swagger-ui.html       only with SPRINGDOC_ENABLED=true
                                    │
                                    └──▶ OpenApiContractTest: must equal openapi.yaml
 ```
@@ -27,9 +27,9 @@ running app ──(springdoc)──▶ /v3/api-docs  +  Swagger UI at /swagger-u
 | The contract | `src/main/resources/openapi/openapi.yaml` |
 | Generator configuration | the `openapi-generator-maven-plugin` block in `pom.xml` |
 | Generated interfaces (never edit, never commit) | `target/generated-sources/openapi`, package `ilenreste.unpeu.recettesback.api` |
-| What springdoc serves, and its two corrections | `configuration/OpenApiConfig` |
-| Dropping the generated `produces` and `consumes` conditions | `configuration/GeneratedMappingsConfig` |
-| Dev-only switch | `springdoc.*` in `application.properties`, off in `application-prod.properties` |
+| What springdoc serves, and its corrections | `configuration/OpenApiConfig` |
+| Dropping the generated `produces` and `consumes` conditions | the `strip-generated-media-type-conditions` step in `pom.xml` |
+| Dev-only switch | `springdoc.*` in `application.properties`, behind `SPRINGDOC_ENABLED` (off unless set) |
 | The tests | `src/test/java/.../contract/` |
 
 ## Decisions
@@ -81,16 +81,22 @@ It works because the generated interfaces carry swagger annotations (`documentat
 `annotationLibrary=swagger2`): the YAML reaches springdoc *through* the interfaces, so the served spec is the YAML as
 the code implements it, with the records' shapes added by reflection.
 
-### Swagger UI is a development aid, off in production
+### Swagger UI is a development aid, off unless asked for
 
-`springdoc.api-docs.enabled` and `springdoc.swagger-ui.enabled` are `true` in `application.properties` (local
-development) and `false` in `application-prod.properties`, which a `prod` profile (`spring.profiles.active=prod`) loads.
+`springdoc.api-docs.enabled` and `springdoc.swagger-ui.enabled` both read `${SPRINGDOC_ENABLED:false}` in
+`application.properties`: **off unless `SPRINGDOC_ENABLED=true` is set**, in the environment or in the local `.env` (which
+is parsed as `.properties`, so the line is just `SPRINGDOC_ENABLED=true`; the IntelliJ run configuration's environment
+variables work too). The default is off, and not "on, except under a `prod` profile", because a deployment that forgets a
+switch must hide the API description, not publish it. `OpenApiSwitchTest` proves that with the switch off the spec and the
+UI answer 404, and that the committed default is off.
+
 The paths `/v3/api-docs/**`, `/swagger-ui.html` and `/swagger-ui/**` are `permitAll()` in `SecurityFilterConfig` and
-nowhere else, never in `JwtAuthenticationFilter`; under `prod` they simply do not exist, so the rule exposes nothing.
-`OpenApiProdProfileTest` proves they answer 404 there.
+nowhere else, never in `JwtAuthenticationFilter`; with springdoc off they simply do not exist, so the rule exposes nothing.
+`OpenApiConfig` is only loaded when springdoc is on, so nothing reads the YAML at startup otherwise.
 
-The committed `openapi.yaml` is the artifact whatever those switches say. Swagger UI's **Authorize** takes the token
-from `POST /auth/login` (the raw body, no `Bearer ` prefix).
+The committed `openapi.yaml` is the artifact whatever the switch says. Swagger UI's **Authorize** takes the token from
+`POST /auth/login` (the raw body, no `Bearer ` prefix). Tokens die at every restart (`RsaKeyConfig`), so the UI is not set
+to remember one across reloads: a remembered token would keep showing "Authorized" while every call answered 401.
 
 ### Spring Boot 4.1 and Jackson 3
 
@@ -107,6 +113,7 @@ The upgrade was a precondition: the generator's Boot 4 / Jackson 3 support (`use
 | Lombok | 1.18.48 | newer than Boot's managed 1.18.46, overridden through `lombok.version` |
 | Maven (wrapper) | 3.9.16 | |
 | JaCoCo | 0.8.15 | already the latest |
+| maven-antrun-plugin | 3.2.0 | only runs the `strip-generated-media-type-conditions` step |
 | swagger-annotations-jakarta | 2.2.55 | pinned: Spring AI's model module drags in 2.2.38, which Maven would otherwise pick over the 2.2.55 springdoc's swagger-core is built against |
 
 **Jackson.** The application was already entirely on Jackson 3 (`tools.jackson.*`); the only `com.fasterxml.jackson`
@@ -157,19 +164,21 @@ and the shape of the page. The YAML lists the criteria as individual query param
 
 ### The response media types the generator writes are wrong, so the served spec corrects them
 
-The generator writes every response of an operation with the operation's *whole* list of media types, so a `201` claims
-to be `application/problem+json` and a `404` claims to be `application/json`. `OpenApiConfig.servedSpecCustomizer` fixes
-that in what springdoc serves: a 4xx/5xx keeps only `application/problem+json`, anything else drops it. Four more
+The generator writes every response of an operation with the operation's *whole* list of media types, so a `201`
+claims to be `application/problem+json` and a `404` claims to be `application/json`. `OpenApiConfig.servedSpecCustomizer`
+fixes that in what springdoc serves: a 4xx/5xx keeps only `application/problem+json`, anything else drops it. Four more
 corrections go through the same place:
 
-- Having no `produces` to read, springdoc labels the body of the two hand-written searches `*/*`; it is JSON, and is
-  relabelled.
+- With no `produces` to read, springdoc labels a body `*/*`. For a JSON-shaped one (an object, an array or a reference
+  to one, as the two hand-written searches return) that is relabelled `application/json`; a text or binary body keeps
+  the wildcard, so nothing is advertised as JSON that is not.
+- With no `consumes`, springdoc calls a multipart upload `application/json` and marks it optional. A body with a binary
+  part is relabelled `multipart/form-data`, and required when its schema has required parts.
 - A `304` has no body, and springdoc's habit of copying the return type onto it is undone.
-- A multipart request body is marked required when its schema has required parts, which springdoc does not do on its own.
-- `Pageable` expands to `page`, `size` **and `sort`**: the services ignore `sort` on purpose (see `RecipeSortField`), so it
-  is removed rather than advertised.
+- `Pageable` expands to `page`, `size` **and `sort`**: the services ignore `sort` on purpose (see `RecipeSortField`), so
+  it is removed rather than advertised.
 
-### The generated `produces` and `consumes` conditions are dropped, so a client's headers still work
+### The generated `produces` and `consumes` conditions are removed, so a client's headers still work
 
 The generator copies every media type that appears in any response of an operation into a `produces` condition on each
 mapping. For an operation with no success body, that is only `application/problem+json`, and a client that sends
@@ -178,10 +187,16 @@ used to get a 204. `POST /auth/login`, whose token is plain text, would get one 
 request with no body and no `Content-Type` (a bare `curl -X POST`) from the 400 "required request body is missing" it has
 always been into a 415. Both are behaviour changes made in the name of documentation.
 
-`GeneratedMappingsConfig` removes both conditions from every method a generated interface declares, so a mapping is again
-a method and a path, and content negotiation is exactly what it was. Only those methods: Spring Boot's `BasicErrorController`
-needs its own `produces` to start, and nothing written by hand declares either condition, so the hand-written searches are
-back to a method and a path as well. `GeneratedMappingsNegotiationTest` pins every shape that broke.
+So the `strip-generated-media-type-conditions` step in `pom.xml` (a regular expression, run by `maven-antrun-plugin` right
+after the generator) deletes both from the generated sources, and a mapping is again a method and a path. A second step
+fails the build if a generated interface still says `produces =` or `consumes =`, so a generator that one day spells them
+differently cannot turn this into a silent no-op. The media types stay in the contract and in the swagger annotations;
+only the runtime conditions go. Nothing written by hand declares either, and `BasicErrorController`, which needs its own
+`produces` to start, is not generated, so it is untouched.
+
+This was first a runtime class that replaced Boot's `RequestMappingHandlerMapping` and stripped the conditions as the
+mappings were built. It worked, and it was the wrong depth: a hook into Spring's internals to undo what a build step wrote,
+with the real cause one step upstream. `GeneratedApiBehaviourTest` pins every shape that broke.
 
 ### Login does not validate its body, and still must not
 
@@ -194,15 +209,17 @@ decision, not a side effect.
 ### Smaller things
 
 - **`RecipeIntroductionRequest.isBlank()`** looked like a bean getter, so the served schema listed a `blank` property
-  nobody sends or receives. It is `@JsonIgnore`d.
+  nobody sends or receives. It is `@JsonIgnore`d. The MCP tools' input schema, built by a different generator, never
+  listed it, with or without the annotation; `McpEndpointTest` pins that.
 - **`ProblemDetail`** is mapped onto Spring's own class, which Jackson flattens with a mixin that springdoc's reflection
   does not see, so the served schema has a `properties` member the wire does not. The contract test skips that one
   schema; the wire shape is asserted by the integration tests that read real error bodies.
 - **Response headers** (`Location`, `Retry-After`, `ETag`, ...) are in the YAML but not in what springdoc serves: the
   generator does not emit them into the annotations. They are documentation of the contract, not checked.
 - **`info` and the `bearerAuth` scheme** are read from the YAML by `OpenApiConfig` rather than repeated in Java; there is
-  no annotation for "this API authenticates with a bearer token".
-- **The `Page` JSON shape** is what `PageImpl` serialises to today, and Spring Data logs a warning on startup that it is
+  no annotation for "this API authenticates with a bearer token". Because the served spec takes them from the YAML, the
+  contract test does not compare them: they could only ever match.
+- **The `Page` JSON shape** is what `PageImpl` serialises to today, and Spring Data logs a warning, the first time a page is serialised, that it is
   not guaranteed stable. `PageIngredientResponse`, `PageRecipeSummaryResponse`, `PageableObject` and `SortObject` in the
   YAML mirror it, and the contract test will notice the day an upgrade moves it. Moving to Spring Data's
   `PagedModel` (`@EnableSpringDataWebSupport(pageSerializationMode = VIA_DTO)`) is the supported fix; it changes the wire
@@ -212,10 +229,10 @@ decision, not a side effect.
 
 | Test | What it proves |
 |---|---|
-| `OpenApiContractTest` | The served `/v3/api-docs` and `openapi.yaml` agree on every operation (id, tags, access, parameters, request bodies, statuses and media types) and every schema (properties, types, required, enums). It reduces each to a set of one-line facts, so a failure lists exactly what is in one and not the other. |
-| `OpenApiSecurityConformanceTest` | Every operation in the YAML is sent, harmlessly, to the real filter chain as an anonymous caller, a logged-in caller with no role, a `USER` and an `ADMIN`; the answer must be what `security` and `x-required-role` promise. |
-| `OpenApiProdProfileTest` | Under `prod`, the spec and Swagger UI answer 404. |
-| `GeneratedMappingsNegotiationTest` | A client that only accepts JSON still gets through to operations with no success body and to login, and a request with no body and no `Content-Type` is still a 400. |
+| `OpenApiContractTest` | The served `/v3/api-docs` and `openapi.yaml` agree on every operation (id, tags, access, parameters, request bodies, statuses and media types) and every schema (properties, types, required, enums). It reduces each to a set of one-line facts, so a failure lists exactly what is in one and not the other. For a generated operation the served spec is rendered from the YAML, so most of that can only differ for the hand-written searches, the schemas and an endpoint added in code alone. |
+| `OpenApiSecurityConformanceTest` | Every operation in the YAML is sent, harmlessly, to the real filter chain as an anonymous caller, a logged-in caller with no role, a `USER` and an `ADMIN`; the answer must be what `security` and `x-required-role` promise, never a 5xx, and **a status the operation's `responses` document**. That last check is the only place the YAML's statuses meet the running code. |
+| `OpenApiSwitchTest` | With `SPRINGDOC_ENABLED=false` the spec and Swagger UI answer 404, and the committed default is off. |
+| `GeneratedApiBehaviourTest` | A client that only accepts JSON still gets through to operations with no success body and to login, a request with no body and no `Content-Type` is still a 400, an invalid search parameter is still a 400 whatever the client accepts, and blank login credentials are still a 401. |
 
 The contract test is what makes this safe to leave alone: it fails when a controller is changed without the YAML (an
 endpoint added, a parameter dropped), when the YAML is changed without the code (for the parts the generated interfaces

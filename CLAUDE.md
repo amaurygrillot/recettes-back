@@ -61,9 +61,9 @@ record also needs its schema in the YAML (same name as the record) and one `sche
 Every status an operation can answer, who may call it and what it takes are written there, so the status-code rules above
 apply to the YAML as much as to the code. `OpenApiContractTest` fails when the running application and the YAML disagree,
 and `OpenApiSecurityConformanceTest` when the YAML's access rules disagree with `SecurityFilterConfig`, which still has to
-grant access to a new route. Swagger UI and `/v3/api-docs` are a development aid: on by default, off under the `prod`
-profile. The exceptions (the two paged searches are hand-written) and the reasoning are in
-[docs/openapi.md](docs/openapi.md).
+grant access to a new route. Swagger UI (`/swagger-ui.html`) and `/v3/api-docs` are a development aid: **off unless
+`SPRINGDOC_ENABLED=true`**, which you put in your local `.env`. The exceptions (the two paged searches are hand-written)
+and the reasoning are in [docs/openapi.md](docs/openapi.md).
 
 ### Documentation
 
@@ -81,7 +81,7 @@ All commands use the Maven Wrapper (`mvnw.cmd` on Windows, `./mvnw` in a POSIX s
 ```bash
 ./mvnw clean package        # build (generates the *Api interfaces, compiles, runs tests, packages jar)
 ./mvnw compile              # regenerate the *Api interfaces from openapi.yaml and compile
-./mvnw spring-boot:run      # run the app locally (needs PostgreSQL, see below); Swagger UI at /swagger-ui.html
+./mvnw spring-boot:run      # run the app locally (needs PostgreSQL, see below)
 ./mvnw test                 # run the full test suite
 ./mvnw test -Dtest=RecettesBackApplicationTests#contextLoads   # run a single test
 ```
@@ -197,7 +197,7 @@ Each of those five holds one kind of thing, and `configuration` is the one that 
 this class declare a bean or wire something?** If not, it is not configuration:
 
 - `configuration` — `@Configuration` classes and nothing else: `SecurityFilterConfig`, `SecurityBeansConfig`,
-  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`, `OpenApiConfig`, `GeneratedMappingsConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
+  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`, `OpenApiConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
   anything reasoning about a *window* of time (`UploadRateLimiter`) injects it, because a test that cannot move the
   clock can only assert a window by waiting it out.
 - `properties` — `@ConfigurationProperties` records. Bound data, no logic, no beans; picked up by the

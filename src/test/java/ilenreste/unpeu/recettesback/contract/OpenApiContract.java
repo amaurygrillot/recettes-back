@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * The committed {@code openapi.yaml}, read from the classpath exactly as
@@ -28,8 +29,10 @@ final class OpenApiContract {
      * @param requiredRole the {@code x-required-role} extension, or {@code null} when any
      *                     authenticated caller will do (or the operation is public)
      * @param bodyType     the media type of the request body, or {@code null} when it has none
+     * @param statuses     every status the contract documents for it, as the strings the YAML keys them by
      */
-    record Operation(String method, String path, boolean isPublic, String requiredRole, String bodyType) {
+    record Operation(String method, String path, boolean isPublic, String requiredRole, String bodyType,
+                     Set<String> statuses) {
 
         @Override
         public String toString() {
@@ -57,6 +60,6 @@ final class OpenApiContract {
                 .findFirst().orElse(null);
         return new Operation(method.toUpperCase(), path, operation.path("security").isEmpty(),
                 operation.path("x-required-role").isMissingNode() ? null : operation.path("x-required-role").asString(),
-                bodyType);
+                bodyType, new TreeSet<>(operation.path("responses").propertyNames()));
     }
 }

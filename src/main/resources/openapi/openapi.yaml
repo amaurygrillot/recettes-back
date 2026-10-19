@@ -29,8 +29,11 @@ info:
     `POST /auth/login` answers with a JWT as the **raw response body**. Send it as `Authorization: Bearer <token>`.
     Tokens last one hour and do not survive an application restart. Every read in this API is public.
 
-    A request that carries a *broken* token is rejected with 401 even on a public route; a request with no token at all
-    is judged by the route alone.
+    A request that carries a *broken* token (expired, malformed, or minted before the last restart) is rejected with 401
+    even on a public route, so a client should drop a token that stops working. The credential endpoints are the one
+    exception: `POST /auth/login`, `POST /auth/reinit-password`, `POST /users/create` and `PUT /users/reinit-password`
+    ignore a broken token, so a client still holding a stale one can log in again. A request with no token at all is
+    judged by the route alone.
 
     ## Errors
 
@@ -38,8 +41,9 @@ info:
     matches what happened: 400 invalid input (including an id inside a body that names nothing), 401 missing or invalid
     credentials, 403 authenticated but not allowed, 404 the resource in the path does not exist, 409 the request
     conflicts with existing state, 413 upload too large, 429 this caller made too many requests, 503 the server is
-    momentarily at capacity. 429 and 503 carry `Retry-After`. An unexpected failure is a 500 and is not listed on each
-    operation.
+    momentarily at capacity. 429 and 503 carry `Retry-After`. An unexpected failure is a 500. Two more are raised by the
+    framework before any operation runs, and are not listed on each one either: 415 for a request body that is not in a
+    media type the operation reads, and 406 when nothing the operation can write matches the `Accept` header.
 
 servers:
   - url: http://localhost:8080
@@ -74,7 +78,9 @@ paths:
       summary: Log in
       description: >-
         Exchanges a username and password for a JWT, returned as the raw response body (`text/plain`, no JSON
-        wrapper). Unknown username, wrong password and a disabled account all answer the same 401.
+        wrapper). Unknown username, wrong password, a disabled account and a body with blank or missing fields all
+        answer the same 401. Sent with `Accept: application/json` alone, the same token body is labelled
+        `application/json`: it is still the bare token, not JSON.
       security: []
       requestBody:
         required: true
@@ -90,6 +96,12 @@ paths:
             text/plain:
               schema:
                 type: string
+        '400':
+          description: No body, or a body that is not JSON. A JSON body with blank or missing fields is a 401.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
 

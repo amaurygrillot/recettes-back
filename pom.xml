@@ -271,6 +271,49 @@
                     </execution>
                 </executions>
             </plugin>
+            <!--
+                The generator writes every media type of every response of an operation into a produces condition on
+                the whole mapping, and adds a consumes condition. Neither is a rule this API ever had: with them, a
+                client sending Accept: application/json gets a 406 from an operation with no success body (and from
+                login, whose token is plain text), and a request with no body and no Content-Type gets a 415 instead of
+                the 400 it always was. The media types stay in the contract and in the swagger annotations; only the
+                runtime conditions are removed, from the generated sources, so a mapping is a method and a path again.
+                The second step fails the build if the generator ever spells them differently and this stops matching.
+                See docs/openapi.md.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>strip-generated-media-type-conditions</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <replaceregexp match=",\s*(produces|consumes) = \{[^}]*\}" replace="" flags="g">
+                                    <fileset dir="${project.build.directory}/generated-sources/openapi" includes="**/*Api.java"/>
+                                </replaceregexp>
+                                <fail message="A generated *Api interface still declares produces or consumes: the generator changed how it writes them, and the pattern in pom.xml (strip-generated-media-type-conditions) no longer matches.">
+                                    <condition>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${project.build.directory}/generated-sources/openapi" includes="**/*Api.java">
+                                                <or>
+                                                    <contains text="produces ="/>
+                                                    <contains text="consumes ="/>
+                                                </or>
+                                            </fileset>
+                                        </resourcecount>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>

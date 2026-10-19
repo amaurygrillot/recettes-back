@@ -32,7 +32,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Both documents are first reduced to facts, see {@link OpenApiFacts}; a failure lists the facts in
  * one document and not the other, which reads as "the YAML says X, the application does Y".
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+// Springdoc is off unless this switch is on (see application.properties); the test needs the served spec, and says so
+// itself rather than relying on a developer's .env.
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "SPRINGDOC_ENABLED=true")
 @AutoConfigureTestRestTemplate
 class OpenApiContractTest {
 

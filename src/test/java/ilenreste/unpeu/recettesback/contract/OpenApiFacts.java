@@ -62,16 +62,12 @@ final class OpenApiFacts {
 
     // -------------------------------------------------------------------------------------- header
 
+    /**
+     * Tag names only. The API's title, version, description and security schemes are not compared: the served
+     * spec takes them from the YAML ({@code OpenApiConfig.contractHeader}), so they could only ever match.
+     */
     private void header() {
-        JsonNode info = root.path("info");
-        facts.add("info title=%s version=%s".formatted(info.path("title").asString(), info.path("version").asString()));
         root.path("tags").forEach(tag -> facts.add("tag " + tag.path("name").asString()));
-        root.path("components").path("securitySchemes").properties().forEach(entry -> {
-            JsonNode scheme = entry.getValue();
-            facts.add("securityScheme %s type=%s scheme=%s bearerFormat=%s".formatted(entry.getKey(),
-                    scheme.path("type").asString(), scheme.path("scheme").asString(),
-                    scheme.path("bearerFormat").asString()));
-        });
     }
 
     // ----------------------------------------------------------------------------------- operations

@@ -23,20 +23,22 @@ import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The mappings generated from {@code openapi.yaml} must not narrow what a client may
- * {@code Accept}; see {@code GeneratedMappingsConfig}.
+ * Moving the API onto interfaces generated from {@code openapi.yaml} must not change what an endpoint does.
+ * These are the behaviours the generator would have changed, against the real server.
  * <p>
- * Most HTTP wrappers send {@code Accept: application/json} on every call, including the ones that
- * answer with no body, and the hand-written controllers served all of them. A generated
- * {@code produces} condition listing only {@code application/problem+json} (all an operation with no
- * success body has) turns that into a 406 raised by the handler mapping, before the controller runs.
- * The generated {@code consumes} condition does the same to a request with no body and no
- * {@code Content-Type}, turning a 400 into a 415. These are the shapes that went wrong, against the
- * real server.
+ * <strong>Negotiation.</strong> The generator writes {@code produces} and {@code consumes} conditions the API
+ * never had, and the {@code strip-generated-media-type-conditions} step in {@code pom.xml} removes them. Most HTTP
+ * wrappers send {@code Accept: application/json} on every call, including the ones that answer with no body, and
+ * the hand-written controllers served all of them; a generated {@code produces} listing only
+ * {@code application/problem+json} turns that into a 406 raised by the handler mapping before the controller runs.
+ * A generated {@code consumes} turns a request with no body and no {@code Content-Type} from a 400 into a 415.
+ * <p>
+ * <strong>Login.</strong> It has never validated its body, and the generated interface puts {@code @Valid} on
+ * every request body; see {@code AuthenticationRequest}.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureTestRestTemplate
-class GeneratedMappingsNegotiationTest {
+class GeneratedApiBehaviourTest {
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -94,6 +96,19 @@ class GeneratedMappingsNegotiationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isNotBlank().doesNotStartWith("{");
+    }
+
+    @Test
+    void blankOrMissingLoginCredentialsAreStillAnUnauthorizedAndNotABadRequest() {
+        // Login does not validate its body: a blank credential is a wrong credential. A bean constraint on
+        // AuthenticationRequest, now that the generated interface puts @Valid on every body, would make this a 400.
+        for (String body : new String[]{"{\"username\":\"\",\"password\":\"\"}", "{}"}) {
+            ResponseEntity<String> response = restTemplate.exchange("/auth/login", HttpMethod.POST,
+                    body(body, null), String.class);
+
+            assertThat(response.getStatusCode()).as("POST /auth/login with %s", body)
+                    .isEqualTo(HttpStatus.UNAUTHORIZED);
+        }
     }
 
     @Test

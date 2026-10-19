@@ -5,6 +5,7 @@ import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.media.Content;
+import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
@@ -12,6 +13,7 @@ import io.swagger.v3.oas.models.security.SecurityScheme;
 import lombok.extern.log4j.Log4j2;
 import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springframework.beans.factory.config.YamlMapFactoryBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
@@ -32,12 +34,15 @@ import java.util.Map;
  *       generated interfaces describe operations, but there is no annotation for
  *       "this API authenticates with a bearer token", and repeating the header
  *       here by hand would be a second place for it to drift.</li>
- *   <li>{@link #servedSpecCustomizer} corrects two things the generated annotations
- *       and springdoc get wrong between them, so that Swagger UI does not mislead.</li>
+ *   <li>{@link #servedSpecCustomizer} corrects what the generated annotations and
+ *       springdoc get wrong between them, so that Swagger UI does not mislead.</li>
  * </ul>
  */
 @Log4j2
 @Configuration
+// Only when springdoc itself is on: otherwise nothing would read what this builds. matchIfMissing mirrors springdoc's
+// own default, so removing the property cannot leave springdoc serving a spec without its header.
+@ConditionalOnProperty(prefix = "springdoc.api-docs", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class OpenApiConfig {
 
     private static final String CONTRACT = "openapi/openapi.yaml";
@@ -60,14 +65,14 @@ public class OpenApiConfig {
                 .forEach((name, scheme) -> components.addSecuritySchemes(name, securityScheme(name, scheme)));
         return new OpenAPI()
                 .info(new Info()
-                        .title((String) info.get("title"))
-                        .version((String) info.get("version"))
-                        .description((String) info.get("description")))
+                        .title(text(info, "title"))
+                        .version(text(info, "version"))
+                        .description(text(info, "description")))
                 .components(components);
     }
 
     /**
-     * Two corrections to the served spec.
+     * Corrections to the served spec, for what the generated annotations and springdoc get wrong between them.
      * <p>
      * <strong>Media types.</strong> The generator writes every response of an
      * operation with the operation's <em>whole</em> list of media types, so a 201
@@ -76,9 +81,15 @@ public class OpenApiConfig {
      * nothing else is, so a 4xx or 5xx keeps only that type and anything else drops
      * it.
      * <p>
-     * <strong>Wildcard.</strong> The generated mappings have no {@code produces} (see
-     * {@code GeneratedMappingsConfig}), and neither do the two hand-written searches, so springdoc has no
+     * <strong>Wildcard.</strong> The generated mappings have no {@code produces} (the
+     * {@code strip-generated-media-type-conditions} step in {@code pom.xml}), and neither do the two hand-written searches, so springdoc has no
      * media type to give their body and writes {@code *}{@code /*}; it is JSON.
+     * <p>
+     * <strong>Not modified.</strong> springdoc copies the return type onto any response with no content of its
+     * own, but a 304 never has a body.
+     * <p>
+     * <strong>Multipart.</strong> With no {@code consumes} springdoc calls a multipart body JSON, and it marks the
+     * body optional whatever its parts say.
      * <p>
      * <strong>Paging.</strong> {@code Pageable} expands to {@code page}, {@code size}
      * and {@code sort}. The services read the first two and ignore the third &mdash;
@@ -94,7 +105,7 @@ public class OpenApiConfig {
             }
             openApi.getPaths().values().forEach(path -> path.readOperations().forEach(operation -> {
                 dropIgnoredSortParameter(operation);
-                requireMultipartBodyWhenItHasRequiredParts(operation);
+                correctMultipartBody(operation);
                 if (operation.getResponses() != null) {
                     operation.getResponses().forEach(OpenApiConfig::keepOnlyTheMediaTypesThatApply);
                 }
@@ -113,30 +124,56 @@ public class OpenApiConfig {
             response.setContent(null);
             return;
         }
-        // With no produces on a mapping, springdoc labels a body */*. The two hand-written searches are the
-        // only mappings without one that have a body, and it is JSON.
-        io.swagger.v3.oas.models.media.MediaType anyType = content.remove(MediaType.ALL_VALUE);
-        if (anyType != null) {
-            content.addMediaType(MediaType.APPLICATION_JSON_VALUE, anyType);
-        }
+        relabelWildcardJsonBody(content);
         boolean error = status.startsWith("4") || status.startsWith("5");
         content.keySet().removeIf(mediaType -> error != PROBLEM_JSON.equals(mediaType));
     }
 
     /**
-     * springdoc marks the body of a multipart operation optional whatever the parts say; a missing
-     * required part is a 400, so the body is required.
+     * With no {@code produces} on a mapping, springdoc labels its body {@code *}{@code /*}. Only a body shaped like JSON
+     * (an object, an array or a reference to one) is relabelled, and never over an {@code application/json} entry
+     * that is already there: a text or binary body keeps the wildcard rather than being advertised as JSON.
      */
-    private static void requireMultipartBodyWhenItHasRequiredParts(Operation operation) {
+    private static void relabelWildcardJsonBody(Content content) {
+        io.swagger.v3.oas.models.media.MediaType wildcard = content.get(MediaType.ALL_VALUE);
+        if (wildcard != null && isJsonShaped(wildcard.getSchema())) {
+            content.remove(MediaType.ALL_VALUE);
+            content.putIfAbsent(MediaType.APPLICATION_JSON_VALUE, wildcard);
+        }
+    }
+
+    private static boolean isJsonShaped(Schema<?> schema) {
+        return schema != null && (schema.get$ref() != null || "object".equals(schema.getType())
+                || "array".equals(schema.getType()));
+    }
+
+    /**
+     * Without a {@code consumes} on the mapping (see the pom) springdoc cannot tell a multipart body from a JSON
+     * one, and labels it {@code application/json}. A body with a binary part cannot be JSON, so it is relabelled
+     * {@code multipart/form-data}; and springdoc marks a multipart body optional whatever its parts say, where a
+     * missing required part is a 400, so a body whose schema has required parts is required.
+     */
+    private static void correctMultipartBody(Operation operation) {
         RequestBody body = operation.getRequestBody();
         if (body == null || body.getContent() == null) {
             return;
         }
-        io.swagger.v3.oas.models.media.MediaType multipart = body.getContent().get(MediaType.MULTIPART_FORM_DATA_VALUE);
+        Content content = body.getContent();
+        io.swagger.v3.oas.models.media.MediaType json = content.get(MediaType.APPLICATION_JSON_VALUE);
+        if (json != null && hasBinaryPart(json.getSchema())) {
+            content.remove(MediaType.APPLICATION_JSON_VALUE);
+            content.putIfAbsent(MediaType.MULTIPART_FORM_DATA_VALUE, json);
+        }
+        io.swagger.v3.oas.models.media.MediaType multipart = content.get(MediaType.MULTIPART_FORM_DATA_VALUE);
         if (multipart != null && multipart.getSchema() != null && multipart.getSchema().getRequired() != null
                 && !multipart.getSchema().getRequired().isEmpty()) {
             body.setRequired(true);
         }
+    }
+
+    private static boolean hasBinaryPart(Schema<?> schema) {
+        return schema != null && schema.getProperties() != null && schema.getProperties().values().stream()
+                .anyMatch(property -> "binary".equals(property.getFormat()));
     }
 
     private static void dropIgnoredSortParameter(Operation operation) {
@@ -163,9 +200,15 @@ public class OpenApiConfig {
         }
         return new SecurityScheme()
                 .type(SecurityScheme.Type.HTTP)
-                .scheme((String) scheme.get("scheme"))
-                .bearerFormat((String) scheme.get("bearerFormat"))
-                .description((String) scheme.get("description"));
+                .scheme(text(scheme, "scheme"))
+                .bearerFormat(text(scheme, "bearerFormat"))
+                .description(text(scheme, "description"));
+    }
+
+    /** A scalar as text: YAML reads {@code version: 1.0} as a number, and the header must not depend on how it was typed. */
+    private static String text(Map<String, Object> parent, String key) {
+        Object value = parent.get(key);
+        return value == null ? null : value.toString();
     }
 
     private static Map<String, Object> section(Map<String, Object> parent, String key) {

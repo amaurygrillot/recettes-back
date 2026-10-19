@@ -39,24 +39,29 @@ import static org.assertj.core.api.Assertions.assertThat;
  * caller and checks the answer against what the YAML promises.
  * <p>
  * It never needs a request to succeed, only to get past security, so every request is built to be
- * harmless: ids that name nothing, and malformed JSON as the body, which Spring refuses with a 400
- * after security has had its say and before any controller or service runs. Nothing is created,
- * changed or deleted; the only rows are the three throwaway accounts.
+ * harmless: ids that name nothing, malformed JSON as a JSON body, and a multipart body with no parts.
+ * Spring refuses each of those with a 400 after security has had its say and before any controller or
+ * service runs. Nothing is created, changed or deleted; the only rows are the three throwaway accounts.
  * <ul>
  *   <li>a <strong>public</strong> operation answers every caller with something other than 401/403;</li>
  *   <li>a <strong>protected</strong> one answers an anonymous caller 401, a caller whose token lacks
  *       the required role 403, and a caller who holds it - or, with no role named, any logged-in caller -
- *       anything but 401/403.</li>
+ *       anything but 401/403, and never a 5xx.</li>
  * </ul>
- * The anonymous-recipe-author rule ("only the author or an admin may edit") is the service's, not the
- * URL rules', and is covered by {@code RecipesIntegrationTest}; the YAML says "any authenticated
- * caller" for those operations because that is as far as security goes.
+ * Every answer must also be a status the operation's {@code responses} document. That is the one place the
+ * YAML's statuses meet the running code: for the generated operations everything else in the served spec is
+ * rendered from the YAML, so only a real request can show that the contract left one out.
+ * <p>
+ * "Only the author or an admin may edit a recipe" is the service's rule, not the URL rules', and is covered
+ * by {@code RecipesIntegrationTest}; the YAML says "any authenticated caller" for those operations because
+ * that is as far as security goes.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureTestRestTemplate
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class OpenApiSecurityConformanceTest {
 
+    private static final String BOUNDARY = "conformance-test-boundary";
     private static final String ANONYMOUS = "anonymous";
     private static final String NO_ROLE = "logged in, no role";
     private static final String USER = "USER";
@@ -118,16 +123,20 @@ class OpenApiSecurityConformanceTest {
     void securityGivesEachCallerTheAnswerTheContractPromises(OpenApiContract.Operation operation, String caller) {
         int status = send(operation, authorizations.get(caller)).getStatusCode().value();
 
+        assertThat(operation.statuses())
+                .as("%s answered %d to a %s caller, and its responses do not document that", operation, status, caller)
+                .contains(String.valueOf(status));
+
         if (operation.isPublic()) {
             assertThat(status).as("%s is public, so security must let a %s caller through", operation, caller)
-                    .isNotIn(401, 403);
+                    .isNotIn(401, 403).isLessThan(500);
         } else if (ANONYMOUS.equals(caller)) {
             assertThat(status).as("%s needs a token, so an anonymous caller is unauthorized", operation)
                     .isEqualTo(401);
         } else if (operation.requiredRole() == null || ROLES.get(caller).contains(operation.requiredRole())) {
             assertThat(status).as("%s needs %s, which a %s caller has", operation,
                     operation.requiredRole() == null ? "any login" : "the " + operation.requiredRole() + " role",
-                    caller).isNotIn(401, 403);
+                    caller).isNotIn(401, 403).isLessThan(500);
         } else {
             assertThat(status).as("%s needs the %s role, which a %s caller lacks", operation,
                     operation.requiredRole(), caller).isEqualTo(403);
@@ -142,9 +151,12 @@ class OpenApiSecurityConformanceTest {
         if (operation.bodyType() != null) {
             headers.set(HttpHeaders.CONTENT_TYPE, operation.bodyType());
         }
-        // Malformed on purpose, see the class comment. For a multipart operation it is a body with no
-        // boundary, refused for the same reason: before any code of ours runs.
-        String body = operation.bodyType() == null ? null : "{";
+        // Harmless on purpose, see the class comment: broken JSON, or a multipart body that has a boundary and no parts.
+        boolean multipart = operation.bodyType() != null && operation.bodyType().startsWith("multipart/");
+        if (multipart) {
+            headers.set(HttpHeaders.CONTENT_TYPE, operation.bodyType() + "; boundary=" + BOUNDARY);
+        }
+        String body = operation.bodyType() == null ? null : multipart ? "--" + BOUNDARY + "--\r\n" : "{";
         String path = operation.path().replace("{id}", "no-such-" + UUID.randomUUID());
         return restTemplate.exchange(path, HttpMethod.valueOf(operation.method()), new HttpEntity<>(body, headers),
                 String.class);
