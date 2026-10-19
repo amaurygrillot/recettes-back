@@ -244,7 +244,8 @@ Beyond the existing suite passing untouched, the original `master` build and thi
 same database and sent the same 302 requests: every `Accept` header, requests with no body, an empty body, a malformed body
 and the wrong content type, the upload shapes, and each of anonymous, `USER` and `ADMIN`. Status, content type and error
 text were compared. The first run found two differences (the `produces` and `consumes` conditions above), both fixed; the
-last found none. The two 500s both builds share - a non-multipart `POST /media`, where `MultipartException` reaches the
+run after that found none, and it was repeated once more after the conditions moved from a runtime hook to the build-time
+step, again with none. The two 500s both builds share - a non-multipart `POST /media`, where `MultipartException` reaches the
 catch-all handler - are an existing bug, left alone because fixing it changes a status; mapping it to a 400 or 415 is a
 small follow-up.
 
