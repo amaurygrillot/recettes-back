@@ -1,10 +1,11 @@
 package ilenreste.unpeu.recettesback.controllers.users;
 
+import ilenreste.unpeu.recettesback.api.AuthenticationApi;
 import ilenreste.unpeu.recettesback.models.auth.AuthenticationRequest;
+import ilenreste.unpeu.recettesback.models.auth.ReinitPasswordRequest;
 import ilenreste.unpeu.recettesback.models.auth.ReinitPasswordRequest;
 import ilenreste.unpeu.recettesback.models.users.CustomUserDetails;
 import ilenreste.unpeu.recettesback.services.users.PasswordResetService;
-import jakarta.validation.Valid;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -15,17 +16,19 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.JwtClaimsSet;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
 
+/**
+ * Logging in, and asking for a password reset. The routes, parameters, status
+ * codes and security of both methods are declared in {@code openapi.yaml} and
+ * reach this class through the generated {@link AuthenticationApi}; see
+ * {@code docs/openapi.md}.
+ */
 @Log4j2
-@RequestMapping("/auth")
 @RestController
-public class AuthenticationController {
+public class AuthenticationController implements AuthenticationApi {
 
     private final AuthenticationManager authenticationManager;
     private final JwtEncoder jwtEncoder;
@@ -39,13 +42,11 @@ public class AuthenticationController {
         this.passwordResetService = passwordResetService;
     }
 
-    @PostMapping("/login")
-    public ResponseEntity<String> login(@RequestBody AuthenticationRequest authenticationRequest) {
+    @Override
+    public ResponseEntity<String> login(AuthenticationRequest request) {
 
         Authentication auth = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(
-                        authenticationRequest.username(), authenticationRequest.password()
-                )
+                new UsernamePasswordAuthenticationToken(request.username(), request.password())
         );
 
         CustomUserDetails userDetails = (CustomUserDetails) auth.getPrincipal();
@@ -81,8 +82,8 @@ public class AuthenticationController {
      * same way whether or not the email is registered, so this endpoint can't
      * be used to discover which addresses have accounts (user enumeration).
      */
-    @PostMapping("/reinit-password")
-    public ResponseEntity<Void> reinitPassword(@Valid @RequestBody ReinitPasswordRequest request) {
+    @Override
+    public ResponseEntity<Void> requestPasswordReset(ReinitPasswordRequest request) {
         log.info("Password reset requested");
         passwordResetService.requestReset(request.email());
         return ResponseEntity.accepted().build();

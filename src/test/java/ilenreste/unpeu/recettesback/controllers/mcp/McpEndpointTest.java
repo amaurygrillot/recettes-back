@@ -90,6 +90,25 @@ class McpEndpointTest {
     }
 
     @Test
+    void createRecipeDescribesItsIntroductionByItsTextAlone() {
+        // RecipeIntroductionRequest.isBlank() looks like a bean getter. It is @JsonIgnore'd so the published
+        // OpenAPI schema does not list a "blank" property; this pins that the MCP tool schema, built by a different
+        // generator, never listed one either, so that annotation changes nothing for an MCP client.
+        JsonNode tools = json.readTree(post(LIST_TOOLS, account.bearerToken(restTemplate)).getBody())
+                .at("/result/tools");
+        JsonNode createRecipe = null;
+        for (JsonNode tool : tools) {
+            if ("create_recipe".equals(tool.get("name").asString())) {
+                createRecipe = tool;
+            }
+        }
+
+        assertThat(createRecipe).isNotNull();
+        assertThat(createRecipe.at("/inputSchema/properties/recipe/properties/introduction/properties")
+                .propertyNames()).containsExactly("text");
+    }
+
+    @Test
     void toolCallRunsAgainstTheService() {
         ResponseEntity<String> response = post(CALL_LIST_UNITS, account.bearerToken(restTemplate));
 

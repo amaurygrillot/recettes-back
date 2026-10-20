@@ -49,6 +49,13 @@ public class SecurityFilterConfig {
                         .requestMatchers("/error").permitAll()
                         .requestMatchers("/public/**", "/health").permitAll()
 
+                        // The API description and its viewer. Public so that Swagger UI can load the spec
+                        // before anyone has a token - "Authorize" in the UI is what attaches one. Springdoc is off
+                        // unless SPRINGDOC_ENABLED=true (see application.properties), and the paths simply do not
+                        // exist then, so this rule exposes nothing. See docs/openapi.md.
+                        .requestMatchers("/v3/api-docs", "/v3/api-docs/**", "/swagger-ui.html",
+                                "/swagger-ui/**").permitAll()
+
                         // Public reads: recipes are readable without an account.
                         .requestMatchers(HttpMethod.GET, "/recipes/**", "/ingredients/**", "/categories/**",
                                 "/tags/**", "/units/**", "/media/**").permitAll()

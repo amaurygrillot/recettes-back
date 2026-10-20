@@ -1,0 +1,1798 @@
+openapi: 3.0.3
+
+# The contract of the REST API, and the one file that describes all of it.
+#
+# This file is the source of truth: the build generates the Spring `*Api` interfaces from it (interfaces only), the
+# controllers implement them, and OpenApiContractTest fails when the running application stops matching what is
+# written here. Edit this file FIRST when an endpoint is added or changed. See docs/openapi.md for how and why.
+#
+# Conventions used below
+#   security: []                        public, no token needed
+#   security: [{bearerAuth: []}]        a valid token is needed
+#   x-required-role: ADMIN | USER       the role the token must carry (absent = any authenticated caller). OpenAPI cannot
+#                                       express roles on a bearer scheme, so this extension does, and
+#                                       OpenApiSecurityConformanceTest checks it against SecurityFilterConfig.
+#   x-internal: true                    the generator skips the operation: its signature is written by hand because it
+#                                       returns a generic Page<T> the generator cannot express (see docs/openapi.md).
+#   Schemas are NOT generated. Each one is mapped onto the hand-written record of the same name in `models`
+#   (pom.xml, schemaMappings), so a schema referenced by an operation but not mapped fails the build.
+
+info:
+  title: Recettes API
+  version: 0.0.1
+  description: |
+    The recipe library: recipes, the reference data they are written with (categories, tags, units, ingredients), the
+    pictures they carry, and the accounts that write them.
+
+    ## Authentication
+
+    `POST /auth/login` answers with a JWT as the **raw response body**. Send it as `Authorization: Bearer <token>`.
+    Tokens last one hour and do not survive an application restart. Every read in this API is public.
+
+    A request that carries a *broken* token (expired, malformed, or minted before the last restart) is rejected with 401
+    even on a public route, so a client should drop a token that stops working. The credential endpoints are the one
+    exception: `POST /auth/login`, `POST /auth/reinit-password`, `POST /users/create` and `PUT /users/reinit-password`
+    ignore a broken token, so a client still holding a stale one can log in again. A request with no token at all is
+    judged by the route alone.
+
+    ## Errors
+
+    Every error is an RFC 9457 `application/problem+json` body (`ProblemDetail`). The status is the specific one that
+    matches what happened: 400 invalid input (including an id inside a body that names nothing), 401 missing or invalid
+    credentials, 403 authenticated but not allowed, 404 the resource in the path does not exist, 409 the request
+    conflicts with existing state, 413 upload too large, 429 this caller made too many requests, 503 the server is
+    momentarily at capacity. 429 and 503 carry `Retry-After`. An unexpected failure is a 500. Two more are raised by the
+    framework before any operation runs, and are not listed on each one either: 415 for a request body that is not in a
+    media type the operation reads, and 406 when nothing the operation can write matches the `Accept` header.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Authentication
+    description: Logging in, and asking for a password reset.
+  - name: Users
+    description: Accounts.
+  - name: Recipes
+    description: Recipes. Reads are public; writing needs a login; editing or deleting needs to be the author or an admin.
+  - name: Categories
+    description: The taxonomy that drives navigation, and the hierarchy it forms. Reads are public, writes are admin-only.
+  - name: Tags
+    description: Open-ended facets. Reads are public, writes are admin-only.
+  - name: Units
+    description: Units of measure. Reads are public, writes are admin-only.
+  - name: Ingredients
+    description: >-
+      Ingredients. Reads are public and creating one is open to any user, because a recipe cannot be written without the
+      ingredients it uses; renaming and deleting are admin-only.
+  - name: Media
+    description: Uploaded pictures. Upload first, then reference the returned id when creating or updating a recipe.
+
+paths:
+  # ------------------------------------------------------------------------------------------------ authentication
+  /auth/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Log in
+      description: >-
+        Exchanges a username and password for a JWT, returned as the raw response body (`text/plain`, no JSON
+        wrapper). Unknown username, wrong password, a disabled account and a body with blank or missing fields all
+        answer the same 401. Sent with `Accept: application/json` alone, the same token body is labelled
+        `application/json`: it is still the bare token, not JSON.
+      security: []
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthenticationRequest'
+      responses:
+        '200':
+          description: The signed token.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '400':
+          description: No body, or a body that is not JSON. A JSON body with blank or missing fields is a 401.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/reinit-password:
+    post:
+      tags: [Authentication]
+      operationId: requestPasswordReset
+      summary: Ask for a password-reset email
+      description: >-
+        Starts the "forgot password" flow. If the address belongs to an account, an email with a one-time reset token
+        is sent. **The answer is the same whether or not the address is registered**, so this endpoint cannot be used to
+        discover which addresses have accounts. The flow is completed by `PUT /users/reinit-password`.
+      security: []
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReinitPasswordRequest'
+      responses:
+        '202':
+          description: Accepted, whether or not an email was sent.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ------------------------------------------------------------------------------------------------------- users
+  /users/create:
+    post:
+      tags: [Users]
+      operationId: createUser
+      summary: Register an account
+      security: []
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201':
+          description: The stored account.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: The username or the email is already taken.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /users/update:
+    put:
+      tags: [Users]
+      operationId: updateUser
+      summary: Update the calling account
+      description: >-
+        Updates **the calling account**: there is no id in the path and the body cannot name one. Every field is
+        optional and an absent one is left alone. Changing `password` or `email` also needs `currentPassword`, as proof
+        that the caller is the account holder and not merely someone holding their token.
+        Requires the `USER` role.
+      security:
+        - bearerAuth: []
+      x-required-role: USER
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: The stored account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: >-
+            The token's role is not enough, or `currentPassword` is missing or wrong for a password or email change.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The new username or email is already taken.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /users/reinit-password:
+    put:
+      tags: [Users]
+      operationId: resetPassword
+      summary: Complete a password reset
+      description: >-
+        Sets a new password if the token from the reset email is valid for the given account. **Every way this can fail
+        answers the same 400**: unknown email, unknown token, expired token and a token issued to another account are
+        indistinguishable, so the endpoint cannot be used to discover which addresses have accounts. A token is
+        single-use.
+      security: []
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: The password was changed.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ---------------------------------------------------------------------------------------------------- recipes
+  /recipes:
+    get:
+      # Hand-written signature (RecipeController.searchRecipes): it returns Page<RecipeSummaryResponse>, and the
+      # generator prints a generic type's class literal into the response annotations, which does not compile.
+      # OpenApiContractTest is what keeps that method honest against this entry.
+      x-internal: true
+      tags: [Recipes]
+      operationId: searchRecipes
+      summary: Search recipes
+      description: >-
+        A page of recipe summaries, newest first unless `sortBy` says otherwise. **Every criterion is optional, and so
+        is all of them**: an unfiltered call is the home page. Supplied criteria are combined with AND. A blank value is
+        treated as absent.
+
+
+        A category filter reaches the category's subcategories too, at any depth, unless `includeSubcategories=false`.
+        `categoryId` and `categoryName` are two spellings of one filter: supplying both unions their matches.
+      security: []
+      parameters:
+        - name: title
+          in: query
+          description: Matched against the recipe title, case-insensitively, anywhere in the string.
+          schema:
+            type: string
+            maxLength: 200
+        - name: authorId
+          in: query
+          description: Exactly this author.
+          schema:
+            type: string
+        - name: authorName
+          in: query
+          description: Matched against the author's username, case-insensitively, anywhere in the string.
+          schema:
+            type: string
+            maxLength: 100
+        - name: categoryId
+          in: query
+          description: Recipes filed under this category.
+          schema:
+            type: string
+        - name: categoryName
+          in: query
+          description: Matched against the category's normalized name, so typing `entrees` finds `Entrées`.
+          schema:
+            type: string
+            maxLength: 100
+        - name: includeSubcategories
+          in: query
+          description: Whether a category filter reaches everything filed beneath the category. Absent means true.
+          schema:
+            type: boolean
+        - name: tagId
+          in: query
+          description: Recipes carrying this tag.
+          schema:
+            type: string
+        - name: tagName
+          in: query
+          description: Matched against the tag's normalized name.
+          schema:
+            type: string
+            maxLength: 100
+        - name: sortBy
+          in: query
+          description: The column to order by, from a closed set. Defaults to `CREATED_AT`. Any other value is a 400.
+          schema:
+            type: string
+            enum: [CREATED_AT, UPDATED_AT, TITLE]
+        - name: direction
+          in: query
+          description: Defaults to `DESC`.
+          schema:
+            type: string
+            enum: [ASC, DESC]
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: A page of recipe summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageRecipeSummaryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [Recipes]
+      operationId: createRecipe
+      summary: Create a recipe
+      description: >-
+        Every category, tag, ingredient, unit and media id in the body must already exist; one that does not is a 400
+        naming the field and the id, not a 404, because `/recipes` itself is perfectly reachable. Requires the `USER`
+        role.
+      security:
+        - bearerAuth: []
+      x-required-role: USER
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecipeRequest'
+      responses:
+        '201':
+          description: The stored recipe.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /recipes/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Recipes]
+      operationId: getRecipe
+      summary: Get one recipe
+      security: []
+      responses:
+        '200':
+          description: The recipe, in full.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Recipes]
+      operationId: updateRecipe
+      summary: Update a recipe
+      description: >-
+        A **partial** update: an absent field is left alone, and a present collection replaces the whole collection.
+        `categoryIds`, `ingredientGroups` and `steps` may not be supplied empty (400); `tagIds` and `coverPictures` may.
+        To remove the introduction, send `{"introduction": {"text": ""}}`.
+
+
+        Only the author or an admin may edit: that depends on a database row, so it is decided by the service rather
+        than by a URL rule, and any authenticated caller gets as far as that check.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRecipeRequest'
+      responses:
+        '200':
+          description: The stored recipe.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The recipe is somebody else's and the caller is not an admin.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Recipes]
+      operationId: deleteRecipe
+      summary: Delete a recipe
+      description: >-
+        Cascades to the introduction, steps, ingredient groups and picture links; merely dereferences ingredients, tags,
+        categories and media. Only the author or an admin may delete.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The recipe is somebody else's and the caller is not an admin.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ------------------------------------------------------------------------------------------------- categories
+  /categories:
+    get:
+      tags: [Categories]
+      operationId: listCategories
+      summary: List every category
+      description: Flat, name-sorted, every category at every level. Not paginated, deliberately.
+      security: []
+      responses:
+        '200':
+          description: All categories.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CategoryResponse'
+    post:
+      tags: [Categories]
+      operationId: createCategory
+      summary: Create a category
+      description: Omit `parentCategoryId` to create a main category. Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoryRequest'
+      responses:
+        '201':
+          description: The stored category.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CategoryResponse'
+        '400':
+          description: Invalid input, or `parentCategoryId` names no category.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /categories/hierarchy:
+    get:
+      tags: [Categories]
+      operationId: getCategoryHierarchy
+      summary: The whole taxonomy as a nested forest
+      description: One call for a navigation menu, instead of `GET /categories` plus a walk on the client.
+      security: []
+      responses:
+        '200':
+          description: The main categories, each with its subcategories nested beneath it.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CategoryTreeResponse'
+
+  /categories/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Categories]
+      operationId: getCategory
+      summary: Get one category
+      security: []
+      responses:
+        '200':
+          description: The category.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CategoryResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Categories]
+      operationId: updateCategory
+      summary: Replace a category
+      description: >-
+        Full replacement: an absent `parentCategoryId` promotes the category to a main category. Filing a category under
+        itself or under one of its own descendants is a 400. Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoryRequest'
+      responses:
+        '200':
+          description: The stored category.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CategoryResponse'
+        '400':
+          description: Invalid input, `parentCategoryId` names no category, or it would create a cycle.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Categories]
+      operationId: deleteCategory
+      summary: Delete a category
+      description: >-
+        A 409 rather than a cascade if any recipe still uses it, or if it still has subcategories. Requires the `ADMIN`
+        role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /categories/{id}/subcategories:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Categories]
+      operationId: listSubcategories
+      summary: Everything filed under a category
+      description: At any depth. A 404 if the id names no category, which is a different answer from the empty list a leaf returns.
+      security: []
+      responses:
+        '200':
+          description: The descendants, flat.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CategoryResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /categories/{id}/parent-categories:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Categories]
+      operationId: listParentCategories
+      summary: The categories above a category
+      description: Nearest first, up to the main category. Empty for a main category.
+      security: []
+      responses:
+        '200':
+          description: The ancestors.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CategoryResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ------------------------------------------------------------------------------------------------------- tags
+  /tags:
+    get:
+      tags: [Tags]
+      operationId: listTags
+      summary: List every tag
+      security: []
+      responses:
+        '200':
+          description: All tags.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TagResponse'
+    post:
+      tags: [Tags]
+      operationId: createTag
+      summary: Create a tag
+      description: Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagRequest'
+      responses:
+        '201':
+          description: The stored tag.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TagResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /tags/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Tags]
+      operationId: getTag
+      summary: Get one tag
+      security: []
+      responses:
+        '200':
+          description: The tag.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TagResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Tags]
+      operationId: updateTag
+      summary: Rename a tag
+      description: Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagRequest'
+      responses:
+        '200':
+          description: The stored tag.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TagResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Tags]
+      operationId: deleteTag
+      summary: Delete a tag
+      description: A 409 rather than a cascade if any recipe still uses it. Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ------------------------------------------------------------------------------------------------------ units
+  /units:
+    get:
+      tags: [Units]
+      operationId: listUnits
+      summary: List every unit
+      security: []
+      responses:
+        '200':
+          description: All units, including the seeded ones.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UnitResponse'
+    post:
+      tags: [Units]
+      operationId: createUnit
+      summary: Create a unit
+      description: Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnitRequest'
+      responses:
+        '201':
+          description: The stored unit.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /units/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Units]
+      operationId: getUnit
+      summary: Get one unit
+      security: []
+      responses:
+        '200':
+          description: The unit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnitResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Units]
+      operationId: updateUnit
+      summary: Replace a unit
+      description: Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnitRequest'
+      responses:
+        '200':
+          description: The stored unit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Units]
+      operationId: deleteUnit
+      summary: Delete a unit
+      description: A 409 rather than a cascade if any recipe still uses it. Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ------------------------------------------------------------------------------------------------ ingredients
+  /ingredients:
+    get:
+      # Hand-written signature (IngredientController.searchIngredients), for the same reason as GET /recipes.
+      x-internal: true
+      tags: [Ingredients]
+      operationId: searchIngredients
+      summary: Search ingredients
+      description: >-
+        A page of ingredients, name-sorted unless `sortBy` says otherwise. Absent or blank `namePrefix` returns
+        everything.
+      security: []
+      parameters:
+        - name: namePrefix
+          in: query
+          description: >-
+            What the user has typed so far, matched against the normalized name, so typing `oeuf` finds `Œuf`. A prefix
+            and not a substring.
+          schema:
+            type: string
+            maxLength: 100
+        - name: sortBy
+          in: query
+          description: The column to order by, from a closed set. Defaults to `NAME`. Any other value is a 400.
+          schema:
+            type: string
+            enum: [NAME, CREATED_AT]
+        - name: direction
+          in: query
+          description: Defaults to `ASC`.
+          schema:
+            type: string
+            enum: [ASC, DESC]
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: A page of ingredients.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageIngredientResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [Ingredients]
+      operationId: createIngredient
+      summary: Create an ingredient
+      description: >-
+        Open to any user with the `USER` role, unlike renaming and deleting. Attaching an `iconMediaId` that names no
+        media is a 400.
+      security:
+        - bearerAuth: []
+      x-required-role: USER
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngredientRequest'
+      responses:
+        '201':
+          description: The stored ingredient.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngredientResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /ingredients/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Ingredients]
+      operationId: getIngredient
+      summary: Get one ingredient
+      security: []
+      responses:
+        '200':
+          description: The ingredient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngredientResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Ingredients]
+      operationId: updateIngredient
+      summary: Replace an ingredient
+      description: >-
+        Full replacement: omitting `iconMediaId` clears the icon. Renaming a shared row rewrites every recipe that
+        references it, which is why this is admin-only. Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngredientRequest'
+      responses:
+        '200':
+          description: The stored ingredient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngredientResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Ingredients]
+      operationId: deleteIngredient
+      summary: Delete an ingredient
+      description: A 409 rather than a cascade if any recipe still uses it. Requires the `ADMIN` role.
+      security:
+        - bearerAuth: []
+      x-required-role: ADMIN
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ------------------------------------------------------------------------------------------------------ media
+  /media:
+    post:
+      tags: [Media]
+      operationId: uploadMedia
+      summary: Upload one image
+      description: >-
+        JPEG or PNG only, judged by the file's magic bytes and never by its name or declared type. The image is
+        re-encoded, so what is stored is not what was sent. Upload first and independently, then reference the returned
+        id when creating or updating a recipe. Requires the `USER` role.
+      security:
+        - bearerAuth: []
+      x-required-role: USER
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The image. At most 8 MB.
+      responses:
+        '201':
+          description: The stored media.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaResponse'
+        '400':
+          description: No file, not a JPEG or PNG, undecodable, or too many pixels.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /media/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Media]
+      operationId: downloadMedia
+      summary: Download an image
+      description: >-
+        Public, since recipes are public. Content never changes behind an id (editing a picture means uploading a new
+        one), which is what makes the year-long `immutable` cache header honest; the `ETag` answers a conditional
+        request with `If-None-Match` by a 304 and no body.
+      x-spring-provide-args:
+        - org.springframework.web.context.request.WebRequest webRequest
+      security: []
+      parameters:
+        - name: variant
+          in: query
+          required: false
+          description: >-
+            `full` (the default) or `thumbnail`. `thumb` is accepted as an alias of `thumbnail`, case-insensitively.
+            Anything else is a 400.
+          schema:
+            type: string
+            default: full
+      responses:
+        '200':
+          description: The image bytes.
+          headers:
+            ETag:
+              description: A strong validator built from the stored checksum.
+              schema:
+                type: string
+            Cache-Control:
+              description: '`public, max-age=31536000, immutable`'
+              schema:
+                type: string
+            Content-Disposition:
+              description: '`inline`, with a file name we generated, never one the uploader supplied.'
+              schema:
+                type: string
+            X-Content-Type-Options:
+              description: Always `nosniff`.
+              schema:
+                type: string
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '304':
+          description: The caller's cached copy is still current. No body.
+        '400':
+          description: An unknown `variant`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A token from `POST /auth/login`.
+
+  headers:
+    Location:
+      description: The URI of the resource that was created.
+      schema:
+        type: string
+    RetryAfter:
+      description: Whole seconds to wait before trying again. Never less than 1.
+      schema:
+        type: integer
+        format: int32
+
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: The identifier of the resource.
+      schema:
+        type: string
+    Page:
+      name: page
+      in: query
+      description: Zero-based page index.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    Size:
+      name: size
+      in: query
+      description: Page size. A value above 100 is capped to 100, not rejected.
+      schema:
+        type: integer
+        minimum: 1
+        default: 20
+
+  # Every error body is a ProblemDetail, served as application/problem+json.
+  responses:
+    BadRequest:
+      description: Malformed or invalid input (a validation failure), including an id inside the body that names nothing.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Unauthorized:
+      description: No token, or a token that is expired, broken or from before the last restart.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Forbidden:
+      description: Authenticated, but the token's role is not enough for this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    NotFound:
+      description: The resource named in the path does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Conflict:
+      description: The request conflicts with existing state, such as a duplicate name or a row that is still in use.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    PayloadTooLarge:
+      description: The upload is over the size limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    TooManyRequests:
+      description: This caller has used up its upload allowance. The request itself is fine; try again after the delay.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    ServiceUnavailable:
+      description: The server is momentarily at capacity. Nothing is wrong with the request; try again after the delay.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+  schemas:
+    # --------------------------------------------------------------------------------------------------- errors
+    ProblemDetail:
+      description: >-
+        RFC 9457. Mapped onto Spring's own ProblemDetail, whose JSON is flattened by a mixin; `type` is omitted when it
+        is `about:blank`. OpenApiContractTest does not compare this schema for that reason.
+      type: object
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri
+
+    # ------------------------------------------------------------------------------------------ authentication
+    AuthenticationRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+    ReinitPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          minLength: 3
+          maxLength: 50
+
+    # ------------------------------------------------------------------------------------------------- users
+    CreateUserRequest:
+      type: object
+      required: [username, password, email]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        password:
+          type: string
+          minLength: 8
+          maxLength: 50
+        email:
+          type: string
+          minLength: 3
+          maxLength: 50
+        firstname:
+          type: string
+        lastname:
+          type: string
+    UpdateUserRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        password:
+          type: string
+          minLength: 8
+          maxLength: 50
+        email:
+          type: string
+          description: Must be a valid email address.
+          maxLength: 254
+        firstname:
+          type: string
+        lastname:
+          type: string
+        currentPassword:
+          type: string
+          description: Required when `password` or `email` is present, and ignored otherwise.
+    ResetPasswordRequest:
+      type: object
+      required: [email, token, newPassword]
+      properties:
+        email:
+          type: string
+          minLength: 3
+          maxLength: 50
+        token:
+          type: string
+          minLength: 1
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 50
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        firstname:
+          type: string
+          nullable: true
+        lastname:
+          type: string
+          nullable: true
+        roles:
+          type: array
+          items:
+            type: string
+
+    # ----------------------------------------------------------------------------------------- reference data
+    CategoryRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        parentCategoryId:
+          type: string
+          description: Absent for a main category.
+    CategoryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        categoryType:
+          type: string
+          enum: [MAIN, SUB]
+        parentCategoryId:
+          type: string
+          nullable: true
+    CategoryTreeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        subcategories:
+          type: array
+          items:
+            $ref: '#/components/schemas/CategoryTreeResponse'
+    TagRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+    TagResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    UnitRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        abbreviation:
+          type: string
+          maxLength: 20
+    UnitResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        abbreviation:
+          type: string
+          nullable: true
+    IngredientRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        iconMediaId:
+          type: string
+          description: The id of an uploaded media. Omitting it clears the icon.
+    IngredientResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        iconMediaId:
+          type: string
+          nullable: true
+
+    # --------------------------------------------------------------------------------------------------- media
+    MediaResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        mediaType:
+          type: string
+          enum: [PHOTO]
+        contentType:
+          type: string
+        width:
+          type: integer
+          format: int32
+        height:
+          type: integer
+          format: int32
+        sizeBytes:
+          type: integer
+          format: int64
+
+    # ------------------------------------------------------------------------------------------------ recipes
+    RecipeIntroductionRequest:
+      type: object
+      properties:
+        text:
+          type: string
+          description: On an update, blank text removes the introduction.
+    RecipePictureRequest:
+      type: object
+      required: [mediaId]
+      properties:
+        mediaId:
+          type: string
+          minLength: 1
+        altText:
+          type: string
+          maxLength: 500
+    RecipeIngredientRequest:
+      type: object
+      required: [ingredientId]
+      properties:
+        ingredientId:
+          type: string
+          minLength: 1
+        quantity:
+          type: number
+          minimum: 0
+        unitId:
+          type: string
+        note:
+          type: string
+          maxLength: 200
+    RecipeIngredientGroupRequest:
+      type: object
+      required: [ingredients]
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        ingredients:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeIngredientRequest'
+    RecipeStepRequest:
+      type: object
+      required: [instruction]
+      properties:
+        instruction:
+          type: string
+          minLength: 1
+        pictures:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipePictureRequest'
+    CreateRecipeRequest:
+      type: object
+      required: [title, categoryIds, ingredientGroups, steps]
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        introduction:
+          $ref: '#/components/schemas/RecipeIntroductionRequest'
+        recommendations:
+          type: string
+        categoryIds:
+          type: array
+          description: At least one.
+          items:
+            type: string
+        tagIds:
+          type: array
+          items:
+            type: string
+        coverPictures:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipePictureRequest'
+        ingredientGroups:
+          type: array
+          description: At least one.
+          items:
+            $ref: '#/components/schemas/RecipeIngredientGroupRequest'
+        steps:
+          type: array
+          description: At least one.
+          items:
+            $ref: '#/components/schemas/RecipeStepRequest'
+    UpdateRecipeRequest:
+      type: object
+      description: Every field is optional; see the operation for what absent and empty mean.
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        introduction:
+          $ref: '#/components/schemas/RecipeIntroductionRequest'
+        recommendations:
+          type: string
+        categoryIds:
+          type: array
+          items:
+            type: string
+        tagIds:
+          type: array
+          items:
+            type: string
+        coverPictures:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipePictureRequest'
+        ingredientGroups:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeIngredientGroupRequest'
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeStepRequest'
+    RecipeAuthorResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+    RecipeIntroductionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+    RecipePictureResponse:
+      type: object
+      properties:
+        mediaId:
+          type: string
+        altText:
+          type: string
+          nullable: true
+    RecipeIngredientResponse:
+      type: object
+      properties:
+        ingredient:
+          $ref: '#/components/schemas/IngredientResponse'
+        quantity:
+          type: number
+          nullable: true
+        unit:
+          $ref: '#/components/schemas/UnitResponse'
+        note:
+          type: string
+          nullable: true
+    RecipeIngredientGroupResponse:
+      type: object
+      properties:
+        title:
+          type: string
+          nullable: true
+        ingredients:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeIngredientResponse'
+    RecipeStepResponse:
+      type: object
+      properties:
+        instruction:
+          type: string
+        pictures:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipePictureResponse'
+    RecipeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        introduction:
+          $ref: '#/components/schemas/RecipeIntroductionResponse'
+        recommendations:
+          type: string
+          nullable: true
+        author:
+          $ref: '#/components/schemas/RecipeAuthorResponse'
+        categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/CategoryResponse'
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/TagResponse'
+        coverPictures:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipePictureResponse'
+        ingredientGroups:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeIngredientGroupResponse'
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeStepResponse'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    RecipeSummaryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        coverMediaId:
+          type: string
+          nullable: true
+          description: The first cover picture, as the thumbnail.
+        categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/CategoryResponse'
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/TagResponse'
+        author:
+          $ref: '#/components/schemas/RecipeAuthorResponse'
+        createdAt:
+          type: string
+          format: date-time
+
+    # ------------------------------------------------------------------------------------------------- pages
+    # The wire shape of Spring Data's PageImpl, which is what the paged endpoints serialise today. Spring Data logs a
+    # warning that this shape is not guaranteed stable; OpenApiContractTest is what notices when it moves.
+    SortObject:
+      type: object
+      properties:
+        empty:
+          type: boolean
+        sorted:
+          type: boolean
+        unsorted:
+          type: boolean
+    PageableObject:
+      type: object
+      properties:
+        offset:
+          type: integer
+          format: int64
+        paged:
+          type: boolean
+        pageNumber:
+          type: integer
+          format: int32
+        pageSize:
+          type: integer
+          format: int32
+        sort:
+          $ref: '#/components/schemas/SortObject'
+        unpaged:
+          type: boolean
+    PageIngredientResponse:
+      type: object
+      properties:
+        totalPages:
+          type: integer
+          format: int32
+        totalElements:
+          type: integer
+          format: int64
+        size:
+          type: integer
+          format: int32
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngredientResponse'
+        number:
+          type: integer
+          format: int32
+        sort:
+          $ref: '#/components/schemas/SortObject'
+        pageable:
+          $ref: '#/components/schemas/PageableObject'
+        numberOfElements:
+          type: integer
+          format: int32
+        first:
+          type: boolean
+        last:
+          type: boolean
+        empty:
+          type: boolean
+    PageRecipeSummaryResponse:
+      type: object
+      properties:
+        totalPages:
+          type: integer
+          format: int32
+        totalElements:
+          type: integer
+          format: int64
+        size:
+          type: integer
+          format: int32
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeSummaryResponse'
+        number:
+          type: integer
+          format: int32
+        sort:
+          $ref: '#/components/schemas/SortObject'
+        pageable:
+          $ref: '#/components/schemas/PageableObject'
+        numberOfElements:
+          type: integer
+          format: int32
+        first:
+          type: boolean
+        last:
+          type: boolean
+        empty:
+          type: boolean

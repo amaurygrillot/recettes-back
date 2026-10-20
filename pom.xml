@@ -5,7 +5,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.0.1</version>
+        <version>4.1.1</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>ilenreste.unpeu</groupId>
@@ -29,6 +29,9 @@
     <properties>
         <java.version>25</java.version>
         <spring-ai.version>2.0.1</spring-ai.version>
+        <!-- Newer than the versions the Spring Boot BOM manages; see docs/openapi.md#dependency-upgrades. -->
+        <postgresql.version>42.7.14</postgresql.version>
+        <lombok.version>1.18.48</lombok.version>
     </properties>
     <dependencies>
         <dependency>
@@ -72,6 +75,13 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
+        </dependency>
+
+        <!-- OpenAPI: Swagger UI + /v3/api-docs rendered from the generated API interfaces; see docs/openapi.md -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>3.1.1</version>
         </dependency>
 
         <!-- JWT / JWK / Nimbus -->
@@ -135,6 +145,16 @@
 
     <dependencyManagement>
         <dependencies>
+            <!--
+                Spring AI's model module drags in swagger-annotations 2.2.38, and Maven's nearest-wins mediation
+                picks that over the 2.2.55 which the swagger-core inside springdoc is built against. Pinned to the
+                latest so the annotations and the code that reads them are one release.
+            -->
+            <dependency>
+                <groupId>io.swagger.core.v3</groupId>
+                <artifactId>swagger-annotations-jakarta</artifactId>
+                <version>2.2.55</version>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
@@ -171,6 +191,129 @@
                     </excludes>
                 </configuration>
             </plugin>
+            <!--
+                Generates the Spring *Api interfaces from src/main/resources/openapi/openapi.yaml into
+                target/generated-sources, on every build. INTERFACES ONLY: the controllers implement them, and the
+                DTOs stay the hand-written records in `models`. The reasoning, and how to add an endpoint, are in
+                docs/openapi.md.
+            -->
+            <plugin>
+                <groupId>org.openapitools</groupId>
+                <artifactId>openapi-generator-maven-plugin</artifactId>
+                <version>7.26.0</version>
+                <executions>
+                    <execution>
+                        <id>generate-api-interfaces</id>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                        <configuration>
+                            <inputSpec>${project.basedir}/src/main/resources/openapi/openapi.yaml</inputSpec>
+                            <generatorName>spring</generatorName>
+                            <output>${project.build.directory}/generated-sources/openapi</output>
+                            <apiPackage>ilenreste.unpeu.recettesback.api</apiPackage>
+                            <!-- No models: each schema is mapped onto an existing record just below. -->
+                            <generateModels>false</generateModels>
+                            <generateApis>true</generateApis>
+                            <generateSupportingFiles>false</generateSupportingFiles>
+                            <generateApiTests>false</generateApiTests>
+                            <generateApiDocumentation>false</generateApiDocumentation>
+                            <!--
+                                Schema name = record to use instead of generating one. A schema that an operation
+                                references and that is not listed here fails the build (the generator would import a
+                                class that does not exist), which is the prompt to add the line. Schemas that are only
+                                nested inside others need no line: nothing generated refers to them.
+                            -->
+                            <schemaMappings>
+                                <schemaMapping>ProblemDetail=org.springframework.http.ProblemDetail</schemaMapping>
+                                <schemaMapping>AuthenticationRequest=ilenreste.unpeu.recettesback.models.auth.AuthenticationRequest</schemaMapping>
+                                <schemaMapping>ReinitPasswordRequest=ilenreste.unpeu.recettesback.models.auth.ReinitPasswordRequest</schemaMapping>
+                                <schemaMapping>CreateUserRequest=ilenreste.unpeu.recettesback.models.users.requests.CreateUserRequest</schemaMapping>
+                                <schemaMapping>UpdateUserRequest=ilenreste.unpeu.recettesback.models.users.requests.UpdateUserRequest</schemaMapping>
+                                <schemaMapping>ResetPasswordRequest=ilenreste.unpeu.recettesback.models.users.requests.ResetPasswordRequest</schemaMapping>
+                                <schemaMapping>UserResponse=ilenreste.unpeu.recettesback.models.users.responses.UserResponse</schemaMapping>
+                                <schemaMapping>CreateRecipeRequest=ilenreste.unpeu.recettesback.models.recipes.requests.CreateRecipeRequest</schemaMapping>
+                                <schemaMapping>UpdateRecipeRequest=ilenreste.unpeu.recettesback.models.recipes.requests.UpdateRecipeRequest</schemaMapping>
+                                <schemaMapping>RecipeResponse=ilenreste.unpeu.recettesback.models.recipes.responses.RecipeResponse</schemaMapping>
+                                <schemaMapping>CategoryRequest=ilenreste.unpeu.recettesback.models.reference.requests.CategoryRequest</schemaMapping>
+                                <schemaMapping>TagRequest=ilenreste.unpeu.recettesback.models.reference.requests.TagRequest</schemaMapping>
+                                <schemaMapping>UnitRequest=ilenreste.unpeu.recettesback.models.reference.requests.UnitRequest</schemaMapping>
+                                <schemaMapping>IngredientRequest=ilenreste.unpeu.recettesback.models.reference.requests.IngredientRequest</schemaMapping>
+                                <schemaMapping>CategoryResponse=ilenreste.unpeu.recettesback.models.reference.responses.CategoryResponse</schemaMapping>
+                                <schemaMapping>CategoryTreeResponse=ilenreste.unpeu.recettesback.models.reference.responses.CategoryTreeResponse</schemaMapping>
+                                <schemaMapping>TagResponse=ilenreste.unpeu.recettesback.models.reference.responses.TagResponse</schemaMapping>
+                                <schemaMapping>UnitResponse=ilenreste.unpeu.recettesback.models.reference.responses.UnitResponse</schemaMapping>
+                                <schemaMapping>IngredientResponse=ilenreste.unpeu.recettesback.models.reference.responses.IngredientResponse</schemaMapping>
+                                <schemaMapping>MediaResponse=ilenreste.unpeu.recettesback.models.media.responses.MediaResponse</schemaMapping>
+                            </schemaMappings>
+                            <configOptions>
+                                <interfaceOnly>true</interfaceOnly>
+                                <!-- Boot 4 and Jackson 3 (needs both flags, since 7.16). -->
+                                <useSpringBoot4>true</useSpringBoot4>
+                                <useJackson3>true</useJackson3>
+                                <useTags>true</useTags>
+                                <useBeanValidation>true</useBeanValidation>
+                                <skipDefaultInterface>true</skipDefaultInterface>
+                                <!--
+                                    Without this the interfaces carry a class-level @Validated, which makes Spring
+                                    validate through an AOP proxy and raise ConstraintViolationException (a 500 here)
+                                    instead of the 400 the built-in method validation produces.
+                                -->
+                                <useSpringBuiltInValidation>true</useSpringBuiltInValidation>
+                                <documentationProvider>springdoc</documentationProvider>
+                                <annotationLibrary>swagger2</annotationLibrary>
+                                <openApiNullable>false</openApiNullable>
+                                <hideGenerationTimestamp>true</hideGenerationTimestamp>
+                                <generateJsonIncludeAnnotations>false</generateJsonIncludeAnnotations>
+                                <generateJsonSetterNullsAnnotations>false</generateJsonSetterNullsAnnotations>
+                            </configOptions>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+                The generator writes every media type of every response of an operation into a produces condition on
+                the whole mapping, and adds a consumes condition. Neither is a rule this API ever had: with them, a
+                client sending Accept: application/json gets a 406 from an operation with no success body (and from
+                login, whose token is plain text), and a request with no body and no Content-Type gets a 415 instead of
+                the 400 it always was. The media types stay in the contract and in the swagger annotations; only the
+                runtime conditions are removed, from the generated sources, so a mapping is a method and a path again.
+                The second step fails the build if the generator ever spells them differently and this stops matching.
+                See docs/openapi.md.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>strip-generated-media-type-conditions</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <replaceregexp match=",\s*(produces|consumes) = \{[^}]*\}" replace="" flags="g">
+                                    <fileset dir="${project.build.directory}/generated-sources/openapi" includes="**/*Api.java"/>
+                                </replaceregexp>
+                                <fail message="A generated *Api interface still declares produces or consumes: the generator changed how it writes them, and the pattern in pom.xml (strip-generated-media-type-conditions) no longer matches.">
+                                    <condition>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${project.build.directory}/generated-sources/openapi" includes="**/*Api.java">
+                                                <or>
+                                                    <contains text="produces ="/>
+                                                    <contains text="consumes ="/>
+                                                </or>
+                                            </fileset>
+                                        </resourcecount>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
@@ -186,6 +329,8 @@
                     -->
                     <excludes>
                         <exclude>ilenreste/unpeu/recettesback/RecettesBackApplication.class</exclude>
+                        <!-- Generated from openapi.yaml, interfaces only; see docs/openapi.md. -->
+                        <exclude>ilenreste/unpeu/recettesback/api/**</exclude>
                     </excludes>
                 </configuration>
                 <executions>
@@ -214,6 +359,7 @@
                         <configuration>
                             <excludes>
                                 <exclude>ilenreste/unpeu/recettesback/RecettesBackApplication.class</exclude>
+                                <exclude>ilenreste/unpeu/recettesback/api/**</exclude>
                             </excludes>
                             <rules>
                                 <rule>

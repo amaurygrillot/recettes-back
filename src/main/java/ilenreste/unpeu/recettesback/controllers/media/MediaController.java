@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.controllers.media;
 
+import ilenreste.unpeu.recettesback.api.MediaApi;
 import ilenreste.unpeu.recettesback.models.media.MediaVariant;
 import ilenreste.unpeu.recettesback.models.media.responses.MediaResponse;
 import ilenreste.unpeu.recettesback.services.media.MediaService;
@@ -12,11 +13,6 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.multipart.MultipartFile;
@@ -24,10 +20,14 @@ import org.springframework.web.multipart.MultipartFile;
 import java.net.URI;
 import java.time.Duration;
 
+/**
+ * Uploaded pictures. The routes, parameters, status codes and security of both
+ * methods are declared in {@code openapi.yaml} and reach this class through the
+ * generated {@link MediaApi}; see {@code docs/openapi.md}.
+ */
 @Log4j2
-@RequestMapping("/media")
 @RestController
-public class MediaController {
+public class MediaController implements MediaApi {
 
     /** Not a constant on Spring's HttpHeaders, so it is spelled out here. */
     private static final String X_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
@@ -54,8 +54,8 @@ public class MediaController {
      * if the row cannot be inserted, so there is no state in which this returns
      * normally and the media is not fully stored.
      */
-    @PostMapping
-    public ResponseEntity<MediaResponse> upload(@RequestParam("file") MultipartFile file) {
+    @Override
+    public ResponseEntity<MediaResponse> uploadMedia(MultipartFile file) {
         MediaResponse created = mediaService.upload(file);
         log.info("Stored media {} ({}, {} bytes)", created.id(), created.contentType(), created.sizeBytes());
         return ResponseEntity.created(URI.create("/media/" + created.id())).body(created);
@@ -102,10 +102,8 @@ public class MediaController {
      * discover nothing changed. {@code checkNotModified} compares it against
      * {@code If-None-Match} and answers 304 with no body when they agree.
      */
-    @GetMapping("/{id}")
-    public ResponseEntity<Resource> download(@PathVariable String id,
-                                             @RequestParam(defaultValue = "full") String variant,
-                                             WebRequest webRequest) {
+    @Override
+    public ResponseEntity<Resource> downloadMedia(String id, String variant, WebRequest webRequest) {
         StoredMedia media = mediaService.load(id, MediaVariant.from(variant));
 
         // Sets the ETag header on the response as a side effect, whatever it returns.
