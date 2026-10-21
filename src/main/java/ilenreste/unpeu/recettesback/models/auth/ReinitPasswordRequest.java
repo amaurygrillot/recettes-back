@@ -6,7 +6,7 @@ import jakarta.validation.constraints.Size;
 public record ReinitPasswordRequest(
 
         @NotBlank
-        @Size(min = 3, max = 50)
+        @Size(min = 3, max = 254)
         String email
 ) {
 }

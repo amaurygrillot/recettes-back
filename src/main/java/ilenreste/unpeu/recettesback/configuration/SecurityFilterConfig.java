@@ -11,6 +11,7 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfigurationSource;
 
 /**
  * The single source of truth for who may reach what.
@@ -24,8 +25,14 @@ public class SecurityFilterConfig {
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http, JwtDecoder jwtDecoder,
-                                            ProblemDetailErrorResponder errorResponder) throws Exception {
+                                            ProblemDetailErrorResponder errorResponder,
+                                            CorsConfigurationSource corsConfigurationSource) throws Exception {
         http
+                // Registers CorsFilter ahead of every authentication filter: a preflight carries no
+                // token, so it has to be answered before anything asks who is calling - on a
+                // protected route as much as on a public one - and it never reaches
+                // JwtAuthenticationFilter. No OPTIONS rule is needed below. See docs/cors.md.
+                .cors(cors -> cors.configurationSource(corsConfigurationSource))
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 // Without an explicit entry point, Spring Security falls back to

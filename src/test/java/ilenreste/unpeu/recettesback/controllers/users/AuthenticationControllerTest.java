@@ -17,6 +17,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.util.List;
 
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.emailOfLength;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
@@ -139,6 +140,22 @@ class AuthenticationControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"jane@example.com\"}"))
                 .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void reinitPassword_acceptsAnEmailOfTheMaximumLength_andRefusesOneCharacterMore() throws Exception {
+        String maximum = emailOfLength("jane", 254);
+        mockMvc.perform(post("/auth/reinit-password")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"%s\"}".formatted(maximum)))
+                .andExpect(status().isAccepted());
+        verify(passwordResetService).requestReset(maximum);
+
+        mockMvc.perform(post("/auth/reinit-password")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"%s\"}".formatted(emailOfLength("jane", 255))))
+                .andExpect(status().isBadRequest());
+        verifyNoMoreInteractions(passwordResetService);
     }
 
     @Test

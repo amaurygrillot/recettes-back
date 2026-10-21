@@ -197,7 +197,7 @@ Each of those five holds one kind of thing, and `configuration` is the one that 
 this class declare a bean or wire something?** If not, it is not configuration:
 
 - `configuration` — `@Configuration` classes and nothing else: `SecurityFilterConfig`, `SecurityBeansConfig`,
-  `RsaKeyConfig`, `JwtIssuerConfig`, `JpaAuditingConfig`, `OpenApiConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
+  `RsaKeyConfig`, `JwtIssuerConfig`, `CorsConfig`, `JpaAuditingConfig`, `OpenApiConfig`, `TimeConfig`. The last one's only bean is the `Clock`:
   anything reasoning about a *window* of time (`UploadRateLimiter`) injects it, because a test that cannot move the
   clock can only assert a window by waiting it out.
 - `properties` — `@ConfigurationProperties` records. Bound data, no logic, no beans; picked up by the
@@ -263,6 +263,12 @@ The API is a stateless resource server that also issues its own JWTs (self-conta
    `docs/security-error-handling.md`. This is also why a plain `MockMvcBuilders.standaloneSetup(...)` controller test
    (no security filter chain) can't catch this class of bug — it needs a real `@SpringBootTest` hitting the actual
    embedded server.
+10. **CORS** is `http.cors(...)` in `SecurityFilterConfig`, fed by `CorsConfig` from `CorsProperties`
+   (`app.cors.allowed-origins`, set through `CORS_ALLOWED_ORIGINS`; an explicit list, a wildcard stops the startup).
+   `CorsFilter` runs ahead of every authentication filter, so a preflight is answered before anyone asks who is calling
+   and never reaches `JwtAuthenticationFilter` — which is why there is no `OPTIONS` rule above and none in
+   `openapi.yaml`. Adding a response header the front end must read (`Location`, `Retry-After`) to the API means adding
+   it to the exposed list in `CorsConfig` as well. See `docs/cors.md`.
 
 ### MCP server
 

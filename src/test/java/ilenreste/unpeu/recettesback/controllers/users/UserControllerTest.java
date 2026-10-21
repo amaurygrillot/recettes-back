@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.emailOfLength;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -119,6 +120,29 @@ class UserControllerTest {
                                 {"username":"jane","password":"Password123","email":"jane@example.com","firstname":"Jane","lastname":"Doe"}
                                 """))
                 .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void createUser_acceptsAnEmailOfTheMaximumLength_andRefusesOneCharacterMore() throws Exception {
+        when(userService.createUser(any())).thenReturn(storedUser("user-1"));
+
+        mockMvc.perform(post("/users/create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(createBody(emailOfLength("jane", 254))))
+                .andExpect(status().isCreated());
+        verify(userService).createUser(any());
+
+        mockMvc.perform(post("/users/create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(createBody(emailOfLength("jane", 255))))
+                .andExpect(status().isBadRequest());
+        verifyNoMoreInteractions(userService);
+    }
+
+    private static String createBody(String email) {
+        return """
+                {"username":"jane","password":"Password123","email":"%s"}
+                """.formatted(email);
     }
 
     @Test
@@ -236,6 +260,27 @@ class UserControllerTest {
                                 {"email":"jane@example.com","token":"wrong","newPassword":"NewPassword123"}
                                 """))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void reinitPassword_acceptsAnEmailOfTheMaximumLength_andRefusesOneCharacterMore() throws Exception {
+        mockMvc.perform(put("/users/reinit-password")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(resetBody(emailOfLength("jane", 254))))
+                .andExpect(status().isOk());
+        verify(passwordResetService).resetPassword(any());
+
+        mockMvc.perform(put("/users/reinit-password")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(resetBody(emailOfLength("jane", 255))))
+                .andExpect(status().isBadRequest());
+        verifyNoMoreInteractions(passwordResetService);
+    }
+
+    private static String resetBody(String email) {
+        return """
+                {"email":"%s","token":"abc123","newPassword":"NewPassword123"}
+                """.formatted(email);
     }
 
     @Test

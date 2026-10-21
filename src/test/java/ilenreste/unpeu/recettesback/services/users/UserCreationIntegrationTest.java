@@ -16,6 +16,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.UUID;
 
+import static ilenreste.unpeu.recettesback.support.HttpTestSupport.emailOfLength;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -69,5 +70,43 @@ class UserCreationIntegrationTest {
                 "select count(*) from user_roles ur join users u on u.id = ur.user_id where u.username = ?",
                 Integer.class, username);
         assertThat(links).isEqualTo(1);
+    }
+
+    /**
+     * The 254 characters the request now accepts have to fit the column, or a long address passes
+     * validation and fails at commit as a 500. {@code ddl-auto=update} never narrows or widens a
+     * column, so the width is read from the live schema rather than assumed from the entity.
+     */
+    @Test
+    void createUser_storesAnEmailOfTheMaximumLength() {
+        String email = emailOfLength(username, 254);
+
+        ResponseEntity<String> response = createWithEmail(email);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(usersRepository.findByUsername(username)).get()
+                .extracting(user -> user.getEmail()).isEqualTo(email);
+        Integer width = jdbcTemplate.queryForObject("""
+                select character_maximum_length from information_schema.columns
+                where table_name = 'users' and column_name = 'email'
+                """, Integer.class);
+        assertThat(width).isGreaterThanOrEqualTo(254);
+    }
+
+    @Test
+    void createUser_returns400_whenTheEmailIsOneCharacterOverTheMaximum() {
+        ResponseEntity<String> response = createWithEmail(emailOfLength(username, 255));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(usersRepository.existsByUsername(username)).isFalse();
+    }
+
+    private ResponseEntity<String> createWithEmail(String email) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        String body = """
+                {"username":"%s","password":"Password123","email":"%s"}
+                """.formatted(username, email);
+        return restTemplate.postForEntity("/users/create", new HttpEntity<>(body, headers), String.class);
     }
 }
