@@ -12,7 +12,7 @@ public record CreateUserRequest(
         @Size(min = 8, max = 50)
         String password,
         @NotBlank
-        @Size(min = 3, max = 50)
+        @Size(min = 3, max = 254)
         String email,
         String firstname,
         String lastname

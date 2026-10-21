@@ -58,4 +58,13 @@ public final class HttpTestSupport {
     public static String unique(String prefix) {
         return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
+
+    /**
+     * An address of exactly {@code length} characters, starting with {@code localPrefix}, for the
+     * boundary cases of the email length limit (254 accepted, 255 refused).
+     */
+    public static String emailOfLength(String localPrefix, int length) {
+        String domain = "@example.com";
+        return localPrefix + "x".repeat(length - domain.length() - localPrefix.length()) + domain;
+    }
 }

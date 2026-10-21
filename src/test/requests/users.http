@@ -99,6 +99,51 @@ Content-Type: application/json
     });
 %}
 
+### 4b. Register with an email of exactly 254 characters -> 201 Created
+### 254 is the RFC 5321 limit, the same ceiling PUT /users/update, POST /auth/reinit-password and
+### PUT /users/reinit-password enforce. The address is built by the pre-request script (IntelliJ HTTP
+### Client syntax; the VS Code REST Client has no scripting - paste a 254-character address instead).
+### Random on each run because both the username and the email are unique.
+< {%
+    const suffix = Math.random().toString(36).slice(2, 10);
+    const domain = "@example.com";
+    request.variables.set("longUsername", "long-" + suffix);
+    request.variables.set("email254", suffix + "a".repeat(254 - domain.length - suffix.length) + domain);
+    request.variables.set("email255", suffix + "a".repeat(255 - domain.length - suffix.length) + domain);
+%}
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "{{longUsername}}",
+  "password": "{{password}}",
+  "email": "{{email254}}"
+}
+
+> {%
+    client.test("Returns 201 for a 254-character email", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.email.length === 254, "Expected the whole address to be stored");
+    });
+%}
+
+### 4c. Register with an email of 255 characters -> 400 Bad Request
+### One over the limit. Run right after 4b: it reuses the variables 4b's pre-request script set.
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "{{longUsername}}-2",
+  "password": "{{password}}",
+  "email": "{{email255}}"
+}
+
+> {%
+    client.test("Returns 400 for a 255-character email", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
 ### 5. Log in -> 200 OK, the body IS the raw JWT (no JSON wrapper)
 POST {{baseUrl}}/auth/login
 Content-Type: application/json

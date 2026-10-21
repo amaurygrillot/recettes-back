@@ -1269,7 +1269,7 @@ components:
         email:
           type: string
           minLength: 3
-          maxLength: 50
+          maxLength: 254
 
     # ------------------------------------------------------------------------------------------------- users
     CreateUserRequest:
@@ -1287,7 +1287,7 @@ components:
         email:
           type: string
           minLength: 3
-          maxLength: 50
+          maxLength: 254
         firstname:
           type: string
         lastname:
@@ -1321,7 +1321,7 @@ components:
         email:
           type: string
           minLength: 3
-          maxLength: 50
+          maxLength: 254
         token:
           type: string
           minLength: 1

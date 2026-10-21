@@ -65,9 +65,25 @@ server errors behind this endpoint's deliberately uninformative response. See
 | Property                                  | Meaning                                                                       | Default                                |
 |-------------------------------------------|-------------------------------------------------------------------------------|----------------------------------------|
 | `app.password-reset.token-expiry-minutes` | How long a token stays valid                                                  | `15`                                   |
-| `app.password-reset.frontend-reset-url`   | Frontend page the emailed link points to (`?token=...&email=...` is appended) | `http://localhost:3000/reset-password` |
+| `app.password-reset.frontend-reset-url`   | Frontend page the emailed link points to (`?token=...&email=...` is appended) | `http://localhost:5173/reset-password` |
 | `app.mail.from`                           | `From:` address on the reset email                                            | `no-reply@recettes.local`              |
 | `spring.mail.*`                           | Standard Spring Boot SMTP settings                                            | placeholder, needs real credentials    |
+
+The default is the Vite dev server, where the front end runs during development (not the API itself: the link must open
+the page that calls `PUT /users/reinit-password`). Override it with `FRONTEND_RESET_URL` in the environment or the local
+`.env` (see [.env.example](../.env.example)); the link keeps its `<url>?token=...&email=...` shape whatever the base is.
+The front end's origin also has to be allowed by CORS — see [cors.md](cors.md).
+
+## Email length
+
+An email is limited to **254 characters** on every route that takes one — `POST /users/create`,
+`PUT /users/update`, `POST /auth/reinit-password` and `PUT /users/reinit-password` — which is the RFC 5321 limit and
+fits the `users.email` column (`varchar(255)`, the Hibernate default for a `String`, so no schema change was needed).
+The limits used to disagree (50 on registration and reset, 254 on the account form), which let someone change their
+address to one they could not have registered with. `POST /auth/reinit-password` is aligned too: widening registration
+alone would have let a long address register and then never be able to ask for a reset. `UserCreationIntegrationTest`
+stores a 254-character address and reads the live column width, since `ddl-auto=update` would never have widened a
+narrower one (a change like that needs a script in `docs/sql/`).
 
 ## Prerequisite: unique emails
 
