@@ -42,7 +42,7 @@ public class ReferenceMapper {
     }
 
     public UnitResponse toResponse(UnitEntity unit) {
-        return new UnitResponse(unit.getId(), unit.getName(), unit.getAbbreviation());
+        return new UnitResponse(unit.getId(), unit.getName(), unit.getAbbreviation(), unit.isHidden());
     }
 
     /**

@@ -76,6 +76,26 @@ Content-Type: application/json
     });
 %}
 
+### 4b. Create a hidden unit -> 201 Created, "hidden": true
+### A hidden unit is chosen on a recipe line but never rendered: "3 oeufs", not "3 pièces d'oeufs".
+### Omitting "hidden" (as in step 4) answers "hidden": false.
+POST {{baseUrl}}/units
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "lot",
+  "hidden": true
+}
+
+> {%
+    client.test("Returns 201 with hidden true", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.hidden === true, "Expected hidden to round-trip");
+        client.global.set("lotId", response.body.id);
+    });
+%}
+
 ### 5. Create a duplicate of a seeded unit -> 409 Conflict
 POST {{baseUrl}}/units
 Authorization: Bearer {{adminToken}}
@@ -134,6 +154,16 @@ Authorization: Bearer {{adminToken}}
 
 ###
 DELETE {{baseUrl}}/units/{{sachetId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 8b. Delete the hidden unit from step 4b -> 204 No Content
+DELETE {{baseUrl}}/units/{{lotId}}
 Authorization: Bearer {{adminToken}}
 
 > {%
