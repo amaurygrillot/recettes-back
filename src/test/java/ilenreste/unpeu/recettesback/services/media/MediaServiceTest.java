@@ -230,6 +230,21 @@ class MediaServiceTest {
     }
 
     @Test
+    void doesNotRateLimitAnAdmin() {
+        // Same one-upload allowance as the test above; the second upload goes through because the
+        // caller is an admin, not because the limiter was lenient.
+        MediaProperties oneUpload = properties(4, Duration.ofSeconds(5), 1);
+        MediaService limited = mediaService(oneUpload, new ImageReencoder(oneUpload));
+        when(currentUserService.isAdmin()).thenReturn(true);
+        when(mediaRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        limited.upload(upload(TestImages.jpeg(120, 120)));
+        limited.upload(upload(TestImages.jpeg(120, 120)));
+
+        verify(mediaRepository, org.mockito.Mockito.times(2)).save(any());
+    }
+
+    @Test
     void refusesAnUploadWithNoSignedInCaller() {
         // SecurityFilterConfig already requires authentication here, so this is the second lock on
         // the same door: there is no identity to count the upload against, and an unlimited
