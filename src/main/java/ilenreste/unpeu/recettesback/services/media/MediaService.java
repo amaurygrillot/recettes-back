@@ -37,7 +37,7 @@ import java.util.stream.Collectors;
  *   <li><strong>Size</strong> — enforced by the servlet container before a byte
  *       reaches this class ({@code spring.servlet.multipart.max-file-size}).</li>
  *   <li><strong>Rate</strong> — how many uploads this account has already made in
- *       the last few minutes, in {@link UploadRateLimiter}. The only gate that
+ *       the last few minutes, in {@link UploadRateLimiter}; admins are exempt. The only gate that
  *       looks at anything beyond the one file in hand, and therefore the only one
  *       that can see a thousand perfectly valid uploads filling a disk.</li>
  *   <li><strong>Format</strong> — by magic bytes only. The declared
@@ -98,7 +98,7 @@ public class MediaService {
     public MediaResponse upload(MultipartFile file) {
         // First, and before the bytes are read into the heap: a refusal here must be the cheapest
         // thing this method can do, or the limit protecting the disk becomes a way to spend memory.
-        rateLimiter.requirePermit(uploaderId());
+        enforceRateLimit();
 
         byte[] content = readFully(file);
         ImageFormat format = ImageFormat.detect(content)
@@ -224,6 +224,23 @@ public class MediaService {
         media.setSizeBytes(reencoded.full().length);
         media.setChecksumSha256(sha256(reencoded.full()));
         return media;
+    }
+
+    /**
+     * Counts the upload against the caller's allowance - unless the caller is an admin, who has none.
+     * <p>
+     * The limit exists to stop an ordinary account filling the disk. An admin can already do far worse than
+     * upload fast, and is the one who seeds or migrates a library of images in bulk, which is exactly the
+     * traffic a per-account cap would refuse. The identity is still resolved first, so an anonymous caller
+     * gets the same 403 as before whatever the role check would have said.
+     */
+    private void enforceRateLimit() {
+        String uploaderId = uploaderId();
+        if (currentUserService.isAdmin()) {
+            log.debug("Upload from admin {} is not rate limited", uploaderId);
+            return;
+        }
+        rateLimiter.requirePermit(uploaderId);
     }
 
     /**

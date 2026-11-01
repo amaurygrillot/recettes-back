@@ -247,6 +247,8 @@ Content-Type: image/jpeg
 ### had their share. The limit exists because every other gate in the pipeline looks at one file,
 ### and one account posting a thousand valid files in a row fills a disk that Postgres writes to.
 ### The allowance is per account and rolls continuously, so it does not reset on a clock boundary.
+### Admins have no allowance: with an admin token this block never answers 429 however often it is
+### re-run, so use a plain USER token for this scenario.
 ### Counters live in this instance's heap: restarting the app forgives everyone. UploadRateLimiter
 ### and UploadRateLimiterTest are the real coverage; this block is here to read the response.
 POST {{baseUrl}}/media

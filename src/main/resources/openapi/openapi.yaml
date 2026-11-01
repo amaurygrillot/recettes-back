@@ -1024,6 +1024,10 @@ paths:
         JPEG or PNG only, judged by the file's magic bytes and never by its name or declared type. The image is
         re-encoded, so what is stored is not what was sent. Upload first and independently, then reference the returned
         id when creating or updating a recipe. Requires the `USER` role.
+
+
+        Rate limited per account (`app.media.upload-limit` uploads per `app.media.upload-limit-window`, answering 429
+        with `Retry-After` beyond it). Admins are not limited.
       security:
         - bearerAuth: []
       x-required-role: USER

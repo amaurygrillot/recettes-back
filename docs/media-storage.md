@@ -233,6 +233,13 @@ sentence are deliberate:
   so retrying cannot push a caller's own window further out.
 - **First in the pipeline.** A refusal must be the cheapest thing the request can do, or a limit that protects the disk
   becomes a way to spend CPU and heap.
+- **Admins are exempt.** The limit is there to stop an ordinary account filling the disk; an admin can already do far
+  worse than upload quickly, and is the one who loads a library of images in bulk (seeding photos for development, a
+  migration), which is exactly the traffic the cap refuses. `MediaService` makes the call (`CurrentUserService.isAdmin()`)
+  rather than `UploadRateLimiter`, which keeps knowing only about a user id and a window. The identity is still
+  resolved first, so an anonymous caller is still a `403`. An admin's uploads are not counted at all, so demoting an
+  account starts it from an empty window. The total-bytes quota listed under the deferred gaps, if it is ever built,
+  should decide separately whether admins are exempt from it: a rate cap and a disk quota guard different things.
 
 It is **in memory**, like the RSA key pair in `RsaKeyConfig`: a restart forgives everyone, and a second instance would
 double the effective limit. Both are accepted on a single-instance deployment, and the fix for both is the same shared

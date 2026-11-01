@@ -27,7 +27,7 @@ In particular, avoid collapsing every error into 400/500 — pick the code that 
 - `403 Forbidden` — authenticated but not allowed to perform the action (e.g. a disabled account, wrong role).
 - `400 Bad Request` — reserved for malformed/invalid input (validation failures).
 - `429 Too Many Requests` — the request is fine but *this caller* has made too many of them (`POST /media` is rate
-  limited per account). Distinct from `503`, which says the *server* is momentarily at capacity; both carry
+  limited per account, admins excepted). Distinct from `503`, which says the *server* is momentarily at capacity; both carry
   `Retry-After`.
 - `500 Internal Server Error` — reserved for unexpected/unhandled failures, not for expected business-rule rejections.
 
