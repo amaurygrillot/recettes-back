@@ -255,8 +255,12 @@ You chose a numeric amount plus a `units` reference table:
 - `quantity` — `NUMERIC(10,3)`, **nullable**. Null covers "sel, poivre" and "de l'huile", where no amount is
   meaningful. `BigDecimal` in Java, never `double` — floating-point rounding artifacts have no place in a quantity a
   human typed. Three decimals is enough for 0.5 tsp or 0.25 L without inviting nonsense precision.
-- `unit_id` — FK to `units`, **nullable**. Null means a bare count ("3 œufs"). A `PIECE` unit row was considered and
-  rejected: it forces every recipe to pick a unit and puts "3 pièces œufs" in front of the renderer.
+- `unit_id` — FK to `units`, **nullable**. Null means a bare count ("3 œufs").
+  - A **`pièce` unit** exists as well (seeded, `hidden = true`), for a client that wants an explicit choice rather than
+    null. `units.hidden` is exposed as `hidden` in `UnitResponse`; when true the renderer leaves the unit out, so a
+    line reads "3 œufs" and not "3 pièces d'œufs". It was first rejected as a plain unit because it put "3 pièces œufs"
+    in front of the renderer; the flag is what removes that cost. The flag is data, not a hard-coded name in the front end.
+  - Existing databases that still hold the old "unité" row run [rename-unite-to-piece.sql](sql/rename-unite-to-piece.sql).
 - `note` — nullable varchar, for the qualifier belonging to *this line* rather than to the ingredient itself:
   "finement haché", "à température ambiante". Without it, people encode that into the ingredient name and the shared
   ingredients table fills up with rows like `oignon finement haché`.

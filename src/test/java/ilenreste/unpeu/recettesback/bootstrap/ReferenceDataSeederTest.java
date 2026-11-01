@@ -62,13 +62,16 @@ class ReferenceDataSeederTest {
                 .containsExactly("USER", "ADMIN");
 
         ArgumentCaptor<UnitEntity> units = ArgumentCaptor.forClass(UnitEntity.class);
-        verify(unitsRepository, times(7)).save(units.capture());
+        verify(unitsRepository, times(8)).save(units.capture());
         assertThat(units.getAllValues()).extracting(UnitEntity::getName)
                 .contains("gramme", "cuillère à soupe", "pincée");
         // Normalized through the same component the services use, so a later "create gramme"
         // request collides with this row instead of adding a duplicate.
         assertThat(units.getAllValues()).extracting(UnitEntity::getNormalizedName)
                 .contains("cuillere a soupe", "pincee");
+        // "pièce" is picked, never rendered: "3 oeufs". Every other starter unit is shown.
+        assertThat(units.getAllValues()).filteredOn(UnitEntity::isHidden)
+                .extracting(UnitEntity::getName).containsExactly("pièce");
     }
 
     @Test

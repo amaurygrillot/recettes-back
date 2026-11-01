@@ -425,12 +425,34 @@ class ReferenceEndpointsIntegrationTest {
     }
 
     @Test
+    void aHiddenUnitRoundTripsAndDefaultsToVisible() {
+        String hiddenName = unique("piece");
+        String visibleName = unique("barquette");
+        ResponseEntity<String> hidden = restTemplate.postForEntity("/units",
+                body("{\"name\":\"%s\",\"hidden\":true}".formatted(hiddenName), adminToken), String.class);
+        ResponseEntity<String> visible = restTemplate.postForEntity("/units",
+                body("{\"name\":\"%s\"}".formatted(visibleName), adminToken), String.class);
+
+        try {
+            assertThat(hidden.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            assertThat(hidden.getBody()).contains("\"hidden\":true");
+            assertThat(visible.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            assertThat(visible.getBody()).contains("\"hidden\":false");
+        } finally {
+            for (ResponseEntity<String> unit : List.of(hidden, visible)) {
+                restTemplate.exchange("/units/" + idOf(unit.getBody()), HttpMethod.DELETE,
+                        body(null, adminToken), String.class);
+            }
+        }
+    }
+
+    @Test
     void unitsAreSeededSoARecipeCanBeWrittenOnDayOne() {
         // The seeder runs at startup; without it POST /recipes is unusable until someone inserts
         // rows by hand, which is the trap this project already had for the USER role.
         ResponseEntity<String> response = restTemplate.getForEntity("/units", String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody()).contains("gramme").contains("pincée");
+        assertThat(response.getBody()).contains("gramme").contains("pincée").contains("pièce");
     }
 }

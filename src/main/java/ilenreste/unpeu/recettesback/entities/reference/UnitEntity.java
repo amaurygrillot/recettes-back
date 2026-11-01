@@ -21,4 +21,12 @@ public class UnitEntity extends ReferenceEntity {
     /** Short form for rendering a line, e.g. "g" for "gramme". */
     @Column
     private String abbreviation;
+
+    /**
+     * Whether a recipe line leaves the unit out: "3 oeufs", not "3 pièces d'oeufs".
+     * The column default is what lets {@code ddl-auto=update} add it to a table
+     * that already has rows.
+     */
+    @Column(nullable = false, columnDefinition = "boolean not null default false")
+    private boolean hidden;
 }

@@ -55,13 +55,16 @@ public class UnitService extends AbstractReferenceService<UnitEntity, UnitRespon
 
     @Transactional
     public UnitResponse createUnit(UnitRequest request) {
-        return mapper.toResponse(
-                create(request.name(), unit -> unit.setAbbreviation(request.abbreviation())));
+        return mapper.toResponse(create(request.name(), unit -> apply(request, unit)));
     }
 
     @Transactional
     public UnitResponse updateUnit(String id, UnitRequest request) {
-        return mapper.toResponse(
-                update(id, request.name(), unit -> unit.setAbbreviation(request.abbreviation())));
+        return mapper.toResponse(update(id, request.name(), unit -> apply(request, unit)));
+    }
+
+    private void apply(UnitRequest request, UnitEntity unit) {
+        unit.setAbbreviation(request.abbreviation());
+        unit.setHidden(Boolean.TRUE.equals(request.hidden()));
     }
 }

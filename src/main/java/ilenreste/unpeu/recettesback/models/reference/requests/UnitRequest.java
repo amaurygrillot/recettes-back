@@ -11,6 +11,8 @@ import jakarta.validation.constraints.Size;
  * @param abbreviation the short form a recipe line renders with, e.g. "c. a s.".
  *                     Optional: not every unit has a sensible abbreviation
  *                     ("pincee" is already short)
+ * @param hidden       true when a recipe line must not render this unit ("piece": "3 oeufs").
+ *                     Optional, false when omitted
  */
 public record UnitRequest(
 
@@ -20,6 +22,9 @@ public record UnitRequest(
 
         @JsonProperty(required = false)
         @Size(max = 20)
-        String abbreviation
+        String abbreviation,
+
+        @JsonProperty(required = false)
+        Boolean hidden
 ) {
 }

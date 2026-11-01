@@ -63,15 +63,20 @@ public class ReferenceDataSeeder implements ApplicationRunner {
      * Enough to write a French recipe on day one. Name as displayed, plus the
      * abbreviation the renderer uses.
      */
-    private static final Map<String, String> STARTER_UNITS = new java.util.LinkedHashMap<>(Map.of(
-            "gramme", "g",
-            "kilogramme", "kg",
-            "millilitre", "ml",
-            "litre", "l",
-            "cuillère à soupe", "c. à s.",
-            "cuillère à café", "c. à c.",
-            "pincée", "pincée"
-    ));
+    private static final List<StarterUnit> STARTER_UNITS = List.of(
+            new StarterUnit("gramme", "g", false),
+            new StarterUnit("kilogramme", "kg", false),
+            new StarterUnit("millilitre", "ml", false),
+            new StarterUnit("litre", "l", false),
+            new StarterUnit("cuillère à soupe", "c. à s.", false),
+            new StarterUnit("cuillère à café", "c. à c.", false),
+            new StarterUnit("pincée", "pincée", false),
+            // "3 oeufs", not "3 pièces d'oeufs": the unit exists to be picked, never to be rendered
+            new StarterUnit("pièce", null, true)
+    );
+
+    private record StarterUnit(String name, String abbreviation, boolean hidden) {
+    }
 
     private static final List<String> ROLES = List.of("USER", "ADMIN");
 
@@ -114,15 +119,16 @@ public class ReferenceDataSeeder implements ApplicationRunner {
     }
 
     private void seedUnits() {
-        STARTER_UNITS.forEach((name, abbreviation) -> {
-            String normalized = normalizer.normalize(name);
+        STARTER_UNITS.forEach(starter -> {
+            String normalized = normalizer.normalize(starter.name());
             if (!unitsRepository.existsByNormalizedName(normalized)) {
                 UnitEntity unit = new UnitEntity();
-                unit.setName(name);
+                unit.setName(starter.name());
                 unit.setNormalizedName(normalized);
-                unit.setAbbreviation(abbreviation);
+                unit.setAbbreviation(starter.abbreviation());
+                unit.setHidden(starter.hidden());
                 unitsRepository.save(unit);
-                log.info("Seeded missing unit {}", name);
+                log.info("Seeded missing unit {}", starter.name());
             }
         });
     }
