@@ -47,8 +47,8 @@ public class RecipeMcpTools {
     @McpTool(name = "search_recipes",
             description = "Search the recipe library. Every criterion is optional and they combine with AND; "
                     + "with none it returns the newest recipes. Category filters include subcategories "
-                    + "unless includeSubcategories is false. ingredientIds keeps the recipes that use all of those "
-                    + "ingredients.",
+                    + "unless includeSubcategories is false. tagIds keeps the recipes that carry all of those tags, "
+                    + "ingredientIds the recipes that use all of those ingredients.",
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, openWorldHint = false))
     public List<RecipeSummaryResponse> searchRecipes(
             @McpToolParam(description = "Criteria; omit every field to list the newest recipes", required = false)

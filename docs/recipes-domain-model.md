@@ -711,7 +711,7 @@ have one place to be named, documented and validated. The wire format is unchang
 | `categoryId`   | that category, **and everything beneath it** unless told otherwise  |
 | `categoryName` | substring of a category's *normalized* name — `entrees` finds `Entrées`; widened the same way |
 | `includeSubcategories` | `true` (default) or `false` for exact membership            |
-| `tagId`        | exactly that tag                                                    |
+| `tagIds`       | recipes that carry **every** one of these tags (repeat the parameter, at most 20) |
 | `tagName`      | substring of a tag's *normalized* name                              |
 | `ingredientIds`| recipes that use **every** one of these ingredients (repeat the parameter, at most 20) |
 | `sortBy`       | `CREATED_AT` (default), `UPDATED_AT` or `TITLE`                     |
@@ -725,6 +725,11 @@ ingredients a recipe uses, in any of its groups, and keeps it when that equals t
 correct `COUNT`), and an id that matches no ingredient can never be counted, so it matches no recipe rather than the
 whole library. Only ids exist, no `ingredientName`: the ingredients are chosen from `GET /ingredients?namePrefix=…`, and
 there is no free-text ingredient search to serve. "Any of these" (OR) would be a different parameter if a screen asked.
+
+**`tagIds` is an AND too**, counted the same way (`tagIds` plus `tagCount`, over `r.tags`), because the search screen
+lets a member pick as many tags as they like and each one narrows the list further: « Végétarien » and « Rapide » mean
+the recipes that are both. It used to be a single `tagId`; the parameter was replaced rather than kept beside the new
+one, since the only clients (the front end and the MCP tool) move with the back end.
 
 **Every criterion is optional, including all of them at once.** An unfiltered `GET /recipes` is the home page and
 returns the newest recipes, paginated. Requiring at least one filter would leave the application with no way to browse.

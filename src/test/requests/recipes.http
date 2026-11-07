@@ -2,7 +2,7 @@
 ### Covers: GET /recipes, GET /recipes/{id}, POST /recipes, PUT /recipes/{id}, DELETE /recipes/{id}
 ###
 ### GET /recipes takes its criteria as a request object bound from the query string: title,
-### authorId, authorName, categoryId, categoryName, includeSubcategories, tagId, tagName, ingredientIds,
+### authorId, authorName, categoryId, categoryName, includeSubcategories, tagIds, tagName, ingredientIds,
 ### sortBy, direction - plus the
 ### usual page and size. Every one is optional, including all of them at once.
 ###

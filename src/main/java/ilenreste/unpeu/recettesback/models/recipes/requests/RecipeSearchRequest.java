@@ -77,8 +77,14 @@ import java.util.stream.Collectors;
  *                             <em>beneath</em> the category as well, at any depth.
  *                             <strong>Defaults to true</strong> when the parameter
  *                             is absent — see below
- * @param tagId                exactly this tag. Tags are flat, so nothing here
- *                             widens them
+ * @param tagIds               <strong>every</strong> one of these tags must be carried
+ *                             by the recipe ("recipes with all these tags"). Tags are
+ *                             flat, so nothing here widens them. Repeat the parameter
+ *                             ({@code ?tagIds=a&tagIds=b}); blank values and duplicates
+ *                             are dropped, and an empty set is no filter. An id that
+ *                             matches no tag matches no recipe, which is the honest
+ *                             answer rather than the whole library. At most twenty,
+ *                             so the counting query stays small
  * @param tagName              matched against the tag's normalized name, same
  *                             rules as {@code categoryName}
  * @param ingredientIds        <strong>every</strong> one of these ingredients must be
@@ -119,8 +125,9 @@ public record RecipeSearchRequest(
         @JsonProperty(required = false)
         Boolean includeSubcategories,
 
+        @Size(max = 20)
         @JsonProperty(required = false)
-        String tagId,
+        Set<String> tagIds,
 
         @Size(max = 100)
         @JsonProperty(required = false)
@@ -180,24 +187,32 @@ public record RecipeSearchRequest(
         return absentIfBlank(categoryName);
     }
 
-    public String tagId() {
-        return absentIfBlank(tagId);
-    }
-
     public String tagName() {
         return absentIfBlank(tagName);
     }
 
     /**
-     * The ingredients a recipe must all use: never null, trimmed, without blank values. A {@link Set}, so
-     * {@code size()} is the number of <em>distinct</em> ingredients the query has to find: {@code " a"} and
-     * {@code "a"} are one, or the count would be one too many and nothing could ever match.
+     * The tags a recipe must all carry: never null, trimmed, without blank values. See
+     * {@link #distinctNonBlank(Set)} for why the size of this set is the number the query counts against.
      */
+    public Set<String> tagIds() {
+        return distinctNonBlank(tagIds);
+    }
+
+    /** The ingredients a recipe must all use: never null, trimmed, without blank values, like {@link #tagIds()}. */
     public Set<String> ingredientIds() {
-        if (ingredientIds == null) {
+        return distinctNonBlank(ingredientIds);
+    }
+
+    /**
+     * A {@link Set}, so {@code size()} is the number of <em>distinct</em> ids the query has to find:
+     * {@code " a"} and {@code "a"} are one, or the count would be one too many and nothing could ever match.
+     */
+    private static Set<String> distinctNonBlank(Set<String> ids) {
+        if (ids == null) {
             return Set.of();
         }
-        return ingredientIds.stream()
+        return ids.stream()
                 .filter(StringUtils::hasText)
                 .map(String::trim)
                 .collect(Collectors.toUnmodifiableSet());

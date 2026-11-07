@@ -68,7 +68,11 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
      * @param categoryIds      the ids it resolved to. Ignored unless
      *                         {@code filterByCategory}; may be empty, which then
      *                         matches nothing
-     * @param tagId            exact tag id, or null
+     * @param tagIds           the tags a recipe must <em>all</em> carry. Ignored when
+     *                         {@code tagCount} is 0
+     * @param tagCount         how many distinct ids {@code tagIds} holds, 0 for no tag filter. Counted
+     *                         against exactly as {@code ingredientCount} is, and for the same reason: an
+     *                         AND, still in one row per recipe, and an unknown id matches nothing
      * @param tagName          substring of a tag's <em>normalized</em> name, or null
      * @param ingredientIds    the ingredients a recipe must <em>all</em> use. Ignored when
      *                         {@code ingredientCount} is 0
@@ -83,7 +87,8 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
             WHERE (:authorId IS NULL OR r.author.id = :authorId)
               AND (:filterByCategory = FALSE
                    OR EXISTS (SELECT 1 FROM r.categories c WHERE c.id IN :categoryIds))
-              AND (:tagId IS NULL OR EXISTS (SELECT 1 FROM r.tags t WHERE t.id = :tagId))
+              AND (:tagCount = 0
+                   OR (SELECT COUNT(DISTINCT t.id) FROM r.tags t WHERE t.id IN :tagIds) = :tagCount)
               AND (CAST(:title AS string) IS NULL
                    OR LOWER(r.title) LIKE LOWER(CONCAT('%', CAST(:title AS string), '%')))
               AND (CAST(:authorName AS string) IS NULL
@@ -101,7 +106,8 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
                            @Param("authorName") String authorName,
                            @Param("filterByCategory") boolean filterByCategory,
                            @Param("categoryIds") Collection<String> categoryIds,
-                           @Param("tagId") String tagId,
+                           @Param("tagIds") Collection<String> tagIds,
+                           @Param("tagCount") long tagCount,
                            @Param("tagName") String tagName,
                            @Param("ingredientIds") Collection<String> ingredientIds,
                            @Param("ingredientCount") long ingredientCount,

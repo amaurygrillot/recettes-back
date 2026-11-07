@@ -108,6 +108,12 @@ class RecipeServiceTest {
         return new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null, null);
     }
 
+    /** The search query finds nothing, so what a test asserts on is what the service asked it. */
+    private void givenNoRecipeMatches(Pageable pageable) {
+        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
+                anyLong(), any())).thenReturn(Page.empty(pageable));
+    }
+
     /**
      * The single easiest thing to get wrong in this design. findAllForSummary uses IN, which does
      * not preserve order, so its rows come back in whatever order PostgreSQL likes. Mapping them
@@ -119,8 +125,8 @@ class RecipeServiceTest {
     void reordersLoadedRecipesToMatchThePageOfIds() {
         Pageable pageable = PageRequest.of(0, 20);
         List<String> pageOfIds = List.of("r-1", "r-2", "r-3");
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(new PageImpl<>(pageOfIds, pageable, 3));
+        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
+                anyLong(), any())).thenReturn(new PageImpl<>(pageOfIds, pageable, 3));
         // Deliberately shuffled, the way a database is free to return them.
         when(recipesRepository.findAllForSummary(pageOfIds)).thenReturn(List.of(
                 recipe("r-3", "u-1", "Third"),
@@ -139,8 +145,7 @@ class RecipeServiceTest {
         // A form that submits its untouched fields sends ?title=, and that must not silently
         // become a filter matching nothing.
         Pageable pageable = PageRequest.of(0, 20);
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(
                 new RecipeSearchRequest("  ", "", null, "   ", "", null, null, "  ", null, null, null), pageable);
@@ -148,7 +153,7 @@ class RecipeServiceTest {
         // Blank category criteria are no category filter at all: the flag is off, and the taxonomy
         // is not even consulted.
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
-                eq(null), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
         verifyNoInteractions(categoryService);
     }
 
@@ -157,15 +162,14 @@ class RecipeServiceTest {
         // The column being matched is normalized_name, so the term has to be normalized the same way
         // or typing "vegetarien" would never find "V\u00e9g\u00e9tarien".
         Pageable pageable = PageRequest.of(0, 20);
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, null, null, null, null, "  V\u00c9G\u00c9TARIEN ", null, null, null),
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
-                eq(null), eq("vegetarien"), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq("vegetarien"), eq(Set.of()), eq(0L), any(Pageable.class));
     }
 
     /**
@@ -176,8 +180,7 @@ class RecipeServiceTest {
     @Test
     void passesTheDistinctIngredientIdsAndTheirCount_soTheQueryCanRequireAllOfThem() {
         Pageable pageable = PageRequest.of(0, 20);
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
-                anyLong(), any())).thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, null, null, null, null, null,
@@ -185,7 +188,23 @@ class RecipeServiceTest {
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
-                eq(null), eq(null), eq(Set.of("farine", "pommes")), eq(2L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of("farine", "pommes")), eq(2L), any(Pageable.class));
+    }
+
+    /** Same reasoning as for the ingredients: the tag filter is an AND, counted against the distinct ids. */
+    @Test
+    void passesTheDistinctTagIdsAndTheirCount_soTheQueryCanRequireAllOfThem() {
+        Pageable pageable = PageRequest.of(0, 20);
+        givenNoRecipeMatches(pageable);
+
+        recipeService.search(
+                new RecipeSearchRequest(null, null, null, null, null, null,
+                        new LinkedHashSet<>(Arrays.asList("rapide", "  ", "vegetarien", "", " rapide ")), null, null,
+                        null, null),
+                pageable);
+
+        verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
+                eq(Set.of("rapide", "vegetarien")), eq(2L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
     }
 
     /**
@@ -198,29 +217,28 @@ class RecipeServiceTest {
         Pageable pageable = PageRequest.of(0, 20);
         when(categoryService.findMatchingIds("desserts", null, true))
                 .thenReturn(Set.of("desserts", "tartes", "tartes-aux-pommes"));
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, "desserts", null, null, null, null, null, null, null), pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(true),
-                eq(Set.of("desserts", "tartes", "tartes-aux-pommes")), eq(null), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of("desserts", "tartes", "tartes-aux-pommes")), eq(Set.of()), eq(0L), eq(null),
+                eq(Set.of()), eq(0L), any(Pageable.class));
     }
 
     @Test
     void asksForExactMembershipWhenSubcategoriesAreExcluded() {
         Pageable pageable = PageRequest.of(0, 20);
         when(categoryService.findMatchingIds("desserts", null, false)).thenReturn(Set.of("desserts"));
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, "desserts", null, false, null, null, null, null, null), pageable);
 
         verify(categoryService).findMatchingIds("desserts", null, false);
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(true), eq(Set.of("desserts")),
-                eq(null), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
     }
 
     /**
@@ -232,15 +250,14 @@ class RecipeServiceTest {
     void keepsTheCategoryFilterOnWhenTheNameMatchedNothing() {
         Pageable pageable = PageRequest.of(0, 20);
         when(categoryService.findMatchingIds(null, "inexistante", true)).thenReturn(Set.of());
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, null, "inexistante", null, null, null, null, null, null),
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(true), eq(Set.of()),
-                eq(null), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
     }
 
     @Test
@@ -249,14 +266,13 @@ class RecipeServiceTest {
         // property a Pageable names straight into it - so ?sort=bogus would be a 500 and
         // ?sort=author.password would order by a column no response exposes.
         Pageable pageable = PageRequest.of(2, 5, Sort.by("somethingElse"));
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(new RecipeSearchRequest(null, null, null, null, null, null, null, null, null,
                 RecipeSortField.TITLE, Sort.Direction.ASC), pageable);
 
         ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
-        verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+        verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
                 anyLong(), used.capture());
         assertThat(used.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.ASC, "title"));
         // Page number and size still come from the Pageable; only the ordering is taken over.
@@ -267,13 +283,12 @@ class RecipeServiceTest {
     @Test
     void defaultsToNewestFirstWhenNoOrderingIsAskedFor() {
         Pageable pageable = PageRequest.of(0, 20);
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         recipeService.search(noFilters(), pageable);
 
         ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
-        verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+        verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
                 anyLong(), used.capture());
         assertThat(used.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.DESC, "createdAt"));
     }
@@ -281,8 +296,7 @@ class RecipeServiceTest {
     @Test
     void skipsTheSecondQueryEntirelyWhenThePageIsEmpty() {
         Pageable pageable = PageRequest.of(0, 20);
-        when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), any(), any(), anyLong(), any()))
-                .thenReturn(Page.empty(pageable));
+        givenNoRecipeMatches(pageable);
 
         assertThat(recipeService.search(noFilters(), pageable)).isEmpty();
 
