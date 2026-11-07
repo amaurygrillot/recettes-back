@@ -252,7 +252,8 @@ paths:
         `categoryId` and `categoryName` are two spellings of one filter: supplying both unions their matches.
 
 
-        `ingredientIds` keeps the recipes that use **all** of the given ingredients, in any of their groups.
+        `tagIds` keeps the recipes that carry **all** of the given tags, and `ingredientIds` the recipes that use
+        **all** of the given ingredients, in any of their groups.
       security: []
       parameters:
         - name: title
@@ -288,11 +289,18 @@ paths:
           description: Whether a category filter reaches everything filed beneath the category. Absent means true.
           schema:
             type: boolean
-        - name: tagId
+        - name: tagIds
           in: query
-          description: Recipes carrying this tag.
+          description: >-
+            Recipes that carry **every** one of these tags. Repeat the parameter to give several
+            (`tagIds=a&tagIds=b`). Blank values and duplicates are dropped, an id that matches no tag matches no
+            recipe, and at most 20 are accepted.
           schema:
-            type: string
+            type: array
+            maxItems: 20
+            uniqueItems: true
+            items:
+              type: string
         - name: tagName
           in: query
           description: Matched against the tag's normalized name.

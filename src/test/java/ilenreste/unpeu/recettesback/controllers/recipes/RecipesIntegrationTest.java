@@ -575,6 +575,63 @@ class RecipesIntegrationTest {
     }
 
     /**
+     * "Recipes with all these tags", over the wire, like the ingredients: the parameter is repeated, and a
+     * recipe that carries only some of the tags asked for is out. The negative assertions are the half that
+     * can fail if the binding silently produced no filter.
+     */
+    @Test
+    void requiresEveryTagGiven_repeatingTheParameter() {
+        String secondTagId = idOf(post("/tags", "{\"name\":\"%s\"}".formatted(unique("vegetarien")), adminToken,
+                HttpStatus.CREATED));
+        try {
+            String both = createRecipe(recipeTaggedWith(unique("Soupe"), tagId, secondTagId), authorToken);
+            String onlyFirst = createRecipe(minimalRecipeJson(unique("Steak")), authorToken);
+
+            String withFirst = restTemplate.getForObject("/recipes?tagIds=" + tagId, String.class);
+            String withBoth = restTemplate.getForObject(
+                    "/recipes?tagIds=" + tagId + "&tagIds=" + secondTagId, String.class);
+
+            assertThat(withFirst).contains(both).contains(onlyFirst);
+            assertThat(withBoth).contains(both).doesNotContain(onlyFirst);
+            assertThat(restTemplate.getForObject("/recipes?tagIds=no-such-tag", String.class))
+                    .doesNotContain(both);
+        } finally {
+            // Recipes first (the tear-down deletes them), then the tag they carried.
+            createdRecipeIds.forEach(id -> recipesRepository.findById(id).ifPresent(recipesRepository::delete));
+            createdRecipeIds.clear();
+            tagsRepository.deleteById(secondTagId);
+        }
+    }
+
+    @Test
+    void refusesMoreThanTwentyTagIds() {
+        String tooMany = java.util.stream.IntStream.range(0, 21)
+                .mapToObj(index -> "tagIds=t" + index)
+                .collect(java.util.stream.Collectors.joining("&"));
+
+        ResponseEntity<String> response = restTemplate.getForEntity("/recipes?" + tooMany, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    private String recipeTaggedWith(String title, String... tagIds) {
+        String tags = java.util.Arrays.stream(tagIds)
+                .map("\"%s\""::formatted)
+                .collect(java.util.stream.Collectors.joining(","));
+        return """
+                {
+                  "title": "%s",
+                  "categoryIds": ["%s"],
+                  "tagIds": [%s],
+                  "ingredientGroups": [
+                    {"ingredients": [{"ingredientId": "%s"}]}
+                  ],
+                  "steps": [{"instruction": "Melanger"}]
+                }
+                """.formatted(title, categoryId, tags, ingredientId);
+    }
+
+    /**
      * The summary of a recipe without a photo says so with an empty list, not with a missing field,
      * so a client that reads {@code coverMediaIds} never has to test for its absence. (The order of
      * the ids of a recipe that has pictures is {@code RecipeMapperTest}'s.)
