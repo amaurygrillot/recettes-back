@@ -70,6 +70,13 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
      *                         matches nothing
      * @param tagId            exact tag id, or null
      * @param tagName          substring of a tag's <em>normalized</em> name, or null
+     * @param ingredientIds    the ingredients a recipe must <em>all</em> use. Ignored when
+     *                         {@code ingredientCount} is 0
+     * @param ingredientCount  how many distinct ids {@code ingredientIds} holds, 0 for no
+     *                         ingredient filter. Counting the distinct requested ingredients a
+     *                         recipe uses and comparing with this is what makes the filter an
+     *                         AND, still in one row per recipe; an unknown id can never be
+     *                         found, so it matches nothing, as it should
      */
     @Query("""
             SELECT r.id FROM RecipeEntity r
@@ -84,6 +91,10 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
               AND (CAST(:tagName AS string) IS NULL
                    OR EXISTS (SELECT 1 FROM r.tags t
                               WHERE t.normalizedName LIKE CONCAT('%', CAST(:tagName AS string), '%')))
+              AND (:ingredientCount = 0
+                   OR (SELECT COUNT(DISTINCT ri.ingredient.id)
+                       FROM r.ingredientGroups g JOIN g.ingredients ri
+                       WHERE ri.ingredient.id IN :ingredientIds) = :ingredientCount)
             """)
     Page<String> searchIds(@Param("title") String title,
                            @Param("authorId") String authorId,
@@ -92,6 +103,8 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
                            @Param("categoryIds") Collection<String> categoryIds,
                            @Param("tagId") String tagId,
                            @Param("tagName") String tagName,
+                           @Param("ingredientIds") Collection<String> ingredientIds,
+                           @Param("ingredientCount") long ingredientCount,
                            Pageable pageable);
 
     /**

@@ -2,8 +2,8 @@
 ### Covers: GET /recipes, GET /recipes/{id}, POST /recipes, PUT /recipes/{id}, DELETE /recipes/{id}
 ###
 ### GET /recipes takes its criteria as a request object bound from the query string: title,
-### authorId, authorName, categoryId, categoryName, includeSubcategories, tagId, tagName, sortBy,
-### direction - plus the
+### authorId, authorName, categoryId, categoryName, includeSubcategories, tagId, tagName, ingredientIds,
+### sortBy, direction - plus the
 ### usual page and size. Every one is optional, including all of them at once.
 ###
 ### Reads are public. Writing needs a login; editing or deleting needs to be the AUTHOR or an
@@ -281,6 +281,40 @@ GET {{baseUrl}}/recipes?categoryName=categorie-qui-nexiste-pas
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         client.assert(response.body.totalElements === 0,
             "Expected no recipes, got " + response.body.totalElements);
+    });
+%}
+
+### 9b-vi. Recipes that use ALL of the given ingredients -> 200 OK
+### Repeat the parameter for several: ?ingredientIds=a&ingredientIds=b keeps only the recipes that use both, in
+### any of their groups - a recipe with only one of them is out. Blank values and duplicates are dropped. Run
+### request 5 first so the recipe (which uses {{ingredientId}}) exists.
+GET {{baseUrl}}/recipes?ingredientIds={{ingredientId}}
+
+> {%
+    client.test("Finds the recipe that uses the ingredient", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.totalElements >= 1, "Expected at least the recipe of request 5");
+    });
+%}
+
+### 9b-vii. An ingredient id nobody uses -> 200 OK, and no recipes at all
+### Not "no filter": an id that matches nothing can never be counted, so it matches no recipe.
+GET {{baseUrl}}/recipes?ingredientIds=ingredient-qui-nexiste-pas
+
+> {%
+    client.test("Returns an empty page, not everything", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.totalElements === 0,
+            "Expected no recipes, got " + response.body.totalElements);
+    });
+%}
+
+### 9b-viii. More than 20 ingredient ids -> 400 Bad Request
+GET {{baseUrl}}/recipes?ingredientIds=1&ingredientIds=2&ingredientIds=3&ingredientIds=4&ingredientIds=5&ingredientIds=6&ingredientIds=7&ingredientIds=8&ingredientIds=9&ingredientIds=10&ingredientIds=11&ingredientIds=12&ingredientIds=13&ingredientIds=14&ingredientIds=15&ingredientIds=16&ingredientIds=17&ingredientIds=18&ingredientIds=19&ingredientIds=20&ingredientIds=21
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
     });
 %}
 
@@ -664,6 +698,9 @@ GET {{baseUrl}}/recipes?title=illustr
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         const row = response.body.content.find(r => r.id === client.global.get("illustratedRecipeId"));
         client.assert(row.coverMediaId !== null, "Expected a cover media id");
+        // Every cover picture, in order, starting with coverMediaId: what a card shows as a small slider.
+        client.assert(Array.isArray(row.coverMediaIds) && row.coverMediaIds[0] === row.coverMediaId,
+            "Expected coverMediaIds to list the cover pictures, the first being coverMediaId");
     });
 %}
 

@@ -144,13 +144,40 @@ class RecipesRepositoryTest {
         return recipesRepository.saveAndFlush(recipe);
     }
 
+    /**
+     * A recipe that uses these ingredients, one per group: the filter must look across the groups, since
+     * "Pour la pâte" and "Pour la garniture" are one recipe to the person searching.
+     */
+    private RecipeEntity recipeUsing(String title, IngredientEntity... ingredients) {
+        RecipeEntity recipe = recipe(title, List.of(category("plat")), List.of());
+        for (int position = 0; position < ingredients.length; position++) {
+            RecipeIngredientGroupEntity group = new RecipeIngredientGroupEntity();
+            group.setRecipe(recipe);
+            group.setPosition(position);
+            RecipeIngredientEntity line = new RecipeIngredientEntity();
+            line.setGroup(group);
+            line.setIngredient(ingredients[position]);
+            line.setPosition(0);
+            group.getIngredients().add(line);
+            recipe.getIngredientGroups().add(group);
+        }
+        return recipesRepository.saveAndFlush(recipe);
+    }
+
+    /** Only the ingredient filter on, as the service would have set it. */
+    private Page<String> usingAll(IngredientEntity... ingredients) {
+        List<String> ids = java.util.Arrays.stream(ingredients).map(IngredientEntity::getId).toList();
+        return recipesRepository.searchIds(
+                null, null, null, false, List.of(), null, null, ids, ids.size(), firstPage());
+    }
+
     private PageRequest firstPage() {
         return PageRequest.of(0, 20, Sort.by(Sort.Direction.DESC, "createdAt"));
     }
 
     /** Only the category filter on, with the id set the service would have resolved. */
     private Page<String> inCategories(java.util.Collection<String> categoryIds) {
-        return recipesRepository.searchIds(null, null, null, true, categoryIds, null, null, firstPage());
+        return recipesRepository.searchIds(null, null, null, true, categoryIds, null, null, List.of(), 0, firstPage());
     }
 
     /**
@@ -178,7 +205,7 @@ class RecipesRepositoryTest {
         recipe("Soupe", List.of(category("entree")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of(), null, null, firstPage());
+                null, null, null, false, List.of(), null, null, List.of(), 0, firstPage());
 
         assertThat(page.getTotalElements()).isGreaterThanOrEqualTo(2);
     }
@@ -201,7 +228,7 @@ class RecipesRepositoryTest {
         recipe("Steak", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of(), vegetarien.getId(), null, firstPage());
+                null, null, null, false, List.of(), vegetarien.getId(), null, List.of(), 0, firstPage());
 
         assertThat(page.getContent()).containsExactly(soupe.getId());
     }
@@ -213,18 +240,22 @@ class RecipesRepositoryTest {
         recipe("Theirs", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, author.getId(), null, false, List.of(), null, null, firstPage());
+                null, author.getId(), null, false, List.of(), null, null, List.of(), 0, firstPage());
 
         assertThat(page.getContent()).containsExactly(mine.getId());
     }
 
     @Test
     void filtersByTitleFragment_caseInsensitively() {
-        RecipeEntity tarte = recipe("Tarte aux POMMES", List.of(category("dessert")), List.of());
+        // A fragment of its own: the development database this runs against holds real recipes, and some
+        // of them have "pommes" in their title.
+        String fragment = "pommes" + UUID.randomUUID().toString().substring(0, 8);
+        RecipeEntity tarte = recipe("Tarte aux " + fragment.toUpperCase(java.util.Locale.ROOT),
+                List.of(category("dessert")), List.of());
         recipe("Soupe a l'oignon", List.of(category("entree")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                "pommes", null, null, false, List.of(), null, null, firstPage());
+                fragment, null, null, false, List.of(), null, null, List.of(), 0, firstPage());
 
         assertThat(page.getContent()).containsExactly(tarte.getId());
     }
@@ -239,7 +270,7 @@ class RecipesRepositoryTest {
 
         Page<String> page = recipesRepository.searchIds(
                 "tarte", author.getId(), null, true, List.of(dessert.getId()), rapide.getId(), null,
-                firstPage());
+                List.of(), 0, firstPage());
 
         assertThat(page.getContent()).containsExactly(wanted.getId());
     }
@@ -251,7 +282,7 @@ class RecipesRepositoryTest {
         recipe("Steak", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of(), null, rapide.getNormalizedName(), firstPage());
+                null, null, null, false, List.of(), null, rapide.getNormalizedName(), List.of(), 0, firstPage());
 
         assertThat(page.getContent()).containsExactly(soupe.getId());
     }
@@ -264,9 +295,74 @@ class RecipesRepositoryTest {
 
         Page<String> page = recipesRepository.searchIds(
                 null, null, author.getUsername().toUpperCase(java.util.Locale.ROOT), false, List.of(),
-                null, null, firstPage());
+                null, null, List.of(), 0, firstPage());
 
         assertThat(page.getContent()).contains(mine.getId());
+    }
+
+    @Test
+    void filtersByAnIngredient() {
+        IngredientEntity pommes = ingredient("pommes");
+        RecipeEntity tarte = recipeUsing("Tarte", pommes);
+        recipeUsing("Soupe", ingredient("potiron"));
+
+        assertThat(usingAll(pommes).getContent()).containsExactly(tarte.getId());
+    }
+
+    /**
+     * "Recipes with all these ingredients": the recipe that has only some of them is out, whichever
+     * groups they are in.
+     */
+    @Test
+    void requiresEveryGivenIngredient_inAnyOfTheGroups() {
+        IngredientEntity pommes = ingredient("pommes");
+        IngredientEntity farine = ingredient("farine");
+        IngredientEntity beurre = ingredient("beurre");
+        RecipeEntity tarte = recipeUsing("Tarte", farine, pommes, beurre);
+        recipeUsing("Compote", pommes);
+        recipeUsing("Pain", farine);
+
+        Page<String> page = usingAll(pommes, farine);
+
+        assertThat(page.getContent()).containsExactly(tarte.getId());
+        assertThat(page.getTotalElements()).isEqualTo(1);
+    }
+
+    /**
+     * The duplicate-row trap again: a recipe that uses the same ingredient on two lines (flour in the
+     * dough and on the worktop) is still one recipe, and still found when it is the only one asked for.
+     */
+    @Test
+    void countsARecipeOnce_evenWhenItUsesAnIngredientOnSeveralLines() {
+        IngredientEntity farine = ingredient("farine");
+        recipeUsing("Pain", farine, farine);
+
+        Page<String> page = usingAll(farine);
+
+        assertThat(page.getTotalElements()).isEqualTo(1);
+    }
+
+    @Test
+    void matchesNothingForAnIngredientIdNoRecipeUses() {
+        recipeUsing("Tarte", ingredient("pommes"));
+
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, false, List.of(), null, null, List.of("no-such-ingredient"), 1,
+                firstPage());
+
+        assertThat(page.getTotalElements()).isZero();
+    }
+
+    @Test
+    void combinesTheIngredientFilterWithTheOthers() {
+        IngredientEntity pommes = ingredient("pommes");
+        RecipeEntity tarte = recipeUsing("Tarte aux pommes", pommes);
+        recipeUsing("Compote de pommes", pommes);
+
+        Page<String> page = recipesRepository.searchIds(
+                "tarte", null, null, false, List.of(), null, null, List.of(pommes.getId()), 1, firstPage());
+
+        assertThat(page.getContent()).containsExactly(tarte.getId());
     }
 
     /**
@@ -323,7 +419,7 @@ class RecipesRepositoryTest {
         RecipeEntity tarte = recipe("Tarte", List.of(category("dessert")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of("no-such-category"), null, null, firstPage());
+                null, null, null, false, List.of("no-such-category"), null, null, List.of(), 0, firstPage());
 
         assertThat(page.getContent()).contains(tarte.getId());
     }
@@ -340,7 +436,7 @@ class RecipesRepositoryTest {
         RecipeEntity a = recipe(prefix + "-A", List.of(dessert), List.of());
 
         Page<String> page = recipesRepository.searchIds(prefix, null, null, false, List.of(), null, null,
-                PageRequest.of(0, 20, Sort.by(Sort.Direction.ASC, "title")));
+                List.of(), 0, PageRequest.of(0, 20, Sort.by(Sort.Direction.ASC, "title")));
 
         assertThat(page.getContent()).containsExactly(a.getId(), b.getId());
     }
