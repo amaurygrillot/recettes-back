@@ -318,6 +318,40 @@ GET {{baseUrl}}/recipes?ingredientIds=1&ingredientIds=2&ingredientIds=3&ingredie
     });
 %}
 
+### 9b-ix. Recipes that carry ALL of the given tags -> 200 OK
+### Repeat the parameter for several: ?tagIds=a&tagIds=b keeps only the recipes that carry both - a recipe with
+### only one of them is out. Blank values and duplicates are dropped. {{tagId}} is the tag that tags.http creates
+### (run its create request first); put it on a recipe with request 5's "tagIds" to see that recipe listed.
+GET {{baseUrl}}/recipes?tagIds={{tagId}}&tagIds={{tagId}}
+
+> {%
+    client.test("Answers with a page", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(Array.isArray(response.body.content), "Expected a page of recipes");
+    });
+%}
+
+### 9b-x. A tag id nobody carries -> 200 OK, and no recipes at all
+### Not "no filter": an id that matches nothing can never be counted, so it matches no recipe.
+GET {{baseUrl}}/recipes?tagIds=tag-qui-nexiste-pas
+
+> {%
+    client.test("Returns an empty page, not everything", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.totalElements === 0,
+            "Expected no recipes, got " + response.body.totalElements);
+    });
+%}
+
+### 9b-xi. More than 20 tag ids -> 400 Bad Request
+GET {{baseUrl}}/recipes?tagIds=1&tagIds=2&tagIds=3&tagIds=4&tagIds=5&tagIds=6&tagIds=7&tagIds=8&tagIds=9&tagIds=10&tagIds=11&tagIds=12&tagIds=13&tagIds=14&tagIds=15&tagIds=16&tagIds=17&tagIds=18&tagIds=19&tagIds=20&tagIds=21
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
 ### 9b-v. includeSubcategories that is not a boolean -> 400 Bad Request
 GET {{baseUrl}}/recipes?categoryId={{mainCategoryId}}&includeSubcategories=perhaps
 
