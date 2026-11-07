@@ -698,6 +698,9 @@ GET {{baseUrl}}/recipes?title=illustr
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         const row = response.body.content.find(r => r.id === client.global.get("illustratedRecipeId"));
         client.assert(row.coverMediaId !== null, "Expected a cover media id");
+        // Every cover picture, in order, starting with coverMediaId: what a card shows as a small slider.
+        client.assert(Array.isArray(row.coverMediaIds) && row.coverMediaIds[0] === row.coverMediaId,
+            "Expected coverMediaIds to list the cover pictures, the first being coverMediaId");
     });
 %}
 

@@ -11,7 +11,7 @@ import java.util.stream.Collectors;
 /**
  * The criteria {@code GET /recipes} accepts, bound from the query string.
  * <p>
- * A record rather than eight {@code @RequestParam} arguments on the controller
+ * A record rather than a long list of {@code @RequestParam} arguments on the controller
  * method. Spring binds a non-annotated object parameter from the query string by
  * name, so the wire format is unchanged — {@code ?title=tarte&tagName=rapide}
  * still works — but the criteria now have one place to be named, documented and
@@ -189,14 +189,18 @@ public record RecipeSearchRequest(
     }
 
     /**
-     * The ingredients a recipe must all use: never null, without blank values. A {@link Set}, so
-     * {@code size()} is the number of <em>distinct</em> ingredients the query has to find.
+     * The ingredients a recipe must all use: never null, trimmed, without blank values. A {@link Set}, so
+     * {@code size()} is the number of <em>distinct</em> ingredients the query has to find: {@code " a"} and
+     * {@code "a"} are one, or the count would be one too many and nothing could ever match.
      */
     public Set<String> ingredientIds() {
         if (ingredientIds == null) {
             return Set.of();
         }
-        return ingredientIds.stream().filter(StringUtils::hasText).collect(Collectors.toUnmodifiableSet());
+        return ingredientIds.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     /** A blank query parameter means "no filter", not "match the empty string". */

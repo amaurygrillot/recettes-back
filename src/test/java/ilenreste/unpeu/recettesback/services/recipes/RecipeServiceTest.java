@@ -181,7 +181,7 @@ class RecipeServiceTest {
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, null, null, null, null, null,
-                        new LinkedHashSet<>(Arrays.asList("farine", "  ", "pommes", "")), null, null),
+                        new LinkedHashSet<>(Arrays.asList("farine", "  ", "pommes", "", " farine ")), null, null),
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
