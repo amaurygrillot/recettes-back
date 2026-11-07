@@ -713,8 +713,18 @@ have one place to be named, documented and validated. The wire format is unchang
 | `includeSubcategories` | `true` (default) or `false` for exact membership            |
 | `tagId`        | exactly that tag                                                    |
 | `tagName`      | substring of a tag's *normalized* name                              |
+| `ingredientIds`| recipes that use **every** one of these ingredients (repeat the parameter, at most 20) |
 | `sortBy`       | `CREATED_AT` (default), `UPDATED_AT` or `TITLE`                     |
 | `direction`    | `ASC` or `DESC` (default)                                           |
+
+**`ingredientIds` is an AND, by design.** The search screen draws "recipes with all these ingredients": someone who
+picks apples and flour wants the tarte, not every recipe that has either. The query counts the *distinct* requested
+ingredients a recipe uses, in any of its groups, and keeps it when that equals the number asked for
+(`RecipesRepository.searchIds`: `ingredientIds` plus `ingredientCount`, the size of the de-duplicated, non-blank set
+`RecipeSearchRequest.ingredientIds()` returns). That keeps one row per recipe (no join, so no duplicate rows and a
+correct `COUNT`), and an id that matches no ingredient can never be counted, so it matches no recipe rather than the
+whole library. Only ids exist, no `ingredientName`: the ingredients are chosen from `GET /ingredients?namePrefix=…`, and
+there is no free-text ingredient search to serve. "Any of these" (OR) would be a different parameter if a screen asked.
 
 **Every criterion is optional, including all of them at once.** An unfiltered `GET /recipes` is the home page and
 returns the newest recipes, paginated. Requiring at least one filter would leave the application with no way to browse.
@@ -905,9 +915,12 @@ Covered per-query in [Repositories](#repositories) above; the settings that make
   [Writing
   `position` is only half the job](#writing-position-is-only-half-the-job--every-such-collection-needs-orderbyposition).
   Choosing `Set` for the bag problem and forgetting `@OrderBy` is how recipe steps end up shuffled in the response.
-- `RecipeSummaryResponse` carries only id, title, first cover picture id, categories, tags and author name. A recipe
-  list page must not cost one full recipe load per row. "First cover picture" means first by `position`, which is only
-  well-defined because of the `@OrderBy` above.
+- `RecipeSummaryResponse` carries only id, title, the cover picture ids, categories, tags and author name. A recipe
+  list page must not cost one full recipe load per row. "First cover picture" (`coverMediaId`, the card's thumbnail)
+  means first by `position`, which is only well-defined because of the `@OrderBy` above. `coverMediaIds` lists *all*
+  the cover pictures in that order, so a card can be a small slider (the front's R8); it is ids only, the pictures'
+  descriptions stay on `GET /recipes/{id}`, and the pictures are already loaded for the page by batch fetching, so the
+  whole list costs no extra query. It is empty, never absent, for a recipe without a photo.
 - Pagination is `Pageable` with a **server-side cap** on page size (e.g. 100). Uncapped, `?size=100000` is a free
   denial of service on a VPS.
 

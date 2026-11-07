@@ -126,11 +126,15 @@ public class RecipeService {
      * {@code CategoryService}, which owns the taxonomy — because "this category"
      * may mean the whole subtree beneath it. See
      * {@link #resolveCategoryFilter(RecipeSearchRequest)}.
+     * <p>
+     * The ingredient filter needs no such resolution: the ids are the criterion, and the query counts
+     * how many of them a recipe uses. See {@code RecipesRepository.searchIds}.
      */
     @Transactional(readOnly = true)
     public Page<RecipeSummaryResponse> search(RecipeSearchRequest request, Pageable pageable) {
         Pageable sorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), request.sort());
         Collection<String> categoryIds = resolveCategoryFilter(request);
+        Set<String> ingredientIds = request.ingredientIds();
         Page<String> idPage = recipesRepository.searchIds(
                 request.title(),
                 request.authorId(),
@@ -139,6 +143,8 @@ public class RecipeService {
                 categoryIds == null ? Set.of() : categoryIds,
                 request.tagId(),
                 normalizedOrNull(request.tagName()),
+                ingredientIds,
+                ingredientIds.size(),
                 sorted);
         if (idPage.isEmpty()) {
             return Page.empty(sorted);

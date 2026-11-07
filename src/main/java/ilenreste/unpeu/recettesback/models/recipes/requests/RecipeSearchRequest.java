@@ -5,6 +5,9 @@ import jakarta.validation.constraints.Size;
 import org.springframework.data.domain.Sort;
 import org.springframework.util.StringUtils;
 
+import java.util.Set;
+import java.util.stream.Collectors;
+
 /**
  * The criteria {@code GET /recipes} accepts, bound from the query string.
  * <p>
@@ -78,7 +81,16 @@ import org.springframework.util.StringUtils;
  *                             widens them
  * @param tagName              matched against the tag's normalized name, same
  *                             rules as {@code categoryName}
- * @param sortBy               which column to order by, from a closed set — see
+ * @param ingredientIds        <strong>every</strong> one of these ingredients must be
+ *                             used by the recipe ("recipes with all these
+ *                             ingredients"), in any of its groups. Repeat the
+ *                             parameter ({@code ?ingredientIds=a&ingredientIds=b});
+ *                             blank values and duplicates are dropped, and an empty
+ *                             set is no filter. An id that matches no ingredient
+ *                             matches no recipe, which is the honest answer rather
+ *                             than the whole library. At most twenty, so the
+ *                             counting query stays small
+ * @param sortBy              which column to order by, from a closed set — see
  *                             {@link RecipeSortField} for why it is not free text
  * @param direction            {@code ASC} or {@code DESC}. Independent of
  *                             {@code sortBy}, so "oldest first" and "reverse
@@ -113,6 +125,10 @@ public record RecipeSearchRequest(
         @Size(max = 100)
         @JsonProperty(required = false)
         String tagName,
+
+        @Size(max = 20)
+        @JsonProperty(required = false)
+        Set<String> ingredientIds,
 
         @JsonProperty(required = false)
         RecipeSortField sortBy,
@@ -170,6 +186,17 @@ public record RecipeSearchRequest(
 
     public String tagName() {
         return absentIfBlank(tagName);
+    }
+
+    /**
+     * The ingredients a recipe must all use: never null, without blank values. A {@link Set}, so
+     * {@code size()} is the number of <em>distinct</em> ingredients the query has to find.
+     */
+    public Set<String> ingredientIds() {
+        if (ingredientIds == null) {
+            return Set.of();
+        }
+        return ingredientIds.stream().filter(StringUtils::hasText).collect(Collectors.toUnmodifiableSet());
     }
 
     /** A blank query parameter means "no filter", not "match the empty string". */

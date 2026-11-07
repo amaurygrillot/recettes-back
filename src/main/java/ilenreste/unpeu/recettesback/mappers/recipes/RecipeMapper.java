@@ -96,15 +96,18 @@ public class RecipeMapper {
     }
 
     /**
-     * The listing row. Nothing here loads a step, an ingredient group or any
-     * cover picture past the first — a list page must not cost one full recipe
-     * load per row.
+     * The listing row. Nothing here loads a step or an ingredient group — a list
+     * page must not cost one full recipe load per row. The cover pictures are
+     * already loaded for the page (batch fetching), so listing all their ids costs
+     * nothing more than the first.
      */
     public RecipeSummaryResponse toSummary(RecipeEntity recipe, Map<String, String> categoryParentIds) {
+        List<String> coverMediaIds = coverMediaIds(recipe);
         return new RecipeSummaryResponse(
                 recipe.getId(),
                 recipe.getTitle(),
-                firstCoverMediaId(recipe),
+                coverMediaIds.isEmpty() ? null : coverMediaIds.getFirst(),
+                coverMediaIds,
                 toCategories(recipe, categoryParentIds),
                 toTags(recipe),
                 toAuthor(recipe),
@@ -113,15 +116,15 @@ public class RecipeMapper {
     }
 
     /**
-     * First by position, which is well-defined only because the collection is
-     * ordered. {@code findFirst()} on an unordered {@code HashSet} would pick a
-     * different picture between two identical requests.
+     * Every cover picture's media id, in position order, which is well-defined only
+     * because the collection is ordered. The first of them is the card's thumbnail:
+     * taking it from an unordered {@code HashSet} would pick a different picture
+     * between two identical requests.
      */
-    private String firstCoverMediaId(RecipeEntity recipe) {
+    private List<String> coverMediaIds(RecipeEntity recipe) {
         return recipe.getCoverPictures().stream()
-                .findFirst()
                 .map(cover -> cover.getMedia().getId())
-                .orElse(null);
+                .toList();
     }
 
     private RecipeAuthorResponse toAuthor(RecipeEntity recipe) {

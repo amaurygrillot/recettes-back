@@ -535,6 +535,74 @@ class RecipesIntegrationTest {
     }
 
     /**
+     * "Recipes with all these ingredients", over the wire: the parameter is repeated, and a recipe
+     * that uses only some of the ingredients asked for is out. The negative assertions are the half
+     * that can fail if the binding silently produced no filter.
+     */
+    @Test
+    void requiresEveryIngredientGiven_repeatingTheParameter() {
+        String sugarId = idOf(post("/ingredients", "{\"name\":\"%s\"}".formatted(unique("sucre")), authorToken,
+                HttpStatus.CREATED));
+        try {
+            String both = createRecipe(recipeUsing(unique("Gateau"), ingredientId, sugarId), authorToken);
+            String onlyFlour = createRecipe(recipeUsing(unique("Pain"), ingredientId), authorToken);
+
+            String withFlour = restTemplate.getForObject("/recipes?ingredientIds=" + ingredientId, String.class);
+            String withBoth = restTemplate.getForObject(
+                    "/recipes?ingredientIds=" + ingredientId + "&ingredientIds=" + sugarId, String.class);
+
+            assertThat(withFlour).contains(both).contains(onlyFlour);
+            assertThat(withBoth).contains(both).doesNotContain(onlyFlour);
+            assertThat(restTemplate.getForObject("/recipes?ingredientIds=no-such-ingredient", String.class))
+                    .doesNotContain(both);
+        } finally {
+            // Recipes first (the tear-down deletes them), then the ingredient they used.
+            createdRecipeIds.forEach(id -> recipesRepository.findById(id).ifPresent(recipesRepository::delete));
+            createdRecipeIds.clear();
+            ingredientsRepository.deleteById(sugarId);
+        }
+    }
+
+    @Test
+    void refusesMoreThanTwentyIngredientIds() {
+        String tooMany = java.util.stream.IntStream.range(0, 21)
+                .mapToObj(index -> "ingredientIds=i" + index)
+                .collect(java.util.stream.Collectors.joining("&"));
+
+        ResponseEntity<String> response = restTemplate.getForEntity("/recipes?" + tooMany, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    /**
+     * The summary of a recipe without a photo says so with an empty list, not with a missing field,
+     * so a client that reads {@code coverMediaIds} never has to test for its absence. (The order of
+     * the ids of a recipe that has pictures is {@code RecipeMapperTest}'s.)
+     */
+    @Test
+    void carriesAnEmptyCoverListInTheSummaryOfARecipeWithoutAPhoto() {
+        String bare = createRecipe(minimalRecipeJson(unique("Sans photo")), authorToken);
+
+        String listing = restTemplate.getForObject("/recipes?authorId=" + author.id(), String.class);
+
+        assertThat(listing).contains(bare).contains("\"coverMediaIds\":[]").contains("\"coverMediaId\":null");
+    }
+
+    private String recipeUsing(String title, String... ingredientIds) {
+        String lines = java.util.Arrays.stream(ingredientIds)
+                .map(id -> "{\"ingredients\": [{\"ingredientId\": \"%s\"}]}".formatted(id))
+                .collect(java.util.stream.Collectors.joining(","));
+        return """
+                {
+                  "title": "%s",
+                  "categoryIds": ["%s"],
+                  "ingredientGroups": [%s],
+                  "steps": [{"instruction": "Melanger"}]
+                }
+                """.formatted(title, categoryId, lines);
+    }
+
+    /**
      * The filters a user can actually type. Only the id filters existed before, which assumed the
      * caller already knew a UUID for the author, category or tag they wanted - true of a dropdown,
      * false of a search box.

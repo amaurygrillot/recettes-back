@@ -250,6 +250,9 @@ paths:
 
         A category filter reaches the category's subcategories too, at any depth, unless `includeSubcategories=false`.
         `categoryId` and `categoryName` are two spellings of one filter: supplying both unions their matches.
+
+
+        `ingredientIds` keeps the recipes that use **all** of the given ingredients, in any of their groups.
       security: []
       parameters:
         - name: title
@@ -296,6 +299,18 @@ paths:
           schema:
             type: string
             maxLength: 100
+        - name: ingredientIds
+          in: query
+          description: >-
+            Recipes that use **every** one of these ingredients. Repeat the parameter to give several
+            (`ingredientIds=a&ingredientIds=b`). Blank values and duplicates are dropped, an id that matches no
+            ingredient matches no recipe, and at most 20 are accepted.
+          schema:
+            type: array
+            maxItems: 20
+            uniqueItems: true
+            items:
+              type: string
         - name: sortBy
           in: query
           description: The column to order by, from a closed set. Defaults to `CREATED_AT`. Any other value is a 400.
@@ -1698,6 +1713,13 @@ components:
           type: string
           nullable: true
           description: The first cover picture, as the thumbnail.
+        coverMediaIds:
+          type: array
+          description: >-
+            Every cover picture, in order, for a card that shows them as a small slider. Empty without a cover;
+            otherwise it starts with `coverMediaId`.
+          items:
+            type: string
         categories:
           type: array
           items:

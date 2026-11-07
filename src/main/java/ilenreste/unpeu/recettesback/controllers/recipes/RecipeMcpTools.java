@@ -47,7 +47,8 @@ public class RecipeMcpTools {
     @McpTool(name = "search_recipes",
             description = "Search the recipe library. Every criterion is optional and they combine with AND; "
                     + "with none it returns the newest recipes. Category filters include subcategories "
-                    + "unless includeSubcategories is false.",
+                    + "unless includeSubcategories is false. ingredientIds keeps the recipes that use all of those "
+                    + "ingredients.",
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, openWorldHint = false))
     public List<RecipeSummaryResponse> searchRecipes(
             @McpToolParam(description = "Criteria; omit every field to list the newest recipes", required = false)
@@ -56,7 +57,8 @@ public class RecipeMcpTools {
             @McpToolParam(description = "Page size, default 20, at most " + MAX_PAGE_SIZE, required = false)
             Integer size) {
         RecipeSearchRequest request = requestValidator.validated(
-                criteria == null ? new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null)
+                criteria == null
+                        ? new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null, null)
                         : criteria);
         log.debug("MCP search_recipes {}", request);
         return recipeService.search(request, pageOf(page, size)).getContent();
