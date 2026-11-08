@@ -41,6 +41,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -357,6 +358,17 @@ class RecipeListServiceTest {
         verify(listsRepository).delete(mine);
     }
 
+    /** Two overlapping deletes: the loser's DELETE touches no row, and the list is gone. */
+    @Test
+    void delete_whenTheListIsDeletedByAnotherRequestFirst_is404_notAServerError() {
+        storedList("mine", ME, "Desserts");
+        doThrow(new ObjectOptimisticLockingFailureException(RecipeListEntity.class, "mine"))
+                .when(listsRepository).flush();
+
+        assertThatThrownBy(() -> service.delete("mine")).isInstanceOf(ResourceNotFoundException.class)
+                .hasMessage("No recipe list with id mine");
+    }
+
     @Test
     void delete_ofSomeoneElsesList_is404_andDeletesNothing() {
         storedList("theirs", SOMEONE_ELSE, "Desserts");
@@ -383,7 +395,6 @@ class RecipeListServiceTest {
     void addRecipe_thatIsAlreadyThere_isASuccessThatChangesNothing() {
         storedList("list-1", ME, "Desserts");
         when(recipesRepository.existsById("tarte")).thenReturn(true);
-        when(entriesRepository.existsById(new RecipeListEntryId("list-1", "tarte"))).thenReturn(true);
         when(entriesRepository.insertIfAbsent("list-1", "tarte", NOW)).thenReturn(0);
 
         service.addRecipe("list-1", "tarte");
@@ -513,7 +524,36 @@ class RecipeListServiceTest {
                 Arguments.of("a lone combining accent", ofCodePoints(0x0301)),
                 Arguments.of("an ideographic space", ofCodePoints(0x3000)),
                 Arguments.of("a soft hyphen", ofCodePoints(0x00AD)),
+                Arguments.of("a Hangul filler", ofCodePoints(0x3164)),
+                Arguments.of("a blank Braille pattern", ofCodePoints(0x2800)),
                 Arguments.of("spaces around a combining accent", "  " + ofCodePoints(0x0301) + " "));
+    }
+
+    /** PostgreSQL refuses 0x00 in text: without this, a perfectly valid JSON string would be a 500. */
+    @ParameterizedTest(name = "a name containing {0}")
+    @MethodSource("namesWithControlCharacters")
+    void aNameWithAControlCharacterAnywhereInIt_isRefused_evenNextToVisibleText(String description, String name) {
+        assertThatThrownBy(() -> service.create(request(name))).isInstanceOf(InvalidInputException.class)
+                .hasMessageContaining("control");
+
+        verify(listsRepository, never()).saveAndFlush(any());
+    }
+
+    /** A control character at either END is trimmed with the spaces, as String.trim() does: "Tartes" plus a newline is fine. */
+    @Test
+    void aControlCharacterAtTheEdgeOfAName_isTrimmedAwayWithTheSpaces() {
+        when(usersRepository.getReferenceById(ME)).thenReturn(user(ME));
+
+        assertThat(service.create(request(ofCodePoints(0x000A) + "Tartes" + ofCodePoints(0x0009))).name())
+                .isEqualTo("Tartes");
+    }
+
+    static Stream<Arguments> namesWithControlCharacters() {
+        return Stream.of(
+                Arguments.of("a NUL", "Ta" + ofCodePoints(0x0000) + "rtes"),
+                Arguments.of("a line break", "Tartes" + ofCodePoints(0x000A) + "salees"),
+                Arguments.of("a tab", "Tartes" + ofCodePoints(0x0009) + "salees"),
+                Arguments.of("an escape", "Tar" + ofCodePoints(0x001B) + "tes"));
     }
 
     @Test

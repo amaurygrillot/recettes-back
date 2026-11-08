@@ -1,13 +1,11 @@
 package ilenreste.unpeu.recettesback.controllers.recipes;
 
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
-import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.services.recipes.RecipeListService;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
@@ -28,10 +26,6 @@ import static org.mockito.Mockito.doAnswer;
  * through {@code GET /recipes?listId=} with its default order and its {@code ADDED_AT} sort.
  */
 class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
-
-    /** Spied for one reason: to delete a list or a recipe between the checks of the service and its insert. */
-    @MockitoSpyBean
-    private RecipesRepository spiedRecipes;
 
     private static List<String> titlesOf(ResponseEntity<String> page) {
         assertThat(page.getStatusCode()).as("%s", page.getBody()).isEqualTo(HttpStatus.OK);
@@ -124,7 +118,7 @@ class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
         doAnswer(check -> {
             jdbc.update("DELETE FROM recipe_lists WHERE id = ?", list);
             return true;
-        }).when(spiedRecipes).existsById(recipe);
+        }).when(recipesRepository).existsById(recipe);
 
         ResponseEntity<String> response = put("/lists/" + list + "/recipes/" + recipe, null, ownerToken);
 
@@ -139,7 +133,7 @@ class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
         doAnswer(check -> {
             jdbc.update("DELETE FROM recipes WHERE id = ?", recipe);
             return true;
-        }).when(spiedRecipes).existsById(recipe);
+        }).when(recipesRepository).existsById(recipe);
 
         ResponseEntity<String> response = put("/lists/" + list + "/recipes/" + recipe, null, ownerToken);
 

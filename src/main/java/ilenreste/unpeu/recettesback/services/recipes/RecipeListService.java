@@ -171,6 +171,11 @@ public class RecipeListService {
      */
     private void applyTo(RecipeListEntity list, RecipeListRequest request, String ownerId, String ownListId) {
         String name = request.name().trim();
+        if (name.codePoints().anyMatch(codePoint -> Character.getType(codePoint) == Character.CONTROL)) {
+            // A NUL is not a nicety: PostgreSQL refuses 0x00 in text, which would surface as a 500 for a name sent
+            // in a perfectly valid JSON string. A tab or a line break has no place in a one-line name either.
+            throw new InvalidInputException("The name must not contain control characters.");
+        }
         String normalizedName = normalizer.normalize(name);
         if (!hasVisibleCharacter(normalizedName)) {
             // Bean validation only rejects what String.isBlank() calls blank. A name made of a no-break space, a
@@ -184,20 +189,45 @@ public class RecipeListService {
         list.setEmoji(request.emoji());
     }
 
-    /** Something a person can see: not whitespace, a separator, a control character or an invisible format mark. */
+    /**
+     * Letters that are drawn as nothing although they are not whitespace, a separator or a format mark: the Hangul
+     * fillers (U+115F, U+1160, U+3164, U+FFA0) and the blank Braille pattern (U+2800). A name made only of them is as
+     * empty on a tile as one made of spaces.
+     */
+    private static final Set<Integer> BLANK_LOOKING = Set.of(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800);
+
+    /**
+     * Something a person can see: not whitespace, a separator, an invisible format mark (a zero-width space or joiner
+     * alone shows nothing, although a joiner BETWEEN visible characters is how Persian and emoji sequences are written,
+     * which is why format marks are tolerated in a name that has something else), or one of the blank-looking letters.
+     */
     private static boolean hasVisibleCharacter(String text) {
         return text.codePoints().anyMatch(codePoint -> !Character.isWhitespace(codePoint)
                 && !Character.isSpaceChar(codePoint)
-                && Character.getType(codePoint) != Character.CONTROL
-                && Character.getType(codePoint) != Character.FORMAT);
+                && Character.getType(codePoint) != Character.FORMAT
+                && !BLANK_LOOKING.contains(codePoint));
     }
 
-    /** Deletes the list and, by the database's cascade, its entries. Never the recipes. */
+    /**
+     * Deletes the list and, by the database's cascade, its entries. Never the recipes.
+     * <p>
+     * Flushed here, inside the try, because a delete is only sent at commit otherwise: two overlapping requests for the
+     * same list (a double click, a retry) both pass the ownership check, the first commits, and the second's DELETE
+     * touches no row. Hibernate reports that as an optimistic-locking failure, which would surface from the commit as a
+     * 500. The list is gone, which is the 404 a request arriving a moment later would have been.
+     */
     @Transactional
     public void delete(String listId) {
         RecipeListEntity list = ownedList(listId);
-        listsRepository.delete(list);
-        log.info("User {} deleted recipe list {}", list.getOwner().getId(), listId);
+        String ownerId = list.getOwner().getId();
+        try {
+            listsRepository.delete(list);
+            listsRepository.flush();
+        } catch (ObjectOptimisticLockingFailureException deletedMeanwhile) {
+            log.info("Recipe list {} was already deleted when user {} deleted it", listId, ownerId);
+            throw ResourceNotFoundException.of("recipe list", listId);
+        }
+        log.info("User {} deleted recipe list {}", ownerId, listId);
     }
 
     /**
@@ -228,7 +258,10 @@ public class RecipeListService {
         try {
             inserted = entriesRepository.insertIfAbsent(listId, recipeId, Instant.now(clock));
         } catch (DataIntegrityViolationException deletedMeanwhile) {
-            log.info("Recipe list {} or recipe {} was deleted while the recipe was being added", listId, recipeId);
+            // The cause is logged, not dropped: if a constraint other than the foreign keys ever refuses this insert,
+            // it must not turn into a silent 404.
+            log.info("Recipe list {} or recipe {} was deleted while the recipe was being added: {}", listId, recipeId,
+                    deletedMeanwhile.getMostSpecificCause().getMessage());
             throw new ResourceNotFoundException("The recipe list or the recipe no longer exists.");
         }
         if (inserted == 1) {

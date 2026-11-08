@@ -58,8 +58,11 @@ Package layout follows [recipes-domain-model.md](recipes-domain-model.md#package
   one visible character** once normalised: Bean Validation's `@NotBlank` only refuses what `String.isBlank()` calls
   blank, and a name made of a no-break space, a zero-width space or a lone combining accent passes it. The last one
   normalises to the empty string, so the list would show an empty tile and the next such name would be refused as its
-  duplicate. The service refuses a normalised name with no character that is not whitespace, a separator, a control or an
-  invisible format mark (`400`). **`normalized_name`** is the same
+  duplicate. The service refuses (`400`) a name with a **control character anywhere in it** once trimmed (a newline at either end is trimmed away with the spaces) (PostgreSQL refuses a NUL in
+  text, which would otherwise be a `500` for a valid JSON string), and a normalised name with no character that is not
+  whitespace, a separator, an invisible format mark or one of the letters that are drawn as nothing (the Hangul fillers,
+  the blank Braille pattern). Format marks are tolerated *beside* a visible character: a joiner between letters is how
+  Persian and emoji sequences are written, so refusing them everywhere would refuse legitimate names. **`normalized_name`** is the same
   string through `ReferenceNameNormalizer` (trim, collapse whitespace, lowercase, strip accents) and carries the
   uniqueness — the reference-table pattern, see
   [recipes-domain-model.md](recipes-domain-model.md#why-a-normalized_name-column-instead-of-a-plain-unique-on-name).
@@ -121,8 +124,10 @@ success.
   insert, the foreign key refuses the insert; the thing the request names is gone, which is the `404` a retry would
   answer. The service translates that integrity violation, which can only be the foreign key since no other constraint can
   refuse this insert. The same goes for a rename that races a delete of the list: the `UPDATE` touches no row, Hibernate
-  reports an optimistic-locking failure, and the answer is `404`. Both are reproduced on purpose, inside the transaction of
-  the service, by tests that delete the row between the check and the write.
+  reports an optimistic-locking failure, and the answer is `404`. So is a delete that races another delete of the same
+  list (a double click): the loser's `DELETE` touches no row, and the service flushes inside a `try` so that the failure
+  is seen there and not at commit. All three are reproduced on purpose, inside the transaction of the service, by tests
+  that delete the row between the check and the write.
 - `DELETE` does **not** check that the recipe exists. A recipe deleted by its author disappears from every list
   (cascade), and a front that still shows it must be able to "remove" it and get the same `204` it would have had a
   second earlier. `PUT` does check: adding something that does not exist is an error. (« À valider » below.)
@@ -336,8 +341,9 @@ One request costs the same handful of statements whether the member has 2 lists 
 3. `updatedAt` is not touched by adding or removing a recipe (above).
 4. `GET /lists?containing=` answers `404` for an unknown recipe, the one `404` for a query parameter.
 5. The emoji rule refuses a text-style emoji without `U+FE0F` (`❤`) and accepts any two regional indicators as a flag.
-6. The 100-character name limit counts the string as sent, before trimming: 100 characters plus a trailing space is a
-   `400`. Bean Validation sees the raw value, and a client that trims what it sends (the front does) never notices.
+6. The 100-character name limit counts the string as sent, before trimming, and counts UTF-16 units as Java does:
+   100 characters plus a trailing space is a `400`, and so is a name of 51 emojis. Bean Validation sees the raw value,
+   and a client that trims what it sends (the front does) never notices.
 7. The problem `type`s are `urn:recettes:problem:…` identifiers, not URLs.
 8. `search_recipes` (MCP) carries `listId`, as described above.
 9. `ADDED_AT` ends with the recipe id as a tie-break, so entries added at the same instant (a bulk insert, a seed) page
@@ -351,6 +357,12 @@ One request costs the same handful of statements whether the member has 2 lists 
     member who typed it.
 12. A name must contain a visible character once normalised (above). A no-break space *between* visible characters is
     fine; a name made only of invisible ones is a `400`.
+14. **Names are compared through `ReferenceNameNormalizer`, as decided, and it strips every combining mark**, not only
+    Latin accents. For the reference tables (French food names) that is the point; for a list name in another script it
+    folds distinctions that matter: `ばら` and `はら` (dakuten), or Indic, Thai and Arabic words that differ by a vowel sign,
+    normalise to the same string, so the second is refused as a duplicate of the first. A false `409` for a legitimate,
+    different name. Narrowing the normalizer to the Latin accents would change the reference tables too, so it is not done
+    here; it is the one decision of this feature worth revisiting if lists are used in other scripts.
 13. The `maxLength: 32` of the emoji in `openapi.yaml` is in characters as OpenAPI counts them (code points), while the
     validator counts UTF-16 units, the width of what it stores. No real emoji sequence is anywhere near the difference
     (the longest recommended ones are under 20 units).

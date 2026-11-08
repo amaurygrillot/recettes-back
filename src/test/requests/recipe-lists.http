@@ -208,6 +208,40 @@ Content-Type: application/json
     });
 %}
 
+### 9b. Create a list whose name shows nothing -> 400 Bad Request
+### A no-break space, a zero-width space, a lone accent or a Hangul filler pass the blank check of the validation
+### and would leave a tile with no name. Control characters (a NUL, a line break) are refused anywhere in a name.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "\u3164",
+  "emoji": "🎂"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+###
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Ta\u0000rtes",
+  "emoji": "🎂"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
 ### 10. Create a list with no emoji -> 400 Bad Request
 ### The front proposes a default; the back requires a value.
 POST {{baseUrl}}/lists

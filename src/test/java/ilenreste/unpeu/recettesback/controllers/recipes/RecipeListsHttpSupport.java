@@ -11,6 +11,8 @@ import ilenreste.unpeu.recettesback.repositories.users.UserRolesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import ilenreste.unpeu.recettesback.support.RecipeListFixtures;
 import ilenreste.unpeu.recettesback.support.TestAccount;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +24,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -46,7 +49,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Recipes are inserted directly rather than through {@code POST /recipes}: what is under test is the lists,
  * and a recipe over HTTP needs a category, an ingredient and a step before it exists.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        // This context is not the one the other suites share (it carries the spies below), and every distinct context
+        // the suite creates stays alive for the whole run with a pool of its own, on a development PostgreSQL that
+        // allows 100 connections in all. Ten idle connections per context is how a full build runs out of them
+        // ("too many clients already") on a machine where the application and an IDE are connected too. Eight is the
+        // most this suite needs at once, for the test that sends eight identical requests together.
+        properties = "spring.datasource.hikari.maximum-pool-size=8")
 @AutoConfigureTestRestTemplate
 abstract class RecipeListsHttpSupport {
 
@@ -60,9 +69,14 @@ abstract class RecipeListsHttpSupport {
     protected TestRestTemplate restTemplate;
     @Autowired
     protected UsersRepository usersRepository;
-    @Autowired
+    /**
+     * Spied, here and not in the suites, so that both suites run in ONE application context: a spy changes the
+     * context, and two suites with different spies would be two contexts and two connection pools. Tests that stub a
+     * method do so to make a race happen on purpose; the rest see the real repository.
+     */
+    @MockitoSpyBean
     protected RecipesRepository recipesRepository;
-    @Autowired
+    @MockitoSpyBean
     protected RecipeListsRepository listsRepository;
     @Autowired
     protected MediaRepository mediaRepository;
@@ -70,6 +84,9 @@ abstract class RecipeListsHttpSupport {
     protected RecipeListEntriesRepository entriesRepository;
     @Autowired
     protected JdbcTemplate jdbc;
+    /** The transaction-bound one: used from inside a spied call, on the thread of the request. */
+    @PersistenceContext
+    protected EntityManager entityManager;
     @Autowired
     private RolesRepository rolesRepository;
     @Autowired

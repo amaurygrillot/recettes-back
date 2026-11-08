@@ -1,7 +1,7 @@
 package ilenreste.unpeu.recettesback.controllers.recipes;
 
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
-import ilenreste.unpeu.recettesback.repositories.recipes.RecipeListsRepository;
 import ilenreste.unpeu.recettesback.services.recipes.RecipeListService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -12,7 +12,6 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.JsonNode;
 
 import java.util.Collections;
@@ -22,6 +21,7 @@ import java.util.stream.Stream;
 
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -32,14 +32,12 @@ import static org.mockito.Mockito.verify;
  * who may touch it, and every status a list route can answer except the ones about the content of a list, which
  * {@link RecipeListContentIntegrationTest} has.
  * <p>
- * The repository is a spy for one reason: {@link #aNameThatPassesTheCheckButLosesTheInsert} needs the service's
- * name check to say "free" for a name that is taken, which is exactly what losing the race looks like, so that
- * the request reaches the database constraint.
+ * The repositories are spies (declared in {@link RecipeListsHttpSupport}) for two tests that make a race happen on
+ * purpose: {@link #aNameThatPassesTheCheckButLosesTheInsert} needs the name check to say "free" for a name that is
+ * taken, which is exactly what losing the race looks like, so that the request reaches the database constraint; and
+ * {@link #aListDeletedBetweenTheCheckAndTheRename_is404_notAServerError} deletes the list between that check and the write.
  */
 class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
-
-    @MockitoSpyBean
-    private RecipeListsRepository spiedLists;
 
     private static void assertProblem(ResponseEntity<String> response, HttpStatus status) {
         assertThat(response.getStatusCode()).as("%s", response.getBody()).isEqualTo(status);
@@ -327,6 +325,8 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
                 Arguments.of("a name of no-break spaces", listJson(ofCodePoints(0x00A0, 0x00A0), CAKE)),
                 Arguments.of("a name of a zero-width space", listJson(ofCodePoints(0x200B), CAKE)),
                 Arguments.of("a name that is a lone combining accent", listJson(ofCodePoints(0x0301), CAKE)),
+                Arguments.of("a name of a Hangul filler", listJson(ofCodePoints(0x3164), CAKE)),
+                Arguments.of("a name with a NUL in it", listJson("Ta" + ofCodePoints(0x0000) + "rtes", CAKE)),
                 Arguments.of("a body that is not JSON", "{"),
                 Arguments.of("an empty object", "{}"));
     }
@@ -432,11 +432,11 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
     void aNameThatPassesTheCheckButLosesTheInsert_isTheSameTypedConflictAsTheCheckGives() {
         createList("Desserts", ownerToken);
         ResponseEntity<String> byTheCheck = post("/lists", listJson("Desserts", CAKE), ownerToken);
-        doReturn(Optional.empty()).when(spiedLists).findByOwnerIdAndNormalizedName(owner.id(), "desserts");
+        doReturn(Optional.empty()).when(listsRepository).findByOwnerIdAndNormalizedName(owner.id(), "desserts");
 
         ResponseEntity<String> byTheConstraint = post("/lists", listJson("Desserts", CAKE), ownerToken);
 
-        verify(spiedLists, atLeastOnce()).findByOwnerIdAndNormalizedName(owner.id(), "desserts");
+        verify(listsRepository, atLeastOnce()).findByOwnerIdAndNormalizedName(owner.id(), "desserts");
         assertProblem(byTheConstraint, HttpStatus.CONFLICT);
         assertThat(typeOf(byTheConstraint)).isEqualTo(RecipeListConflict.NAME_TAKEN.type().toString());
         assertThat(json(byTheConstraint).path("title").asString()).isEqualTo(json(byTheCheck).path("title").asString());
@@ -481,9 +481,28 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
         doAnswer(check -> {
             jdbc.update("DELETE FROM recipe_lists WHERE id = ?", id);
             return Optional.empty();
-        }).when(spiedLists).findByOwnerIdAndNormalizedName(owner.id(), "gouters");
+        }).when(listsRepository).findByOwnerIdAndNormalizedName(owner.id(), "gouters");
 
         ResponseEntity<String> response = put("/lists/" + id, listJson("Gouters", PASTA), ownerToken);
+
+        assertProblem(response, HttpStatus.NOT_FOUND);
+    }
+
+    /**
+     * Two overlapping deletes of the same list (a double click, a retry): both pass the ownership check, and the loser's
+     * DELETE touches no row. The row is removed here, behind the back of the persistence context, at the instant
+     * the service hands the list to the repository to delete; the flush that follows is the one that finds nothing.
+     */
+    @Test
+    void aListDeletedByAnotherRequestJustBeforeThisDelete_is404_notAServerError() {
+        String id = createList("Desserts", ownerToken);
+        doAnswer(delete -> {
+            jdbc.update("DELETE FROM recipe_lists WHERE id = ?", id);
+            entityManager.remove(delete.getArgument(0));
+            return null;
+        }).when(listsRepository).delete(any(RecipeListEntity.class));
+
+        ResponseEntity<String> response = delete("/lists/" + id, ownerToken);
 
         assertProblem(response, HttpStatus.NOT_FOUND);
     }

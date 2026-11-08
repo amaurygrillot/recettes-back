@@ -39,7 +39,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * statistics count the statements it prepared. The two counts must be equal. An N+1 — a count or a mosaic read
  * per list, or a lazy owner loaded per list while mapping — would make the second larger.
  */
-@DataJpaTest(properties = "spring.jpa.properties.hibernate.generate_statistics=true")
+// Its own context (the statistics switch), kept at two connections: it runs on one thread, and every context a
+// suite creates holds its pool open for the rest of the build. See RecipeListsHttpSupport.
+@DataJpaTest(properties = {"spring.jpa.properties.hibernate.generate_statistics=true",
+        "spring.datasource.hikari.maximum-pool-size=2"})
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({JpaAuditingConfig.class, TimeConfig.class, CurrentUserService.class, RecipeListService.class,
         RecipeListMapper.class, ReferenceNameNormalizer.class})
