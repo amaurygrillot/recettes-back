@@ -368,12 +368,16 @@ Not built, and nothing is in the schema or the code for them (YAGNI). What makes
 | What                                                                                       | Where                                         |
 |----------------------------------------------------------------------------------------------|-----------------------------------------------|
 | The emoji rule, every accepted and rejected case                                             | `SingleEmojiValidatorTest`                    |
-| Every hand-written query: counts, covers, `containing`, idempotent insert, removal; the unique constraint and the primary key refusing duplicates; `listId` filter and `ADDED_AT` | `RecipeListEntriesRepositoryTest`, `RecipesRepositoryTest` (`@DataJpaTest`, real PostgreSQL) |
-| No N+1: equal statement counts for 2 and 20 lists                                           | `RecipeListServiceQueryCountTest` (`@DataJpaTest`) |
-| Deleting a list keeps the recipes; deleting a recipe empties it from every list, in the database | `RecipeListCascadeTest` (`@DataJpaTest`)  |
-| Service rules with mocked repositories: limits, idempotence, owner checks                    | `RecipeListServiceTest`                       |
-| Every route and every status, over real HTTP: another member's list, a stale or missing token, the limits, the duplicate name and its race through the database constraint | `RecipeListsIntegrationTest` (`@SpringBootTest`, `RANDOM_PORT`, `TestAccount`) |
-| The constraint-name → typed `409` mapping                                                    | `ApiExceptionHandlerTest`                     |
+| Every hand-written query: counts, covers, `containing`, idempotent insert, removal; the primary key refusing duplicates | `RecipeListEntriesRepositoryTest` (`@DataJpaTest`, real PostgreSQL) |
+| The unique name per member, named; the ordering; the 300-character normalised name; `updatedAt` | `RecipeListsRepositoryTest` (`@DataJpaTest`) |
+| The `listId` filter, its AND with the other criteria, `ADDED_AT` in both directions and per list, the count | `RecipesRepositoryTest` (`@DataJpaTest`) |
+| No N+1: equal statement counts for 2 and 20 lists, counted with Hibernate's own statistics   | `RecipeListServiceQueryCountTest` (`@DataJpaTest`) |
+| Deleting a list keeps the recipes; deleting a recipe empties it from every list; both foreign keys really are `ON DELETE CASCADE` | `RecipeListCascadeTest` (`@DataJpaTest`)  |
+| Service rules with mocked repositories: both limits at their exact boundaries, idempotence, owner checks, the order in which things are checked | `RecipeListServiceTest`, and the `listId` cases of `RecipeServiceTest` |
+| Lifecycle, privacy (member and administrator), `401` on every route without a token and with a broken one, every `400`, the three `409`s, the limit of 50, the lost name race reaching the real constraint | `RecipeListsIntegrationTest` (`@SpringBootTest`, `RANDOM_PORT`, `TestAccount`) |
+| Add and remove, eight identical adds in flight at once, the limit of 200, `containing`, the count and the mosaic, `GET /recipes?listId=` | `RecipeListContentIntegrationTest` |
+| The typed `409`s and the constraint-name → typed `409` mapping                               | `ApiExceptionHandlerTest`                     |
+| YAML and code agree; every operation answers what its `security` promises                    | `OpenApiContractTest`, `OpenApiSecurityConformanceTest` |
 | The walkthrough, success and failures                                                        | `src/test/requests/recipe-lists.http`         |
 
 The limits are asserted at their real values: 50 lists and 200 recipes are cheap to create over HTTP and through the
