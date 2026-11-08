@@ -7,7 +7,8 @@ category hierarchy, an introduction section, and named filters on the listing. C
 [api-error-handling.md](api-error-handling.md) (status codes and exception mapping),
 [optional-authentication.md](optional-authentication.md) (how public reads coexist with JWT auth),
 [category-hierarchy.md](category-hierarchy.md) (main categories and subcategories),
-[service-controller-contract.md](service-controller-contract.md) (what a controller may assume from a service).
+[service-controller-contract.md](service-controller-contract.md) (what a controller may assume from a service),
+[recipe-lists.md](recipe-lists.md) (the private lists a member files recipes into).
 
 ## What the feature is
 
@@ -33,7 +34,14 @@ erDiagram
     media ||--o{ recipe_cover_pictures : stores
     media ||--o{ recipe_step_pictures : stores
     media ||--o| ingredients : icon
+    users ||--o{ recipe_lists : owns
+    recipe_lists ||--o{ recipe_list_entries : contains
+    recipes ||--o{ recipe_list_entries : appears_in
 ```
+
+The last three relationships are the **recipe lists** — a member's private shelves of recipes — and are specified in
+[recipe-lists.md](recipe-lists.md). A recipe deleted here leaves every list it was in; a list deleted there never
+deletes a recipe.
 
 ### Reference tables (shared, unique values)
 
@@ -714,7 +722,8 @@ have one place to be named, documented and validated. The wire format is unchang
 | `tagIds`       | recipes that carry **every** one of these tags (repeat the parameter, at most 20) |
 | `tagName`      | substring of a tag's *normalized* name                              |
 | `ingredientIds`| recipes that use **every** one of these ingredients (repeat the parameter, at most 20) |
-| `sortBy`       | `CREATED_AT` (default), `UPDATED_AT` or `TITLE`                     |
+| `listId`       | recipes in that recipe list — **needs a token** (`401` without), and a list that is not the caller's is a `404`; see [recipe-lists.md](recipe-lists.md#the-content-of-a-list-is-read-through-get-recipes) |
+| `sortBy`       | `CREATED_AT` (default), `UPDATED_AT`, `TITLE`, or `ADDED_AT` (only with `listId`, and then the default) |
 | `direction`    | `ASC` or `DESC` (default)                                           |
 
 **`ingredientIds` is an AND, by design.** The search screen draws "recipes with all these ingredients": someone who
