@@ -140,14 +140,25 @@ class ApiExceptionHandlerTest {
     @ParameterizedTest
     @EnumSource(RecipeListConflict.class)
     void aRecipeListConflict_isA409_whoseTypeAndTitleTellItApartFromTheOthers(RecipeListConflict conflict) {
-        ResponseEntity<ProblemDetail> response = handler.handleRecipeListConflict(
-                new RecipeListConflictException(conflict, "Not today."));
+        RecipeListConflictException exception = switch (conflict) {
+            case NAME_TAKEN -> RecipeListConflictException.nameTaken();
+            case TOO_MANY_LISTS -> RecipeListConflictException.tooManyLists(50);
+            case LIST_FULL -> RecipeListConflictException.listFull(200);
+        };
+
+        ResponseEntity<ProblemDetail> response = handler.handleRecipeListConflict(exception);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getType()).isEqualTo(conflict.type());
         assertThat(response.getBody().getTitle()).isEqualTo(conflict.title());
-        assertThat(response.getBody().getDetail()).isEqualTo("Not today.");
+        assertThat(response.getBody().getDetail()).isEqualTo(exception.getMessage());
+    }
+
+    @Test
+    void theLimitsAreNamedInTheirConflicts() {
+        assertThat(RecipeListConflictException.tooManyLists(50).getMessage()).contains("50");
+        assertThat(RecipeListConflictException.listFull(200).getMessage()).contains("200");
     }
 
     @Test
@@ -189,6 +200,7 @@ class ApiExceptionHandlerTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getType()).isEqualTo(RecipeListConflict.NAME_TAKEN.type());
         assertThat(response.getBody().getTitle()).isEqualTo(RecipeListConflict.NAME_TAKEN.title());
+        assertThat(response.getBody().getDetail()).isEqualTo(RecipeListConflictException.nameTaken().getMessage());
     }
 
     @Test

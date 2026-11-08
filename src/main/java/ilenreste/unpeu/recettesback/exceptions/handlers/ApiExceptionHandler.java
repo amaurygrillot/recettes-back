@@ -75,9 +75,6 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     /** PostgreSQL SQLState for a unique-constraint violation. */
     private static final String UNIQUE_VIOLATION_SQL_STATE = "23505";
 
-    /** The pre-check in {@code RecipeListService} words the same conflict the same way. */
-    public static final String RECIPE_LIST_NAME_TAKEN_DETAIL = "You already have a list with that name.";
-
     @ExceptionHandler(ResourceNotFoundException.class)
     ResponseEntity<ProblemDetail> handleNotFound(ResourceNotFoundException exception) {
         log.debug("Resource not found: {}", exception.getMessage());
@@ -185,7 +182,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             log.info("A unique constraint lost a race", exception);
             return violatedConstraint(exception)
                     .filter(RecipeListEntity.UNIQUE_NAME_CONSTRAINT::equals)
-                    .map(constraint -> problem(RecipeListConflict.NAME_TAKEN, RECIPE_LIST_NAME_TAKEN_DETAIL))
+                    .map(constraint -> handleRecipeListConflict(RecipeListConflictException.nameTaken()))
                     .orElseGet(() -> problem(HttpStatus.CONFLICT, "That value already exists."));
         }
         log.error("Unexpected data integrity violation", exception);
