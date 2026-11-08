@@ -58,7 +58,7 @@ public class RecipeMcpTools {
             Integer size) {
         RecipeSearchRequest request = requestValidator.validated(
                 criteria == null
-                        ? new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null, null)
+                        ? new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null, null, null)
                         : criteria);
         log.debug("MCP search_recipes {}", request);
         return recipeService.search(request, pageOf(page, size)).getContent();

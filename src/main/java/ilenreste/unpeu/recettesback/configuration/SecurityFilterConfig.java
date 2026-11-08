@@ -84,6 +84,14 @@ public class SecurityFilterConfig {
                         // anyRequest().authenticated() below.
                         .requestMatchers(HttpMethod.POST, "/ingredients", "/media", "/recipes").hasRole("USER")
 
+                        // Recipe lists are private: every route needs a token, every method, and there is no public
+                        // read. Which list a token may touch is the service's rule (it depends on a database row),
+                        // and a list that is not the caller's answers 404. Written out although anyRequest() below
+                        // would say the same, so that a private route reads as a decision and not as the default.
+                        // The content of a list is GET /recipes?listId=, public as a route and guarded in the
+                        // service. See docs/recipe-lists.md.
+                        .requestMatchers("/lists", "/lists/**").authenticated()
+
                         // Routes that hand out credentials.
                         .requestMatchers(HttpMethod.POST, "/users/create").permitAll()
                         .requestMatchers(HttpMethod.PUT, "/users/reinit-password").permitAll()

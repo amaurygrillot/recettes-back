@@ -157,7 +157,8 @@ class OpenApiSecurityConformanceTest {
             headers.set(HttpHeaders.CONTENT_TYPE, operation.bodyType() + "; boundary=" + BOUNDARY);
         }
         String body = operation.bodyType() == null ? null : multipart ? "--" + BOUNDARY + "--\r\n" : "{";
-        String path = operation.path().replace("{id}", "no-such-" + UUID.randomUUID());
+        // Every path variable (an {id}, a {recipeId}) names nothing.
+        String path = operation.path().replaceAll("\\{[^}]+}","no-such-" + UUID.randomUUID());
         return restTemplate.exchange(path, HttpMethod.valueOf(operation.method()), new HttpEntity<>(body, headers),
                 String.class);
     }

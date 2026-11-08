@@ -17,6 +17,18 @@ Consequences:
 - Tests that create rows therefore clean up after themselves: `TestAccount`, and the `@AfterEach` of
   `UserCreationIntegrationTest`. Unique names (`test-xxxxxxxx`, `create-xxxxxxxx`) keep runs from colliding with each
   other or with real data.
+- The recipe lists suites follow the same rule with a shared base, `RecipeListsHttpSupport`, whose teardown deletes
+  lists, recipes and media before the accounts they point at, and keeps going when a step fails. They commit real rows:
+  about 100 lists in a run, and **201 recipes** for the test of the limit of 200 per list. A run killed in the middle
+  of that test leaves those recipes in the library the developer uses.
+- **Connections are a budget.** Every distinct Spring context of a run (a different `@MockitoSpyBean`, a different
+  `properties = ...`, a different `@Import`) stays alive until the JVM exits and keeps its own HikariCP pool open, ten
+  connections by default. The development PostgreSQL allows 100 (`max_connections`, 3 reserved), and the application
+  started from the IDE and the IDE's own database console hold some too. A full `./mvnw clean package` therefore sits near
+  the limit, and adding one context too many fails it with `FATAL: sorry, too many clients already`, as a context that
+  "failed to load" in whichever test happens to run next. The recipe lists suites share one context (their spies are
+  declared in `RecipeListsHttpSupport`) and cap the pools of the contexts they do create; a new suite that needs its own
+  context should do the same.
 - That cleanup is a safety net, not isolation. A run killed between the insert and the `@AfterEach` leaves a stray
   account behind, and `ReferenceDataSeeder` writes reference data into the development database on every context
   start.

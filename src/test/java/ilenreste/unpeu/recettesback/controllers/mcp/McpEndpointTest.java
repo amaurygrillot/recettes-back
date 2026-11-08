@@ -14,6 +14,7 @@ import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRe
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -173,6 +174,54 @@ class McpEndpointTest {
             ingredientsRepository.deleteById(ingredientId);
         }
         assertThat(callRaw("get_recipe", "{\"id\":\"" + recipeId + "\"}", token)).contains("\"isError\":true");
+    }
+
+    /**
+     * There is no tool for recipe lists, but {@code search_recipes} takes the same criteria as {@code GET /recipes}, so
+     * it carries {@code listId}. It obeys the REST rules (docs/mcp-server.md): an administrator reads the content of
+     * their OWN lists, another member's list is "not found" whoever asks, and {@code ADDED_AT} needs a list.
+     */
+    @Test
+    void searchRecipesTakesAListId_butNeverOpensAnotherMembersList() {
+        String adminToken = account.bearerToken(restTemplate);
+        TestAccount member = TestAccount.create(usersRepository, rolesRepository, userRolesRepository, passwordEncoder, "USER");
+        String adminListId = null;
+        String memberListId = null;
+        try {
+            adminListId = createList("Mcp admin shelf", adminToken);
+            memberListId = createList("Mcp member shelf", member.bearerToken(restTemplate));
+
+            assertThat(callRaw("search_recipes", "{\"criteria\":{\"listId\":\"" + adminListId + "\"}}", adminToken))
+                    .as("the administrator's own list").doesNotContain("\"isError\":true");
+            assertThat(callRaw("search_recipes", "{\"criteria\":{\"listId\":\"" + memberListId + "\"}}", adminToken))
+                    .as("somebody else's list, administrator or not").contains("\"isError\":true")
+                    .contains("No recipe list with id " + memberListId);
+            assertThat(callRaw("search_recipes", "{\"criteria\":{\"sortBy\":\"ADDED_AT\"}}", adminToken))
+                    .as("ADDED_AT without a list").contains("\"isError\":true").contains("ADDED_AT");
+        } finally {
+            deleteList(adminListId, adminToken);
+            deleteList(memberListId, member.bearerToken(restTemplate));
+            member.close();
+        }
+    }
+
+    private String createList(String name, String token) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set(HttpHeaders.AUTHORIZATION, token);
+        String body = "{\"name\":\"" + name + "\",\"emoji\":\"" + new String(Character.toChars(0x1F382)) + "\"}";
+        ResponseEntity<String> created = restTemplate.postForEntity("/lists", new HttpEntity<>(body, headers), String.class);
+        assertThat(created.getStatusCode().value()).as("POST /lists -> %s", created.getBody()).isEqualTo(201);
+        return json.readTree(created.getBody()).get("id").asString();
+    }
+
+    private void deleteList(String id, String token) {
+        if (id == null) {
+            return;
+        }
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.AUTHORIZATION, token);
+        restTemplate.exchange("/lists/" + id, HttpMethod.DELETE, new HttpEntity<>(headers), String.class);
     }
 
     /** The decoded JSON a tool returned, failing the test if it reported an error. */

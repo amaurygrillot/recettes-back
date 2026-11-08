@@ -32,7 +32,16 @@ public enum RecipeSortField {
      * collation and forcing {@code LOWER(title)} here would throw away any index
      * a future deployment adds for exactly this order.
      */
-    TITLE("title");
+    TITLE("title"),
+
+    /**
+     * When the recipe was added to the list named by {@code listId} — the one sort that is not a column of the
+     * recipe. Its path is on the join alias {@code e} of {@code RecipesRepository.searchIds}, which is only the
+     * list's entry when a {@code listId} is given: <strong>valid only with {@code listId}</strong>, and
+     * {@link RecipeSearchRequest#sort()} refuses it otherwise (a 400), because without a list there is no entry
+     * for it to mean. It is also the default order, newest first, once a {@code listId} is given.
+     */
+    ADDED_AT("e.addedAt");
 
     private final String property;
 

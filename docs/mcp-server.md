@@ -46,6 +46,15 @@ API — there is no second deployable.
 | `create_ingredient` | | |
 | `create_/update_/delete_` `category`, `tag`, `unit`; `update_/delete_ingredient` | admin only (`AdminReferenceMcpTools`) | delete is destructive |
 
+## Recipe lists are not offered
+
+There is **no tool for the recipe lists** ([recipe-lists.md](recipe-lists.md)). They are private to each member with no
+administrator bypass, and this server is an administrator's tool for curating the shared library: a list tool would
+either expose only the administrator's own lists, which nobody asked for, or need the bypass the rules forbid. One
+trace is visible, because `search_recipes` takes the same `RecipeSearchRequest` as the REST search: its schema carries
+`listId` and `sortBy=ADDED_AT`. They obey the REST rules — an administrator can read the recipes of *their own* lists,
+and any other member's list is "not found".
+
 ## Schema gotcha: optional fields
 
 The tool input schema is generated from the request records, and the generator treats **every record component as

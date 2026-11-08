@@ -78,6 +78,11 @@ public class RecipeController implements RecipesApi {
      * {@code ?sort=author.password} orders by a column no response exposes.
      * {@code sortBy} is an enum instead, and an unknown value is a 400. See
      * {@code RecipeSortField}.
+     * <p>
+     * The route stays public, and so does every criterion but one: {@code listId}, the content of one of the
+     * caller's recipe lists. Without a token it is a 401, and a list that is not the caller's is a 404; both are
+     * raised by the service, which is the only place that knows who may see a list. See
+     * {@code docs/recipe-lists.md}.
      */
     @Operation(operationId = "searchRecipes", tags = "Recipes", summary = "Search recipes",
             responses = {
@@ -85,6 +90,14 @@ public class RecipeController implements RecipesApi {
                     // Page<T> can be described. It labels the body */*, as there is no produces; OpenApiConfig corrects it.
                     @ApiResponse(responseCode = "200", description = "A page of recipe summaries."),
                     @ApiResponse(responseCode = "400", description = "Invalid input.",
+                            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                    schema = @Schema(implementation = ProblemDetail.class))),
+                    @ApiResponse(responseCode = "401",
+                            description = "listId was given without a valid token. Only that criterion needs one.",
+                            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                    schema = @Schema(implementation = ProblemDetail.class))),
+                    @ApiResponse(responseCode = "404",
+                            description = "listId names a recipe list that does not exist or belongs to someone else.",
                             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
                                     schema = @Schema(implementation = ProblemDetail.class)))})
     @GetMapping("/recipes")

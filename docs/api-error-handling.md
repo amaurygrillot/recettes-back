@@ -57,6 +57,48 @@ detail names the offending field and id so the client can act on it.
 wrong — and rejected to keep the status list in `CLAUDE.md` short and unambiguous, since 400 already covers "the input
 is wrong" for every client that matters here.
 
+### Three `409`s the client has to tell apart — recipe lists
+
+Every `409` above is a conflict whose `detail` is enough for a person. The recipe lists
+([recipe-lists.md](recipe-lists.md)) add three conflicts that a *program* has to react to differently — « ce nom est
+déjà pris » beside the name field, « tu as atteint 50 listes » as a banner, « cette liste est pleine » on the sheet — and
+which must not be told apart by parsing English. They share the status and differ in the RFC 9457 `type` and `title`:
+
+| Condition                                                | `type`                                        | `title`                         |
+|----------------------------------------------------------|-----------------------------------------------|---------------------------------|
+| another list of the same member has that name            | `urn:recettes:problem:recipe-list-name-taken` | Recipe list name already used   |
+| the member already has 50 lists                           | `urn:recettes:problem:too-many-recipe-lists`  | Too many recipe lists           |
+| the list already has 200 recipes, and this one is not in it | `urn:recettes:problem:recipe-list-full`     | Recipe list is full             |
+
+They are thrown as `RecipeListConflictException`, a `ResourceConflictException` carrying a `RecipeListConflict` (the
+type and title), and answered by their own `@ExceptionHandler` in `ApiExceptionHandler` — more specific than the generic
+conflict handler, in the same class, so no `@Order` question arises. Every other `409` keeps `about:blank`.
+
+The `type` is a `urn:`, not a URL: it identifies the failure and nothing serves a page at it.
+
+**The lost race is typed too.** The name is checked by the service first and guarded by a database constraint
+(`uk_recipe_lists_owner_normalized_name`); a request that loses the race between the two reaches
+`handleDataIntegrityViolation` as a unique violation. That handler recognises this constraint *by name* and answers the
+same `recipe-list-name-taken` problem as the pre-check, instead of the generic `409 "That value already exists."` — the
+client should not get a different answer to the same mistake depending on a few milliseconds.
+
+The name is looked for **in the messages of the cause chain**, and not read from Hibernate's
+`ConstraintViolationException.getConstraintName()`. Hibernate extracts it by matching the English wording of the
+server's message (`violates unique constraint "x"`), so against a localised server (the development PostgreSQL answers
+`rompt la contrainte unique « x »` on some connections) it returns nothing and the typed conflict silently becomes the
+untyped one — a failure that only showed on the machine whose language differs, and as a test that failed only when
+three suites ran together. The identifier is the one part of the message that is the same in every language; the branch
+itself is selected by the SQLState (`23505`), which is not worded at all.
+
+The limits are `409`, not `400`/`403`/`429`: the request is valid and allowed, and it is the existing state that forbids
+it (`400` is for malformed input, `403` for a role, `429` for a rate over time — a member who deletes a list may create
+one straight away).
+
+Two `404`s on the lists are worth stating here, because both sit slightly outside the rule that `404` describes the
+request target: a list that belongs to someone else is a `404`, never a `403` (a `403` would confirm the id exists), and
+an unknown recipe in `GET /lists?containing=` is a `404` although it is a query parameter, because the request is *about*
+that recipe.
+
 ## Two layers of handlers
 
 Per your decision: one global advice for the generic mapping, plus targeted advices where an endpoint family needs

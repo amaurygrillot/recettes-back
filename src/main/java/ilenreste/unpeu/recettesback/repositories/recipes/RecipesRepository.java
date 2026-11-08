@@ -81,10 +81,24 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
      *                         recipe uses and comparing with this is what makes the filter an
      *                         AND, still in one row per recipe; an unknown id can never be
      *                         found, so it matches nothing, as it should
+     * @param listId           keeps only the recipes that are in this recipe list, or null for no list
+     *                         filter. <strong>Whether the caller may see that list is not decided
+     *                         here</strong> — {@code RecipeListService} answers it before this runs, so the
+     *                         rule has one home. See "Why the list is a join" below
+     *
+     * <h2>Why the list is a join, and why that is safe here</h2>
+     * Every other to-many criterion above is an {@code EXISTS}, because a join onto a collection yields one
+     * row per match. This one is a join on purpose: {@code ADDED_AT} orders by <em>that list's</em> entry, and a
+     * sort can only name a path, not a subquery. It is safe because the join is on the whole primary key of
+     * the entry ({@code list_id, recipe_id}), so it yields at most one row per recipe — the duplicate-row
+     * trap cannot occur, and the derived {@code COUNT} stays correct. With no {@code listId} the join matches
+     * nothing and costs one index probe per row.
      */
     @Query("""
             SELECT r.id FROM RecipeEntity r
+            LEFT JOIN RecipeListEntryEntity e ON e.recipe = r AND e.list.id = :listId
             WHERE (:authorId IS NULL OR r.author.id = :authorId)
+              AND (:listId IS NULL OR e.list.id IS NOT NULL)
               AND (:filterByCategory = FALSE
                    OR EXISTS (SELECT 1 FROM r.categories c WHERE c.id IN :categoryIds))
               AND (:tagCount = 0
@@ -111,6 +125,7 @@ public interface RecipesRepository extends JpaRepository<RecipeEntity, String> {
                            @Param("tagName") String tagName,
                            @Param("ingredientIds") Collection<String> ingredientIds,
                            @Param("ingredientCount") long ingredientCount,
+                           @Param("listId") String listId,
                            Pageable pageable);
 
     /**

@@ -211,6 +211,10 @@ decision, not a side effect.
 - **`RecipeIntroductionRequest.isBlank()`** looked like a bean getter, so the served schema listed a `blank` property
   nobody sends or receives. It is `@JsonIgnore`d. The MCP tools' input schema, built by a different generator, never
   listed it, with or without the annotation; `McpEndpointTest` pins that.
+- **An optional query parameter with no default** (`GET /lists?containing=`, the first of its kind) is generated with
+  Spring's `@Nullable`, which springdoc serves the OpenAPI 3.1 way, as `"type": ["string","null"]`. The `null` member says
+  the value may be absent, which is already the `optional` fact of the parameter, so `OpenApiFacts` ignores it when it
+  reads a type; without that the parameter read as an `object` and looked like drift.
 - **`ProblemDetail`** is mapped onto Spring's own class, which Jackson flattens with a mixin that springdoc's reflection
   does not see, so the served schema has a `properties` member the wire does not. The contract test skips that one
   schema; the wire shape is asserted by the integration tests that read real error bodies.

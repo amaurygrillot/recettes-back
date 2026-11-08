@@ -1,13 +1,18 @@
 package ilenreste.unpeu.recettesback.exceptions.handlers;
 
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
 import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
+import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
+import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -29,6 +34,11 @@ class ApiExceptionHandlerTest {
         MockHttpServletRequest request = new MockHttpServletRequest("POST", uri);
         request.setRequestURI(uri);
         return request;
+    }
+
+    /** An untyped problem has no {@code type} (null here) or {@code about:blank}: the same thing on the wire. */
+    private static String typeOf(ProblemDetail problem) {
+        return problem.getType() == null ? "about:blank" : problem.getType().toString();
     }
 
     @Test
@@ -124,6 +134,123 @@ class ApiExceptionHandlerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getDetail()).isEqualTo("That value already exists.");
+    }
+
+    @ParameterizedTest
+    @EnumSource(RecipeListConflict.class)
+    void aRecipeListConflict_isA409_whoseTypeAndTitleTellItApartFromTheOthers(RecipeListConflict conflict) {
+        RecipeListConflictException exception = switch (conflict) {
+            case NAME_TAKEN -> RecipeListConflictException.nameTaken();
+            case TOO_MANY_LISTS -> RecipeListConflictException.tooManyLists(50);
+            case LIST_FULL -> RecipeListConflictException.listFull(200);
+        };
+
+        ResponseEntity<ProblemDetail> response = handler.handleRecipeListConflict(exception);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getType()).isEqualTo(conflict.type());
+        assertThat(response.getBody().getTitle()).isEqualTo(conflict.title());
+        assertThat(response.getBody().getDetail()).isEqualTo(exception.getMessage());
+    }
+
+    @Test
+    void theLimitsAreNamedInTheirConflicts() {
+        assertThat(RecipeListConflictException.tooManyLists(50).getMessage()).contains("50");
+        assertThat(RecipeListConflictException.listFull(200).getMessage()).contains("200");
+    }
+
+    @Test
+    void theThreeRecipeListConflictsHaveDistinctTypesAndTitles() {
+        assertThat(RecipeListConflict.values()).extracting(RecipeListConflict::type).doesNotHaveDuplicates();
+        assertThat(RecipeListConflict.values()).extracting(RecipeListConflict::title).doesNotHaveDuplicates();
+        assertThat(RecipeListConflict.NAME_TAKEN.type())
+                .hasToString("urn:recettes:problem:recipe-list-name-taken");
+        assertThat(RecipeListConflict.TOO_MANY_LISTS.type())
+                .hasToString("urn:recettes:problem:too-many-recipe-lists");
+        assertThat(RecipeListConflict.LIST_FULL.type())
+                .hasToString("urn:recettes:problem:recipe-list-full");
+    }
+
+    @Test
+    void anOrdinaryConflict_keepsTheGenericTypeAndTitle() {
+        ResponseEntity<ProblemDetail> response =
+                handler.handleConflict(new ResourceConflictException("Tag is still in use"));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(typeOf(response.getBody())).isEqualTo("about:blank");
+        assertThat(response.getBody().getTitle()).isEqualTo("Conflict");
+    }
+
+    /**
+     * The service checks the name first and the database constraint covers the race. The request that loses
+     * the race has to get the answer the pre-check gives, or the client sees an untyped conflict on the one
+     * route where it already knows what the conflict is.
+     */
+    @Test
+    void theRecipeListNameConstraintLosingARace_answersTheSameTypedConflictAsThePreCheck() {
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(
+                uniqueViolation("duplicate key value violates unique constraint \"%s\""
+                        .formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT)));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getType()).isEqualTo(RecipeListConflict.NAME_TAKEN.type());
+        assertThat(response.getBody().getTitle()).isEqualTo(RecipeListConflict.NAME_TAKEN.title());
+        assertThat(response.getBody().getDetail()).isEqualTo(RecipeListConflictException.nameTaken().getMessage());
+    }
+
+    /**
+     * The failure that only showed on a machine whose language differs: Hibernate reads the constraint name out of
+     * the ENGLISH wording of the message, so a localised server gave it nothing and the typed conflict degraded to
+     * the untyped one. The identifier is the same in every language; the handler looks for that.
+     */
+    @Test
+    void theRecipeListNameConstraint_isRecognisedWhateverLanguageTheServerSpeaks() {
+        String french = "ERREUR: la valeur d'une cl\u00e9 dupliqu\u00e9e rompt la contrainte unique \u00ab %s \u00bb"
+                .formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT);
+        String german = "FEHLER: doppelter Schl\u00fcsselwert verletzt Unique-Constraint \u00bb%s\u00ab"
+                .formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT);
+
+        for (String message : List.of(french, german)) {
+            ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(uniqueViolation(message));
+
+            assertThat(response.getBody()).isNotNull();
+            assertThat(response.getBody().getType()).as(message).isEqualTo(RecipeListConflict.NAME_TAKEN.type());
+        }
+    }
+
+    /**
+     * The server follows the violated constraint with a Detail line holding the value that collided, which the caller
+     * chose. An ingredient named like our constraint must not turn its own collision into a recipe list one.
+     */
+    @Test
+    void aValueThatIsCalledLikeTheConstraint_doesNotMakeAnotherCollisionARecipeListOne() {
+        String message = "duplicate key value violates unique constraint \"ingredients_normalized_name_key\"\n"
+                + "  Detail: Key (normalized_name)=(%s) already exists.".formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT);
+
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(uniqueViolation(message));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(typeOf(response.getBody())).isEqualTo("about:blank");
+        assertThat(response.getBody().getDetail()).isEqualTo("That value already exists.");
+    }
+
+    @Test
+    void anotherUniqueConstraintLosingARace_staysTheGenericConflict() {
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(
+                uniqueViolation("duplicate key value violates unique constraint \"uk_something_else\""));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(typeOf(response.getBody())).isEqualTo("about:blank");
+        assertThat(response.getBody().getDetail()).isEqualTo("That value already exists.");
+    }
+
+    /** What Spring throws for a unique violation: the wrapper, over the driver's exception, whose SQLState is 23505. */
+    private static DataIntegrityViolationException uniqueViolation(String driverMessage) {
+        return new DataIntegrityViolationException("could not execute statement",
+                new RuntimeException("hibernate wrapper", new SQLException(driverMessage, "23505")));
     }
 
     @Test

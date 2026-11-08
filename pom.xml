@@ -235,6 +235,8 @@
                                 <schemaMapping>CreateRecipeRequest=ilenreste.unpeu.recettesback.models.recipes.requests.CreateRecipeRequest</schemaMapping>
                                 <schemaMapping>UpdateRecipeRequest=ilenreste.unpeu.recettesback.models.recipes.requests.UpdateRecipeRequest</schemaMapping>
                                 <schemaMapping>RecipeResponse=ilenreste.unpeu.recettesback.models.recipes.responses.RecipeResponse</schemaMapping>
+                                <schemaMapping>RecipeListRequest=ilenreste.unpeu.recettesback.models.recipes.requests.RecipeListRequest</schemaMapping>
+                                <schemaMapping>RecipeListResponse=ilenreste.unpeu.recettesback.models.recipes.responses.RecipeListResponse</schemaMapping>
                                 <schemaMapping>CategoryRequest=ilenreste.unpeu.recettesback.models.reference.requests.CategoryRequest</schemaMapping>
                                 <schemaMapping>TagRequest=ilenreste.unpeu.recettesback.models.reference.requests.TagRequest</schemaMapping>
                                 <schemaMapping>UnitRequest=ilenreste.unpeu.recettesback.models.reference.requests.UnitRequest</schemaMapping>

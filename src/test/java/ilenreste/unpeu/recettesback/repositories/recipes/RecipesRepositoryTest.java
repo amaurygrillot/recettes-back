@@ -4,6 +4,7 @@ import ilenreste.unpeu.recettesback.configuration.JpaAuditingConfig;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeIngredientGroupEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeStepEntity;
 import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
@@ -11,11 +12,15 @@ import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
 import ilenreste.unpeu.recettesback.entities.reference.TagEntity;
 import ilenreste.unpeu.recettesback.entities.reference.UnitEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSearchRequest;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSortField;
+import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.CategoriesRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.IngredientsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.TagsRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.UnitsRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
+import ilenreste.unpeu.recettesback.support.RecipeListFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +37,7 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -66,7 +72,14 @@ class RecipesRepositoryTest {
     private IngredientsRepository ingredientsRepository;
     @Autowired
     private UsersRepository usersRepository;
+    @Autowired
+    private MediaRepository mediaRepository;
+    @Autowired
+    private RecipeListsRepository listsRepository;
+    @Autowired
+    private RecipeListEntriesRepository entriesRepository;
 
+    private RecipeListFixtures fixtures;
     private UserEntity author;
     private UserEntity otherAuthor;
 
@@ -75,6 +88,8 @@ class RecipesRepositoryTest {
         author = persistUser("author");
         otherAuthor = persistUser("other");
         authenticateAs(author);
+        fixtures = new RecipeListFixtures(usersRepository, recipesRepository, mediaRepository, listsRepository,
+                entriesRepository);
     }
 
     @AfterEach
@@ -168,7 +183,7 @@ class RecipesRepositoryTest {
     private Page<String> usingAll(IngredientEntity... ingredients) {
         List<String> ids = java.util.Arrays.stream(ingredients).map(IngredientEntity::getId).toList();
         return recipesRepository.searchIds(
-                null, null, null, false, List.of(), List.of(), 0, null, ids, ids.size(), firstPage());
+                null, null, null, false, List.of(), List.of(), 0, null, ids, ids.size(), null, firstPage());
     }
 
     /** Only the tag filter on, as the service would have set it. */
@@ -178,7 +193,7 @@ class RecipesRepositoryTest {
 
     private Page<String> carryingAllIds(List<String> tagIds) {
         return recipesRepository.searchIds(
-                null, null, null, false, List.of(), tagIds, tagIds.size(), null, List.of(), 0, firstPage());
+                null, null, null, false, List.of(), tagIds, tagIds.size(), null, List.of(), 0, null, firstPage());
     }
 
     private PageRequest firstPage() {
@@ -187,7 +202,7 @@ class RecipesRepositoryTest {
 
     /** Only the category filter on, with the id set the service would have resolved. */
     private Page<String> inCategories(java.util.Collection<String> categoryIds) {
-        return recipesRepository.searchIds(null, null, null, true, categoryIds, List.of(), 0, null, List.of(), 0,
+        return recipesRepository.searchIds(null, null, null, true, categoryIds, List.of(), 0, null, List.of(), 0, null,
                 firstPage());
     }
 
@@ -216,7 +231,7 @@ class RecipesRepositoryTest {
         recipe("Soupe", List.of(category("entree")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of(), List.of(), 0, null, List.of(), 0, firstPage());
+                null, null, null, false, List.of(), List.of(), 0, null, List.of(), 0, null, firstPage());
 
         assertThat(page.getTotalElements()).isGreaterThanOrEqualTo(2);
     }
@@ -276,7 +291,7 @@ class RecipesRepositoryTest {
         recipe("Theirs", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, author.getId(), null, false, List.of(), List.of(), 0, null, List.of(), 0, firstPage());
+                null, author.getId(), null, false, List.of(), List.of(), 0, null, List.of(), 0, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(mine.getId());
     }
@@ -291,7 +306,7 @@ class RecipesRepositoryTest {
         recipe("Soupe a l'oignon", List.of(category("entree")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                fragment, null, null, false, List.of(), List.of(), 0, null, List.of(), 0, firstPage());
+                fragment, null, null, false, List.of(), List.of(), 0, null, List.of(), 0, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(tarte.getId());
     }
@@ -306,7 +321,7 @@ class RecipesRepositoryTest {
 
         Page<String> page = recipesRepository.searchIds(
                 "tarte", author.getId(), null, true, List.of(dessert.getId()), List.of(rapide.getId()), 1, null,
-                List.of(), 0, firstPage());
+                List.of(), 0, null, firstPage());
 
         assertThat(page.getContent()).containsExactly(wanted.getId());
     }
@@ -318,7 +333,7 @@ class RecipesRepositoryTest {
         recipe("Steak", List.of(category("plat")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of(), List.of(), 0, rapide.getNormalizedName(), List.of(), 0,
+                null, null, null, false, List.of(), List.of(), 0, rapide.getNormalizedName(), List.of(), 0, null,
                 firstPage());
 
         assertThat(page.getContent()).containsExactly(soupe.getId());
@@ -332,7 +347,7 @@ class RecipesRepositoryTest {
 
         Page<String> page = recipesRepository.searchIds(
                 null, null, author.getUsername().toUpperCase(java.util.Locale.ROOT), false, List.of(),
-                List.of(), 0, null, List.of(), 0, firstPage());
+                List.of(), 0, null, List.of(), 0, null, firstPage());
 
         assertThat(page.getContent()).contains(mine.getId());
     }
@@ -384,7 +399,7 @@ class RecipesRepositoryTest {
         recipeUsing("Tarte", ingredient("pommes"));
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of(), List.of(), 0, null, List.of("no-such-ingredient"), 1,
+                null, null, null, false, List.of(), List.of(), 0, null, List.of("no-such-ingredient"), 1, null,
                 firstPage());
 
         assertThat(page.getTotalElements()).isZero();
@@ -397,7 +412,7 @@ class RecipesRepositoryTest {
         recipeUsing("Compote de pommes", pommes);
 
         Page<String> page = recipesRepository.searchIds(
-                "tarte", null, null, false, List.of(), List.of(), 0, null, List.of(pommes.getId()), 1,
+                "tarte", null, null, false, List.of(), List.of(), 0, null, List.of(pommes.getId()), 1, null,
                 firstPage());
 
         assertThat(page.getContent()).containsExactly(tarte.getId());
@@ -457,7 +472,7 @@ class RecipesRepositoryTest {
         RecipeEntity tarte = recipe("Tarte", List.of(category("dessert")), List.of());
 
         Page<String> page = recipesRepository.searchIds(
-                null, null, null, false, List.of("no-such-category"), List.of(), 0, null, List.of(), 0,
+                null, null, null, false, List.of("no-such-category"), List.of(), 0, null, List.of(), 0, null,
                 firstPage());
 
         assertThat(page.getContent()).contains(tarte.getId());
@@ -475,7 +490,7 @@ class RecipesRepositoryTest {
         RecipeEntity a = recipe(prefix + "-A", List.of(dessert), List.of());
 
         Page<String> page = recipesRepository.searchIds(prefix, null, null, false, List.of(), List.of(), 0, null,
-                List.of(), 0, PageRequest.of(0, 20, Sort.by(Sort.Direction.ASC, "title")));
+                List.of(), 0, null, PageRequest.of(0, 20, Sort.by(Sort.Direction.ASC, "title")));
 
         assertThat(page.getContent()).containsExactly(a.getId(), b.getId());
     }
@@ -587,5 +602,193 @@ class RecipesRepositoryTest {
         // containsExactly, not containsExactlyInAnyOrder: a shuffle must fail this.
         assertThat(reloaded.getSteps()).extracting(RecipeStepEntity::getInstruction)
                 .containsExactlyElementsOf(instructions);
+    }
+
+    // ------------------------------------------------------------------------------------- recipe lists
+
+    private static final Instant NOON = Instant.parse("2026-11-08T12:00:00Z");
+
+    /** Only the list criterion on, with the given ordering, as the service would have set it. */
+    private Page<String> inList(RecipeListEntity list, Sort sort, int page, int size) {
+        return recipesRepository.searchIds(
+                null, null, null, false, List.of(), List.of(), 0, null, List.of(), 0, list.getId(),
+                PageRequest.of(page, size, sort));
+    }
+
+    private Page<String> inList(RecipeListEntity list) {
+        return inList(list, Sort.by(Sort.Direction.DESC, RecipeSortField.ADDED_AT.property()), 0, 20);
+    }
+
+    private RecipeListEntity listOfTheAuthor(String name) {
+        return fixtures.list(author, name);
+    }
+
+    @Test
+    void filtersByList_keepingOnlyTheRecipesThatAreInIt() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        RecipeEntity inIt = recipe("Tarte", List.of(category("dessert")), List.of());
+        RecipeEntity alsoInIt = recipe("Soupe", List.of(category("entree")), List.of());
+        recipe("Steak", List.of(category("plat")), List.of());
+        fixtures.put(list, inIt, NOON);
+        fixtures.put(list, alsoInIt, NOON.plusSeconds(1));
+
+        Page<String> page = inList(list);
+
+        assertThat(page.getContent()).containsExactlyInAnyOrder(inIt.getId(), alsoInIt.getId());
+        assertThat(page.getTotalElements()).isEqualTo(2);
+    }
+
+    /**
+     * The join that makes ADDED_AT possible must stay one row per recipe, or the page shows a recipe once per
+     * list it is in and the count lies. It joins on the whole primary key of the entry, so it does.
+     */
+    @Test
+    void aRecipeInSeveralLists_isListedOnce_andOneListDoesNotLeakIntoAnother() {
+        RecipeListEntity dimanche = listOfTheAuthor("Dimanche");
+        RecipeListEntity gouters = listOfTheAuthor("Gouters");
+        RecipeEntity inBoth = recipe("Tarte", List.of(category("dessert")), List.of());
+        RecipeEntity onlyGouters = recipe("Cake", List.of(category("dessert")), List.of());
+        fixtures.put(dimanche, inBoth, NOON);
+        fixtures.put(gouters, inBoth, NOON);
+        fixtures.put(gouters, onlyGouters, NOON.plusSeconds(1));
+
+        Page<String> inDimanche = inList(dimanche);
+        Page<String> inGouters = inList(gouters);
+
+        assertThat(inDimanche.getContent()).containsExactly(inBoth.getId());
+        assertThat(inDimanche.getTotalElements()).isEqualTo(1);
+        assertThat(inGouters.getContent()).containsExactly(onlyGouters.getId(), inBoth.getId());
+        assertThat(inGouters.getTotalElements()).isEqualTo(2);
+    }
+
+    @Test
+    void aListThatHoldsNothingMatchesNothing_ratherThanTheWholeLibrary() {
+        recipe("Tarte", List.of(category("dessert")), List.of());
+
+        Page<String> page = inList(listOfTheAuthor("Vide"));
+
+        assertThat(page.getContent()).isEmpty();
+        assertThat(page.getTotalElements()).isZero();
+    }
+
+    @Test
+    void theListCriterionIsAnAnd_withTheOtherOnes() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        TagEntity vegetarien = tag("vegetarien");
+        RecipeEntity soupe = recipe("Soupe", List.of(category("entree")), List.of(vegetarien));
+        RecipeEntity steak = recipe("Steak", List.of(category("plat")), List.of());
+        RecipeEntity vegetarianButNotInTheList = recipe("Salade", List.of(category("entree")), List.of(vegetarien));
+        fixtures.put(list, soupe, NOON);
+        fixtures.put(list, steak, NOON);
+
+        Page<String> page = recipesRepository.searchIds(null, null, null, false, List.of(),
+                List.of(vegetarien.getId()), 1, null, List.of(), 0, list.getId(), firstPage());
+
+        assertThat(page.getContent()).containsExactly(soupe.getId());
+        assertThat(page.getContent()).doesNotContain(vegetarianButNotInTheList.getId(), steak.getId());
+    }
+
+    /** What the default order of a list is for: the recipe added last comes first, and the direction flips it. */
+    @Test
+    void orderedByWhenTheyWereAdded_newestFirst_andOldestFirstWhenAscending() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        RecipeEntity first = recipe("Zebre", List.of(category("plat")), List.of());
+        RecipeEntity second = recipe("Abricot", List.of(category("plat")), List.of());
+        RecipeEntity third = recipe("Mangue", List.of(category("plat")), List.of());
+        // Added in a different order from their creation and from their titles, so no other column explains it.
+        fixtures.put(list, second, NOON);
+        fixtures.put(list, third, NOON.plusSeconds(60));
+        fixtures.put(list, first, NOON.plusSeconds(120));
+
+        Sort newestFirst = Sort.by(Sort.Direction.DESC, RecipeSortField.ADDED_AT.property());
+        Sort oldestFirst = Sort.by(Sort.Direction.ASC, RecipeSortField.ADDED_AT.property());
+
+        assertThat(inList(list, newestFirst, 0, 20).getContent())
+                .containsExactly(first.getId(), third.getId(), second.getId());
+        assertThat(inList(list, oldestFirst, 0, 20).getContent())
+                .containsExactly(second.getId(), third.getId(), first.getId());
+    }
+
+    @Test
+    void theAddedAtOrderBelongsToTheListAsked_notToTheRecipe() {
+        RecipeListEntity dimanche = listOfTheAuthor("Dimanche");
+        RecipeListEntity gouters = listOfTheAuthor("Gouters");
+        RecipeEntity tarte = recipe("Tarte", List.of(category("dessert")), List.of());
+        RecipeEntity cake = recipe("Cake", List.of(category("dessert")), List.of());
+        // In one list the tarte was added last, in the other the cake was.
+        fixtures.put(dimanche, cake, NOON);
+        fixtures.put(dimanche, tarte, NOON.plusSeconds(60));
+        fixtures.put(gouters, tarte, NOON);
+        fixtures.put(gouters, cake, NOON.plusSeconds(60));
+
+        assertThat(inList(dimanche).getContent()).containsExactly(tarte.getId(), cake.getId());
+        assertThat(inList(gouters).getContent()).containsExactly(cake.getId(), tarte.getId());
+    }
+
+    /**
+     * Entries added at the same instant (a bulk insert, a seed) would otherwise page in an unspecified order, and a
+     * recipe could appear on two pages while another appeared on none. The sort the request builds ends with the
+     * recipe id, so the order is total.
+     */
+    @Test
+    void recipesAddedAtTheSameInstant_pageWithoutRepeatsOrGaps_inRecipeIdOrder() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        List<String> ids = new ArrayList<>();
+        for (int index = 0; index < 5; index++) {
+            RecipeEntity recipe = recipe("Recette " + index, List.of(category("plat")), List.of());
+            fixtures.put(list, recipe, NOON);
+            ids.add(recipe.getId());
+        }
+        Sort sort = new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, list.getId(), null,
+                null).sort();
+
+        List<String> seen = new ArrayList<>();
+        for (int page = 0; page < 3; page++) {
+            seen.addAll(inList(list, sort, page, 2).getContent());
+        }
+
+        assertThat(seen).containsExactlyElementsOf(ids.stream().sorted().toList());
+    }
+
+    @Test
+    void anotherSortStillWorksInsideAList() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        RecipeEntity zebre = recipe("Zebre", List.of(category("plat")), List.of());
+        RecipeEntity abricot = recipe("Abricot", List.of(category("plat")), List.of());
+        fixtures.put(list, zebre, NOON);
+        fixtures.put(list, abricot, NOON.plusSeconds(60));
+
+        Page<String> page = inList(list, Sort.by(Sort.Direction.ASC, RecipeSortField.TITLE.property()), 0, 20);
+
+        assertThat(page.getContent()).containsExactly(abricot.getId(), zebre.getId());
+    }
+
+    @Test
+    void pagesAList_withACorrectTotal() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        for (int minute = 0; minute < 5; minute++) {
+            fixtures.put(list, recipe("Recette " + minute, List.of(category("plat")), List.of()),
+                    NOON.plusSeconds(60L * minute));
+        }
+        Sort newestFirst = Sort.by(Sort.Direction.DESC, RecipeSortField.ADDED_AT.property());
+
+        Page<String> lastPage = inList(list, newestFirst, 2, 2);
+
+        assertThat(lastPage.getTotalElements()).isEqualTo(5);
+        assertThat(lastPage.getTotalPages()).isEqualTo(3);
+        assertThat(lastPage.getContent()).hasSize(1);
+    }
+
+    @Test
+    void noListCriterion_leavesTheListingAsItWas() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        RecipeEntity inAList = recipe("Tarte", List.of(category("dessert")), List.of());
+        RecipeEntity inNoList = recipe("Soupe", List.of(category("entree")), List.of());
+        fixtures.put(list, inAList, NOON);
+
+        Page<String> page = recipesRepository.searchIds(
+                null, null, null, false, List.of(), List.of(), 0, null, List.of(), 0, null, firstPage());
+
+        assertThat(page.getContent()).contains(inAList.getId(), inNoList.getId());
     }
 }

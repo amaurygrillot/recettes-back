@@ -3,7 +3,8 @@
 ###
 ### GET /recipes takes its criteria as a request object bound from the query string: title,
 ### authorId, authorName, categoryId, categoryName, includeSubcategories, tagIds, tagName, ingredientIds,
-### sortBy, direction - plus the
+### listId (the content of one of the caller's recipe lists: the one criterion that needs a token, see
+### recipe-lists.http), sortBy, direction - plus the
 ### usual page and size. Every one is optional, including all of them at once.
 ###
 ### Reads are public. Writing needs a login; editing or deleting needs to be the AUTHOR or an
@@ -372,7 +373,8 @@ GET {{baseUrl}}/recipes
 %}
 
 ### 9d. Sort explicitly -> 200 OK
-### sortBy is a closed enum (CREATED_AT, UPDATED_AT, TITLE) and direction is independent of it,
+### sortBy is a closed enum (CREATED_AT, UPDATED_AT, TITLE, and ADDED_AT which is only valid with a listId)
+### and direction is independent of it,
 ### so "oldest first" and "reverse alphabetical" are both already expressible. The default is
 ### CREATED_AT + DESC.
 GET {{baseUrl}}/recipes?sortBy=TITLE&direction=ASC
