@@ -1,13 +1,19 @@
 package ilenreste.unpeu.recettesback.exceptions.handlers;
 
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
 import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
+import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
+import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
+import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -29,6 +35,11 @@ class ApiExceptionHandlerTest {
         MockHttpServletRequest request = new MockHttpServletRequest("POST", uri);
         request.setRequestURI(uri);
         return request;
+    }
+
+    /** An untyped problem has no {@code type} (null here) or {@code about:blank}: the same thing on the wire. */
+    private static String typeOf(ProblemDetail problem) {
+        return problem.getType() == null ? "about:blank" : problem.getType().toString();
     }
 
     @Test
@@ -123,6 +134,74 @@ class ApiExceptionHandlerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getDetail()).isEqualTo("That value already exists.");
+    }
+
+    @ParameterizedTest
+    @EnumSource(RecipeListConflict.class)
+    void aRecipeListConflict_isA409_whoseTypeAndTitleTellItApartFromTheOthers(RecipeListConflict conflict) {
+        ResponseEntity<ProblemDetail> response = handler.handleRecipeListConflict(
+                new RecipeListConflictException(conflict, "Not today."));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getType()).isEqualTo(conflict.type());
+        assertThat(response.getBody().getTitle()).isEqualTo(conflict.title());
+        assertThat(response.getBody().getDetail()).isEqualTo("Not today.");
+    }
+
+    @Test
+    void theThreeRecipeListConflictsHaveDistinctTypesAndTitles() {
+        assertThat(RecipeListConflict.values()).extracting(RecipeListConflict::type).doesNotHaveDuplicates();
+        assertThat(RecipeListConflict.values()).extracting(RecipeListConflict::title).doesNotHaveDuplicates();
+        assertThat(RecipeListConflict.NAME_TAKEN.type())
+                .hasToString("urn:recettes:problem:recipe-list-name-taken");
+        assertThat(RecipeListConflict.TOO_MANY_LISTS.type())
+                .hasToString("urn:recettes:problem:too-many-recipe-lists");
+        assertThat(RecipeListConflict.LIST_FULL.type())
+                .hasToString("urn:recettes:problem:recipe-list-full");
+    }
+
+    @Test
+    void anOrdinaryConflict_keepsTheGenericTypeAndTitle() {
+        ResponseEntity<ProblemDetail> response =
+                handler.handleConflict(new ResourceConflictException("Tag is still in use"));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(typeOf(response.getBody())).isEqualTo("about:blank");
+        assertThat(response.getBody().getTitle()).isEqualTo("Conflict");
+    }
+
+    /**
+     * The service checks the name first and the database constraint covers the race. The request that loses
+     * the race has to get the answer the pre-check gives, or the client sees an untyped conflict on the one
+     * route where it already knows what the conflict is.
+     */
+    @Test
+    void theRecipeListNameConstraintLosingARace_answersTheSameTypedConflictAsThePreCheck() {
+        DataIntegrityViolationException exception = new DataIntegrityViolationException("could not execute statement",
+                new ConstraintViolationException("duplicate key", new SQLException("duplicate key", "23505"),
+                        RecipeListEntity.UNIQUE_NAME_CONSTRAINT));
+
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getType()).isEqualTo(RecipeListConflict.NAME_TAKEN.type());
+        assertThat(response.getBody().getTitle()).isEqualTo(RecipeListConflict.NAME_TAKEN.title());
+    }
+
+    @Test
+    void anotherUniqueConstraintLosingARace_staysTheGenericConflict() {
+        DataIntegrityViolationException exception = new DataIntegrityViolationException("could not execute statement",
+                new ConstraintViolationException("duplicate key", new SQLException("duplicate key", "23505"),
+                        "uk_something_else"));
+
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(typeOf(response.getBody())).isEqualTo("about:blank");
         assertThat(response.getBody().getDetail()).isEqualTo("That value already exists.");
     }
 

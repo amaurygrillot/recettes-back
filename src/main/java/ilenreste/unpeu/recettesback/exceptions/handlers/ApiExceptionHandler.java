@@ -1,14 +1,18 @@
 package ilenreste.unpeu.recettesback.exceptions.handlers;
 
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
 import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
+import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
+import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
+import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -28,6 +32,11 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 import java.io.UncheckedIOException;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.stream.Stream;
 
 /**
  * The single place that turns an exception type into an HTTP status, so that
@@ -65,6 +74,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     /** PostgreSQL SQLState for a unique-constraint violation. */
     private static final String UNIQUE_VIOLATION_SQL_STATE = "23505";
+
+    /** The pre-check in {@code RecipeListService} words the same conflict the same way. */
+    public static final String RECIPE_LIST_NAME_TAKEN_DETAIL = "You already have a list with that name.";
 
     @ExceptionHandler(ResourceNotFoundException.class)
     ResponseEntity<ProblemDetail> handleNotFound(ResourceNotFoundException exception) {
@@ -131,6 +143,17 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return problem(HttpStatus.CONFLICT, exception.getMessage());
     }
 
+    /**
+     * A conflict a client has to recognise without reading its message, so it carries a {@code type} and a
+     * {@code title} of its own. More specific than {@link #handleConflict} in the same class, so Spring picks
+     * it for the subclass without any {@code @Order} question. See {@link RecipeListConflict}.
+     */
+    @ExceptionHandler(RecipeListConflictException.class)
+    ResponseEntity<ProblemDetail> handleRecipeListConflict(RecipeListConflictException exception) {
+        log.info("Recipe list rule refused the request ({}): {}", exception.conflict(), exception.getMessage());
+        return problem(exception.conflict(), exception.getMessage());
+    }
+
     @ExceptionHandler(ForbiddenOperationException.class)
     ResponseEntity<ProblemDetail> handleForbidden(ForbiddenOperationException exception) {
         log.warn("Operation refused: {}", exception.getMessage());
@@ -147,6 +170,10 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * since 409 is the branch that does not log a stack trace. The narrowing
      * tests the SQLState rather than the message text: constraint messages are
      * Postgres-version specific and locale-dependent.
+     * <p>
+     * One constraint is recognised <em>by name</em>: the recipe list name. A request that passes the service's
+     * pre-check and then loses the insert to a concurrent one must get the same typed conflict the pre-check
+     * gives, not an untyped one on the one route where the client already knows what the conflict is.
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
     ResponseEntity<ProblemDetail> handleDataIntegrityViolation(DataIntegrityViolationException exception) {
@@ -156,7 +183,10 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             // concurrent one. The old wording sent an operator looking at registrations for a
             // conflict raised by PUT /users/update.
             log.info("A unique constraint lost a race", exception);
-            return problem(HttpStatus.CONFLICT, "That value already exists.");
+            return violatedConstraint(exception)
+                    .filter(RecipeListEntity.UNIQUE_NAME_CONSTRAINT::equals)
+                    .map(constraint -> problem(RecipeListConflict.NAME_TAKEN, RECIPE_LIST_NAME_TAKEN_DETAIL))
+                    .orElseGet(() -> problem(HttpStatus.CONFLICT, "That value already exists."));
         }
         log.error("Unexpected data integrity violation", exception);
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL);
@@ -211,16 +241,32 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * is an implementation detail of versions we do not control.
      */
     private boolean isUniqueViolation(Throwable throwable) {
+        return causeChain(throwable).anyMatch(cause -> cause instanceof SQLException sqlException
+                && UNIQUE_VIOLATION_SQL_STATE.equals(sqlException.getSQLState()));
+    }
+
+    /** The name of the constraint Hibernate says was violated, wherever in the chain it sits. */
+    private Optional<String> violatedConstraint(Throwable throwable) {
+        return causeChain(throwable)
+                .filter(ConstraintViolationException.class::isInstance)
+                .map(cause -> ((ConstraintViolationException) cause).getConstraintName())
+                .filter(Objects::nonNull)
+                .findFirst();
+    }
+
+    /**
+     * The throwable and its causes, outermost first. Guarded against a cause that is its own cause, which
+     * some drivers produce and which would otherwise never end.
+     */
+    private Stream<Throwable> causeChain(Throwable throwable) {
+        List<Throwable> chain = new ArrayList<>();
         for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
-            if (cause instanceof SQLException sqlException
-                    && UNIQUE_VIOLATION_SQL_STATE.equals(sqlException.getSQLState())) {
-                return true;
-            }
+            chain.add(cause);
             if (cause.getCause() == cause) {
                 break;
             }
         }
-        return false;
+        return chain.stream();
     }
 
     /**
@@ -256,5 +302,13 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      */
     private ResponseEntity<ProblemDetail> problem(HttpStatusCode status, String detail) {
         return ResponseEntity.status(status).body(ProblemDetail.forStatusAndDetail(status, detail));
+    }
+
+    /** A 409 whose {@code type} and {@code title} say which of the recipe list conflicts it is. */
+    private ResponseEntity<ProblemDetail> problem(RecipeListConflict conflict, String detail) {
+        ProblemDetail body = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, detail);
+        body.setType(conflict.type());
+        body.setTitle(conflict.title());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 }
