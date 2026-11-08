@@ -148,13 +148,30 @@ final class OpenApiFacts {
         if (schema.path("allOf").size() == 1) {
             return typeOf(schema.path("allOf").get(0));
         }
-        String type = schema.path("type").asString("object");
+        String type = declaredType(schema);
         if ("array".equals(type)) {
             return "array<" + typeOf(schema.path("items")) + ">";
         }
         String format = schema.has("format") ? ":" + schema.path("format").asString() : "";
         String values = schema.has("enum") ? "{" + String.join("|", sorted(schema.path("enum"))) + "}" : "";
         return type + format + values;
+    }
+
+    /**
+     * The schema's type, {@code object} if it names none. Springdoc spells an optional, {@code @Nullable} parameter the
+     * OpenAPI 3.1 way, as {@code ["string","null"]}: the {@code null} member says the value may be absent, which is
+     * already the {@code optional} fact of the parameter, so it is not part of the type being compared.
+     */
+    private static String declaredType(JsonNode schema) {
+        JsonNode type = schema.path("type");
+        if (!type.isArray()) {
+            return type.asString("object");
+        }
+        return StreamSupport.stream(type.spliterator(), false)
+                .map(JsonNode::asString)
+                .filter(member -> !"null".equals(member))
+                .findFirst()
+                .orElse("object");
     }
 
     /** Follows a {@code #/...} reference; a node that is not a reference is returned as it is. */

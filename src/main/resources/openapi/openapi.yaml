@@ -27,7 +27,8 @@ info:
     ## Authentication
 
     `POST /auth/login` answers with a JWT as the **raw response body**. Send it as `Authorization: Bearer <token>`.
-    Tokens last one hour and do not survive an application restart. Every read in this API is public.
+    Tokens last one hour and do not survive an application restart. Every read in this API is public, except the
+    recipe lists (`/lists`, and `GET /recipes?listId=`): they are private to their owner and need a token.
 
     A request that carries a *broken* token (expired, malformed, or minted before the last restart) is rejected with 401
     even on a public route, so a client should drop a token that stops working. The credential endpoints are the one
@@ -41,7 +42,8 @@ info:
     matches what happened: 400 invalid input (including an id inside a body that names nothing), 401 missing or invalid
     credentials, 403 authenticated but not allowed, 404 the resource in the path does not exist, 409 the request
     conflicts with existing state, 413 upload too large, 429 this caller made too many requests, 503 the server is
-    momentarily at capacity. 429 and 503 carry `Retry-After`. An unexpected failure is a 500. Two more are raised by the
+    momentarily at capacity. 429 and 503 carry `Retry-After`. The three 409s of the recipe lists (name already used, too
+    many lists, list full) are told apart by the problem's `type`, never by its `detail`. An unexpected failure is a 500. Two more are raised by the
     framework before any operation runs, and are not listed on each one either: 415 for a request body that is not in a
     media type the operation reads, and 406 when nothing the operation can write matches the `Accept` header.
 
@@ -56,6 +58,11 @@ tags:
     description: Accounts.
   - name: Recipes
     description: Recipes. Reads are public; writing needs a login; editing or deleting needs to be the author or an admin.
+  - name: Recipe lists
+    description: >-
+      A member's private lists of recipes, each with a name and an emoji. Every route needs a login, and a list is only
+      ever visible to its owner: someone else's list is a 404, exactly like one that does not exist. The content of a
+      list is read through `GET /recipes?listId=`.
   - name: Categories
     description: The taxonomy that drives navigation, and the hierarchy it forms. Reads are public, writes are admin-only.
   - name: Tags
@@ -254,6 +261,12 @@ paths:
 
         `tagIds` keeps the recipes that carry **all** of the given tags, and `ingredientIds` the recipes that use
         **all** of the given ingredients, in any of their groups.
+
+
+        `listId` keeps the recipes of one of the caller's recipe lists, and is how the content of a list is read. It is
+        the one criterion that needs a login: the operation stays public, but a request with `listId` and no token is a
+        401, and a list that is not the caller's (or does not exist) is a 404. With `listId` and no `sortBy`, the recipes
+        come most recently added first (`ADDED_AT`).
       security: []
       parameters:
         - name: title
@@ -319,12 +332,22 @@ paths:
             uniqueItems: true
             items:
               type: string
-        - name: sortBy
+        - name: listId
           in: query
-          description: The column to order by, from a closed set. Defaults to `CREATED_AT`. Any other value is a 400.
+          description: >-
+            Recipes that are in this recipe list. Requires a token (401 without one); a list that is not the caller's, or
+            that does not exist, is a 404. Combined with AND with every other criterion.
           schema:
             type: string
-            enum: [CREATED_AT, UPDATED_AT, TITLE]
+        - name: sortBy
+          in: query
+          description: >-
+            The column to order by, from a closed set. Defaults to `CREATED_AT`, or to `ADDED_AT` when `listId` is given.
+            `ADDED_AT` (when the recipe was added to the list) is only valid with `listId`; without it, it is a 400. Any
+            other value is a 400.
+          schema:
+            type: string
+            enum: [CREATED_AT, UPDATED_AT, TITLE, ADDED_AT]
         - name: direction
           in: query
           description: Defaults to `DESC`.
@@ -342,6 +365,19 @@ paths:
                 $ref: '#/components/schemas/PageRecipeSummaryResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          description: >-
+            `listId` was given without a valid token. Only that criterion needs one: every other search is public.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '404':
+          description: '`listId` names a recipe list that does not exist or belongs to someone else.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
     post:
       tags: [Recipes]
       operationId: createRecipe
@@ -456,6 +492,217 @@ paths:
                 $ref: '#/components/schemas/ProblemDetail'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  # ------------------------------------------------------------------------------------------------ recipe lists
+  /lists:
+    get:
+      tags: [Recipe lists]
+      operationId: listRecipeLists
+      summary: The caller's recipe lists
+      description: >-
+        Every list of the caller, sorted by name (normalised, so accents and case do not matter, then as typed). **Not
+        paged**: a member has at most 50. Each item carries its `recipeCount` and up to 4 `coverMediaIds`, the first
+        cover picture of the most recently added recipes of the list that have one, newest first, for the photo mosaic of
+        a tile.
+
+
+        With `containing`, each item also carries `containsRecipe`, which says whether that recipe is in the list. The
+        property is **only present when `containing` is given**, and absent otherwise. It is what the « Ajouter à une
+        liste » sheet needs to show which lists already hold a recipe.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: containing
+          in: query
+          description: >-
+            A recipe id. Adds `containsRecipe` to every item. An id that names no recipe is a 404. A blank value is
+            treated as absent.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The caller's lists, possibly none.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RecipeListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: '`containing` names a recipe that does not exist.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+    post:
+      tags: [Recipe lists]
+      operationId: createRecipeList
+      summary: Create a recipe list
+      description: >-
+        The new list belongs to the caller and is empty. A member has at most 50 lists, and two of a member's lists cannot
+        share a name once accents, case and spacing are ignored.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecipeListRequest'
+      responses:
+        '201':
+          description: The stored list.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: >-
+            The request is valid and the existing state forbids it. Tell the two apart by the problem's `type`, never by
+            its `detail`: `urn:recettes:problem:recipe-list-name-taken` (another list of the caller has this name) or
+            `urn:recettes:problem:too-many-recipe-lists` (the caller already has 50 lists).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /lists/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Recipe lists]
+      operationId: getRecipeList
+      summary: Get one recipe list
+      description: The same shape as an item of `GET /lists`, without `containsRecipe`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Recipe lists]
+      operationId: updateRecipeList
+      summary: Rename a recipe list or change its emoji
+      description: >-
+        Both fields are required: this replaces the list's name and emoji, it does not patch them. `updatedAt` changes
+        only if one of them does; adding or removing a recipe never touches it.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecipeListRequest'
+      responses:
+        '200':
+          description: The stored list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            Another list of the caller has this name: the problem's `type` is
+            `urn:recettes:problem:recipe-list-name-taken`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+    delete:
+      tags: [Recipe lists]
+      operationId: deleteRecipeList
+      summary: Delete a recipe list
+      description: Deletes the list and its entries, never the recipes in it.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /lists/{id}/recipes/{recipeId}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - $ref: '#/components/parameters/RecipeId'
+    put:
+      tags: [Recipe lists]
+      operationId: addRecipeToList
+      summary: Put a recipe in a list
+      description: >-
+        **Idempotent**: a recipe that is already in the list is a success that changes nothing, even if the list is full.
+        A list holds at most 200 recipes. The list is checked before the recipe, so a request about someone else's list
+        never reveals whether the recipe exists.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: The recipe is in the list.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The list does not exist or belongs to someone else, or the recipe does not exist.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '409':
+          description: >-
+            The list already holds 200 recipes and this one is not among them: the problem's `type` is
+            `urn:recettes:problem:recipe-list-full`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+    delete:
+      tags: [Recipe lists]
+      operationId: removeRecipeFromList
+      summary: Take a recipe out of a list
+      description: >-
+        **Idempotent**: removing a recipe that is not in the list is a success. The recipe itself is never deleted, and
+        its existence is not checked, so a recipe deleted in the meantime can still be taken out of the list the client
+        shows.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: The recipe is not in the list.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The list does not exist or belongs to someone else.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
 
   # ------------------------------------------------------------------------------------------------- categories
   /categories:
@@ -1184,6 +1431,13 @@ components:
       description: The identifier of the resource.
       schema:
         type: string
+    RecipeId:
+      name: recipeId
+      in: path
+      required: true
+      description: The identifier of a recipe.
+      schema:
+        type: string
     Page:
       name: page
       in: query
@@ -1741,6 +1995,58 @@ components:
         createdAt:
           type: string
           format: date-time
+
+    # --------------------------------------------------------------------------------------------- recipe lists
+    RecipeListRequest:
+      type: object
+      required: [name, emoji]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: >-
+            Trimmed. Unique among the caller's lists once accents, case and spacing are ignored.
+        emoji:
+          type: string
+          maxLength: 32
+          description: >-
+            Exactly one emoji, as typed by an emoji picker: a single grapheme cluster that is a fully-qualified emoji
+            sequence (`🎂`, `❤️` with its variation selector, `👩‍🍳`, `👍🏽`, `🇫🇷`, `1️⃣`), at most 32 characters. A letter, a bare
+            digit, an arrow, two emojis or an emoji followed by text is a 400.
+    RecipeListResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        emoji:
+          type: string
+        recipeCount:
+          type: integer
+          format: int64
+          description: Every recipe of the list, with or without a picture.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+          description: Changes when the list is renamed or its emoji changes, and only then.
+        coverMediaIds:
+          type: array
+          description: >-
+            Up to 4 media ids for the photo mosaic of the tile: the first cover picture of the most recently added
+            recipes of the list that have one, newest first. Empty when no recipe of the list has a picture. Fetch each
+            as `/media/{id}?variant=thumbnail`.
+          items:
+            type: string
+        containsRecipe:
+          type: boolean
+          description: >-
+            Whether the recipe named by `containing` is in this list. **Present only on `GET /lists?containing=`**;
+            omitted everywhere else.
 
     # ------------------------------------------------------------------------------------------------- pages
     # The wire shape of Spring Data's PageImpl, which is what the paged endpoints serialise today. Spring Data logs a
