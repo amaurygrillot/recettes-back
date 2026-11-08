@@ -1,7 +1,7 @@
 # Recipe lists — « listes de recettes »
 
-Status: **design, then implementation** (this document is written first and updated in place where the implementation
-proves a decision wrong). Companion documents: [recipes-domain-model.md](recipes-domain-model.md) (the model this
+Status: **implemented** (this document was written first and has been updated in place wherever the implementation or
+the review proved a decision wrong). Companion documents: [recipes-domain-model.md](recipes-domain-model.md) (the model this
 extends), [api-error-handling.md](api-error-handling.md) (the statuses, and the three new `409`s),
 [service-controller-contract.md](service-controller-contract.md), [openapi.md](openapi.md),
 [optional-authentication.md](optional-authentication.md), [testing-database.md](testing-database.md).
@@ -54,7 +54,12 @@ Package layout follows [recipes-domain-model.md](recipes-domain-model.md#package
   must be "a success that changes nothing", which would be false if it bumped a timestamp; (3) it would make every add
   write the list row, serialising concurrent adds to one list on a row lock for no reader's benefit. A `PUT` that sends
   the values the list already has changes nothing either (Hibernate sees no dirty field, so the timestamp stays).
-- **`name`** is required, trimmed, 1 to 100 characters, and stored as typed (trimmed). **`normalized_name`** is the same
+- **`name`** is required, trimmed, 1 to 100 characters, and stored as typed (trimmed). It must also contain **at least
+  one visible character** once normalised: Bean Validation's `@NotBlank` only refuses what `String.isBlank()` calls
+  blank, and a name made of a no-break space, a zero-width space or a lone combining accent passes it. The last one
+  normalises to the empty string, so the list would show an empty tile and the next such name would be refused as its
+  duplicate. The service refuses a normalised name with no character that is not whitespace, a separator, a control or an
+  invisible format mark (`400`). **`normalized_name`** is the same
   string through `ReferenceNameNormalizer` (trim, collapse whitespace, lowercase, strip accents) and carries the
   uniqueness — the reference-table pattern, see
   [recipes-domain-model.md](recipes-domain-model.md#why-a-normalized_name-column-instead-of-a-plain-unique-on-name).
@@ -111,6 +116,13 @@ success.
   that was supposed to be safe to repeat.
 - `DELETE /lists/{id}/recipes/{recipeId}` is idempotent too: removing a recipe that is not in the list is a success.
 - The list is checked first, then the recipe: a request about someone else's list never learns whether the recipe exists.
+- **A delete that races the add is a `404`, not a `500`.** `ON CONFLICT DO NOTHING` covers the primary key and nothing
+  else. If the list or the recipe is deleted (from another tab, or by the recipe's author) after the checks and before the
+  insert, the foreign key refuses the insert; the thing the request names is gone, which is the `404` a retry would
+  answer. The service translates that integrity violation, which can only be the foreign key since no other constraint can
+  refuse this insert. The same goes for a rename that races a delete of the list: the `UPDATE` touches no row, Hibernate
+  reports an optimistic-locking failure, and the answer is `404`. Both are reproduced on purpose, inside the transaction of
+  the service, by tests that delete the row between the check and the write.
 - `DELETE` does **not** check that the recipe exists. A recipe deleted by its author disappears from every list
   (cascade), and a front that still shows it must be able to "remove" it and get the same `204` it would have had a
   second earlier. `PUT` does check: adding something that does not exist is an error. (« À valider » below.)
@@ -274,11 +286,16 @@ Why these:
 
 ### Logging
 
-Key steps log through the project's Log4j2, at `info` for a change (list created / renamed / deleted, recipe added to or
-removed from a list), `debug` for an idempotent no-op, a read, and for the rejections that are the caller's doing (name
-taken, limit reached, list not found or not visible). The ids logged are list, recipe and user ids; never a token, a
-password or an e-mail address. The not-visible case is logged with the caller's id and the list id so that probing is
-visible in the logs although the response says nothing.
+Key steps log through the project's Log4j2 (ids only: list, recipe and user ids; never a token, a password or an e-mail
+address):
+
+| Level   | What                                                                                                              |
+|---------|-------------------------------------------------------------------------------------------------------------------|
+| `info`  | a change: list created, renamed or deleted, recipe added to or removed from a list; and the refusals a person can act on: name taken, limit reached, list full, a delete that raced a write |
+| `warn`  | a list that **exists and is not the caller's**: somebody is probing. The response says nothing; the log is the only place the difference between this and a stale id is visible |
+| `debug` | an idempotent no-op (recipe already in the list, not in the list), and a list that does not exist (a stale id is routine) |
+
+Reads log nothing: they change nothing, and `GET /lists` is polled.
 
 ### MCP
 
@@ -323,10 +340,20 @@ One request costs the same handful of statements whether the member has 2 lists 
    `400`. Bean Validation sees the raw value, and a client that trims what it sends (the front does) never notices.
 7. The problem `type`s are `urn:recettes:problem:…` identifiers, not URLs.
 8. `search_recipes` (MCP) carries `listId`, as described above.
-9. `ADDED_AT` has no secondary order key, like every other sort of this listing: two entries with the same `added_at`
-   (microsecond resolution) have an unspecified order between pages. Pre-existing for the other sorts; noted, not
-   changed.
+9. `ADDED_AT` ends with the recipe id as a tie-break, so entries added at the same instant (a bulk insert, a seed) page
+   without repeats or gaps, in the same order as the cover mosaic. The other sorts of this listing keep their historical
+   behaviour (no tie-break): a pre-existing limitation, noticed and not changed.
 10. No endpoint reorders a list or moves a recipe between lists: not asked for.
+11. `@SingleEmoji` is the rule as decided: **one grapheme cluster that parses as an emoji sequence**. It does not check
+    that a ZWJ sequence is one Unicode lists, so `🎂` + ZWJ + `🍝` is accepted: it is one cluster, it passes the grammar,
+    and it renders as two glyphs. Recognising only the sequences Unicode recommends needs that list, which the JDK does not
+    carry and which changes every year; the 32-character cap is the only bound. The cost is cosmetic and private to the
+    member who typed it.
+12. A name must contain a visible character once normalised (above). A no-break space *between* visible characters is
+    fine; a name made only of invisible ones is a `400`.
+13. The `maxLength: 32` of the emoji in `openapi.yaml` is in characters as OpenAPI counts them (code points), while the
+    validator counts UTF-16 units, the width of what it stores. No real emoji sequence is anywhere near the difference
+    (the longest recommended ones are under 20 units).
 
 ## Rejected alternatives
 

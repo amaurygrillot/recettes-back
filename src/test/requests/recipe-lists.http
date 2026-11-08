@@ -109,6 +109,30 @@ GET {{baseUrl}}/lists
     });
 %}
 
+###
+### 5b. ... with a token that is present but broken -> 401 Unauthorized
+### What a client holding a token minted before the last restart sends. A broken token is refused even where the
+### route alone would have let an anonymous caller through (GET /recipes), so the client knows to log in again.
+GET {{baseUrl}}/lists
+Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+###
+### 5c. The same on the public search, but only because of listId -> 401 Unauthorized
+GET {{baseUrl}}/recipes?listId=anything
+Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
 ### 6. Create a list -> 201 Created, with a Location header and the stored list
 ### The name is trimmed. The emoji is required and must be exactly one emoji. The new list is empty.
 POST {{baseUrl}}/lists
@@ -560,6 +584,8 @@ Authorization: Bearer {{otherToken}}
 ### NOT SCRIPTABLE end to end: a .http file cannot loop. Send this request again and again; each run uses a fresh
 ### name ({{$uuid}}), so it creates one more list until the member has 50, then answers 409 with the type
 ### urn:recettes:problem:too-many-recipe-lists. RecipeListsIntegrationTest does it for real.
+### CLEAN UP afterwards: the lists made here are not removed by request 35, and with 50 of them request 6 of the
+### next run answers 409. List them with GET /lists and DELETE the ones called "Liste ...".
 POST {{baseUrl}}/lists
 Authorization: Bearer {{memberToken}}
 Content-Type: application/json

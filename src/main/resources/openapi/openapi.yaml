@@ -2006,14 +2006,16 @@ components:
           minLength: 1
           maxLength: 100
           description: >-
-            Trimmed. Unique among the caller's lists once accents, case and spacing are ignored.
+            Trimmed. Unique among the caller's lists once accents, case and spacing are ignored. Must contain at least
+            one visible character: a name made only of spaces, zero-width characters or accents is a 400.
         emoji:
           type: string
           maxLength: 32
           description: >-
             Exactly one emoji, as typed by an emoji picker: a single grapheme cluster that is a fully-qualified emoji
-            sequence (`🎂`, `❤️` with its variation selector, `👩‍🍳`, `👍🏽`, `🇫🇷`, `1️⃣`), at most 32 characters. A letter, a bare
-            digit, an arrow, two emojis or an emoji followed by text is a 400.
+            sequence (`🎂`, `❤️` with its variation selector, `👩‍🍳`, `👍🏽`, `🇫🇷`, `1️⃣`), at most 32 UTF-16 characters. A letter,
+            a bare digit, an arrow, a text-style `❤` without its variation selector, two emojis side by side or an emoji
+            followed by text is a 400.
     RecipeListResponse:
       type: object
       properties:
