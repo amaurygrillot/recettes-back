@@ -82,6 +82,14 @@ The `type` is a `urn:`, not a URL: it identifies the failure and nothing serves 
 same `recipe-list-name-taken` problem as the pre-check, instead of the generic `409 "That value already exists."` — the
 client should not get a different answer to the same mistake depending on a few milliseconds.
 
+The name is looked for **in the messages of the cause chain**, and not read from Hibernate's
+`ConstraintViolationException.getConstraintName()`. Hibernate extracts it by matching the English wording of the
+server's message (`violates unique constraint "x"`), so against a localised server (the development PostgreSQL answers
+`rompt la contrainte unique « x »` on some connections) it returns nothing and the typed conflict silently becomes the
+untyped one — a failure that only showed on the machine whose language differs, and as a test that failed only when
+three suites ran together. The identifier is the one part of the message that is the same in every language; the branch
+itself is selected by the SQLState (`23505`), which is not worded at all.
+
 The limits are `409`, not `400`/`403`/`429`: the request is valid and allowed, and it is the existing state that forbids
 it (`400` is for malformed input, `403` for a role, `429` for a rate over time — a member who deletes a list may create
 one straight away).
