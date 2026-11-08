@@ -12,7 +12,6 @@ import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
-import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -35,7 +34,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.stream.Stream;
 
 /**
@@ -171,6 +169,8 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * One constraint is recognised <em>by name</em>: the recipe list name. A request that passes the service's
      * pre-check and then loses the insert to a concurrent one must get the same typed conflict the pre-check
      * gives, not an untyped one on the one route where the client already knows what the conflict is.
+     * <p>
+     * See {@link #mentions} for why the name is looked for in the message rather than read from Hibernate.
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
     ResponseEntity<ProblemDetail> handleDataIntegrityViolation(DataIntegrityViolationException exception) {
@@ -180,10 +180,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             // concurrent one. The old wording sent an operator looking at registrations for a
             // conflict raised by PUT /users/update.
             log.info("A unique constraint lost a race", exception);
-            return violatedConstraint(exception)
-                    .filter(RecipeListEntity.UNIQUE_NAME_CONSTRAINT::equals)
-                    .map(constraint -> handleRecipeListConflict(RecipeListConflictException.nameTaken()))
-                    .orElseGet(() -> problem(HttpStatus.CONFLICT, "That value already exists."));
+            return mentions(exception, RecipeListEntity.UNIQUE_NAME_CONSTRAINT)
+                    ? handleRecipeListConflict(RecipeListConflictException.nameTaken())
+                    : problem(HttpStatus.CONFLICT, "That value already exists.");
         }
         log.error("Unexpected data integrity violation", exception);
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, GENERIC_500_DETAIL);
@@ -242,13 +241,22 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 && UNIQUE_VIOLATION_SQL_STATE.equals(sqlException.getSQLState()));
     }
 
-    /** The name of the constraint Hibernate says was violated, wherever in the chain it sits. */
-    private Optional<String> violatedConstraint(Throwable throwable) {
+    /**
+     * Whether a message anywhere in the chain names this constraint.
+     * <p>
+     * Looked for in the message, <strong>not</strong> read from Hibernate's
+     * {@code ConstraintViolationException.getConstraintName()}. Hibernate extracts that name by matching the English
+     * wording of the server's message ({@code violates unique constraint "x"}), so against a server whose messages
+     * are localised ({@code rompt la contrainte unique « x »}, as the development PostgreSQL's are, on some
+     * connections) it finds nothing, and the typed conflict silently degrades to the untyped one — a failure that
+     * only shows on the machine whose language differs. The identifier is the one part of the message that is the
+     * same in every language, and the SQLState that selects this branch ({@code 23505}) is not worded at all.
+     */
+    private boolean mentions(Throwable throwable, String constraintName) {
         return causeChain(throwable)
-                .filter(ConstraintViolationException.class::isInstance)
-                .map(cause -> ((ConstraintViolationException) cause).getConstraintName())
+                .map(Throwable::getMessage)
                 .filter(Objects::nonNull)
-                .findFirst();
+                .anyMatch(message -> message.contains(constraintName));
     }
 
     /**

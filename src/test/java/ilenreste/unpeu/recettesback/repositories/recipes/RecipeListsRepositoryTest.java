@@ -8,7 +8,6 @@ import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import ilenreste.unpeu.recettesback.support.RecipeListFixtures;
 import jakarta.persistence.EntityManager;
-import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,7 +16,10 @@ import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabas
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 
+import java.sql.SQLException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -100,6 +102,10 @@ class RecipeListsRepositoryTest {
      * The race the service's pre-check loses: it said "free", then the insert found the name taken. The
      * violated constraint has to be the named one, because that name is how the exception handler
      * recognises this race and answers the same typed 409 as the pre-check does.
+     * <p>
+     * The state is asserted as 23505 and the name as part of a message, which is how the handler finds them: both
+     * are the same in every language, unlike the wording around the name (Hibernate's own name extraction reads
+     * the English wording, and fails against a server that speaks French).
      */
     @Test
     void theUniqueConstraintRefusesTheSameNormalisedNameForOneMember_andIsNamed() {
@@ -108,17 +114,28 @@ class RecipeListsRepositoryTest {
         assertThatThrownBy(() -> fixtures.list(owner, "  d\u00E9sserts "))
                 .as("a different spelling that normalises to the same name")
                 .isInstanceOf(DataIntegrityViolationException.class)
-                .satisfies(exception -> assertThat(constraintNameOf(exception))
-                        .isEqualTo(RecipeListEntity.UNIQUE_NAME_CONSTRAINT));
+                .satisfies(exception -> {
+                    assertThat(sqlStateOf(exception)).isEqualTo("23505");
+                    assertThat(messagesOf(exception))
+                            .anyMatch(message -> message.contains(RecipeListEntity.UNIQUE_NAME_CONSTRAINT));
+                });
     }
 
-    private static String constraintNameOf(Throwable exception) {
+    private static String sqlStateOf(Throwable exception) {
         for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
-            if (cause instanceof ConstraintViolationException violation) {
-                return violation.getConstraintName();
+            if (cause instanceof SQLException sql) {
+                return sql.getSQLState();
             }
         }
-        throw new AssertionError("no Hibernate ConstraintViolationException in the cause chain of " + exception);
+        throw new AssertionError("no SQLException in the cause chain of " + exception);
+    }
+
+    private static List<String> messagesOf(Throwable exception) {
+        List<String> messages = new ArrayList<>();
+        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+            messages.add(String.valueOf(cause.getMessage()));
+        }
+        return messages;
     }
 
     /**

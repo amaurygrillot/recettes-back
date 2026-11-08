@@ -10,7 +10,6 @@ import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
-import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -190,11 +189,9 @@ class ApiExceptionHandlerTest {
      */
     @Test
     void theRecipeListNameConstraintLosingARace_answersTheSameTypedConflictAsThePreCheck() {
-        DataIntegrityViolationException exception = new DataIntegrityViolationException("could not execute statement",
-                new ConstraintViolationException("duplicate key", new SQLException("duplicate key", "23505"),
-                        RecipeListEntity.UNIQUE_NAME_CONSTRAINT));
-
-        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception);
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(
+                uniqueViolation("duplicate key value violates unique constraint \"%s\""
+                        .formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT)));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
@@ -203,18 +200,41 @@ class ApiExceptionHandlerTest {
         assertThat(response.getBody().getDetail()).isEqualTo(RecipeListConflictException.nameTaken().getMessage());
     }
 
+    /**
+     * The failure that only showed on a machine whose language differs: Hibernate reads the constraint name out of
+     * the ENGLISH wording of the message, so a localised server gave it nothing and the typed conflict degraded to
+     * the untyped one. The identifier is the same in every language; the handler looks for that.
+     */
+    @Test
+    void theRecipeListNameConstraint_isRecognisedWhateverLanguageTheServerSpeaks() {
+        String french = "ERREUR: la valeur d'une cl\u00e9 dupliqu\u00e9e rompt la contrainte unique \u00ab %s \u00bb"
+                .formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT);
+        String german = "FEHLER: doppelter Schl\u00fcsselwert verletzt Unique-Constraint \u00bb%s\u00ab"
+                .formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT);
+
+        for (String message : List.of(french, german)) {
+            ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(uniqueViolation(message));
+
+            assertThat(response.getBody()).isNotNull();
+            assertThat(response.getBody().getType()).as(message).isEqualTo(RecipeListConflict.NAME_TAKEN.type());
+        }
+    }
+
     @Test
     void anotherUniqueConstraintLosingARace_staysTheGenericConflict() {
-        DataIntegrityViolationException exception = new DataIntegrityViolationException("could not execute statement",
-                new ConstraintViolationException("duplicate key", new SQLException("duplicate key", "23505"),
-                        "uk_something_else"));
-
-        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(exception);
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(
+                uniqueViolation("duplicate key value violates unique constraint \"uk_something_else\""));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody()).isNotNull();
         assertThat(typeOf(response.getBody())).isEqualTo("about:blank");
         assertThat(response.getBody().getDetail()).isEqualTo("That value already exists.");
+    }
+
+    /** What Spring throws for a unique violation: the wrapper, over the driver's exception, whose SQLState is 23505. */
+    private static DataIntegrityViolationException uniqueViolation(String driverMessage) {
+        return new DataIntegrityViolationException("could not execute statement",
+                new RuntimeException("hibernate wrapper", new SQLException(driverMessage, "23505")));
     }
 
     @Test
