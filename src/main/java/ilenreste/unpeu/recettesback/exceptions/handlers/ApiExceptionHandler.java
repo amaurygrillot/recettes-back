@@ -251,12 +251,17 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * connections) it finds nothing, and the typed conflict silently degrades to the untyped one — a failure that
      * only shows on the machine whose language differs. The identifier is the one part of the message that is the
      * same in every language, and the SQLState that selects this branch ({@code 23505}) is not worded at all.
+     * <p>
+     * Only the FIRST line of a message is read. The server puts the violated constraint there, and puts a
+     * {@code Detail: Key (column)=(value) already exists.} line after it, whose value is whatever the caller typed: a
+     * username or an ingredient called exactly like this constraint must not be taken for a collision on it.
      */
     private boolean mentions(Throwable throwable, String constraintName) {
         return causeChain(throwable)
                 .map(Throwable::getMessage)
                 .filter(Objects::nonNull)
-                .anyMatch(message -> message.contains(constraintName));
+                .map(message -> message.lines().findFirst().orElse(""))
+                .anyMatch(firstLine -> firstLine.contains(constraintName));
     }
 
     /**

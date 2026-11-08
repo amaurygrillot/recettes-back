@@ -27,6 +27,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -553,7 +554,9 @@ class RecipeListServiceTest {
                 Arguments.of("a NUL", "Ta" + ofCodePoints(0x0000) + "rtes"),
                 Arguments.of("a line break", "Tartes" + ofCodePoints(0x000A) + "salees"),
                 Arguments.of("a tab", "Tartes" + ofCodePoints(0x0009) + "salees"),
-                Arguments.of("an escape", "Tar" + ofCodePoints(0x001B) + "tes"));
+                Arguments.of("an escape", "Tar" + ofCodePoints(0x001B) + "tes"),
+                Arguments.of("a line separator", "Tartes" + ofCodePoints(0x2028) + "salees"),
+                Arguments.of("a paragraph separator", "Tartes" + ofCodePoints(0x2029) + "salees"));
     }
 
     @Test
@@ -570,10 +573,22 @@ class RecipeListServiceTest {
     void addRecipe_whenTheListOrTheRecipeIsDeletedBeforeTheInsert_is404_notAServerError() {
         storedList("list-1", ME, "Desserts");
         when(recipesRepository.existsById("tarte")).thenReturn(true);
-        when(entriesRepository.insertIfAbsent("list-1", "tarte", NOW))
-                .thenThrow(new DataIntegrityViolationException("foreign key violation"));
+        when(entriesRepository.insertIfAbsent("list-1", "tarte", NOW)).thenThrow(new DataIntegrityViolationException(
+                "foreign key violation", new SQLException("insert violates foreign key constraint", "23503")));
 
         assertThatThrownBy(() -> service.addRecipe("list-1", "tarte")).isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    /** Only a foreign key is taken for "it was deleted": any other refusal is a real, unexpected failure. */
+    @Test
+    void addRecipe_whenSomeOtherConstraintRefusesTheInsert_isNotTurnedInto404() {
+        storedList("list-1", ME, "Desserts");
+        when(recipesRepository.existsById("tarte")).thenReturn(true);
+        DataIntegrityViolationException notNull = new DataIntegrityViolationException(
+                "null value", new SQLException("null value in column violates not-null constraint", "23502"));
+        when(entriesRepository.insertIfAbsent("list-1", "tarte", NOW)).thenThrow(notNull);
+
+        assertThatThrownBy(() -> service.addRecipe("list-1", "tarte")).isSameAs(notNull);
     }
 
     @Test

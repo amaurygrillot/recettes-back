@@ -220,6 +220,22 @@ class ApiExceptionHandlerTest {
         }
     }
 
+    /**
+     * The server follows the violated constraint with a Detail line holding the value that collided, which the caller
+     * chose. An ingredient named like our constraint must not turn its own collision into a recipe list one.
+     */
+    @Test
+    void aValueThatIsCalledLikeTheConstraint_doesNotMakeAnotherCollisionARecipeListOne() {
+        String message = "duplicate key value violates unique constraint \"ingredients_normalized_name_key\"\n"
+                + "  Detail: Key (normalized_name)=(%s) already exists.".formatted(RecipeListEntity.UNIQUE_NAME_CONSTRAINT);
+
+        ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(uniqueViolation(message));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(typeOf(response.getBody())).isEqualTo("about:blank");
+        assertThat(response.getBody().getDetail()).isEqualTo("That value already exists.");
+    }
+
     @Test
     void anotherUniqueConstraintLosingARace_staysTheGenericConflict() {
         ResponseEntity<ProblemDetail> response = handler.handleDataIntegrityViolation(

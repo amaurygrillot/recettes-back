@@ -2007,7 +2007,10 @@ components:
           maxLength: 100
           description: >-
             Trimmed. Unique among the caller's lists once accents, case and spacing are ignored. Must contain at least
-            one visible character: a name made only of spaces, zero-width characters or accents is a 400.
+            one visible character: a name made only of spaces, zero-width characters, blank-looking letters (the Hangul
+            fillers, the blank Braille pattern) or accents is a 400, and so is a name with a control character or a line
+            break anywhere in it. The 100 characters are counted as UTF-16 units, as Java counts them, so a name of 51
+            emojis is a 400.
         emoji:
           type: string
           maxLength: 32

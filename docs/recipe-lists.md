@@ -356,16 +356,18 @@ One request costs the same handful of statements whether the member has 2 lists 
     carry and which changes every year; the 32-character cap is the only bound. The cost is cosmetic and private to the
     member who typed it.
 12. A name must contain a visible character once normalised (above). A no-break space *between* visible characters is
-    fine; a name made only of invisible ones is a `400`.
+    fine; a name made only of invisible ones is a `400`. Invisible *padding* (`Desserts` and `Desserts` + a zero-width
+    space) is not trimmed and normalises to a different string, so two lookalike names can coexist: cosmetic, and private
+    to the member who typed them.
+13. The `maxLength: 32` of the emoji in `openapi.yaml` is in characters as OpenAPI counts them (code points), while the
+    validator counts UTF-16 units, the width of what it stores. No real emoji sequence is anywhere near the difference
+    (the longest recommended ones are under 20 units).
 14. **Names are compared through `ReferenceNameNormalizer`, as decided, and it strips every combining mark**, not only
     Latin accents. For the reference tables (French food names) that is the point; for a list name in another script it
     folds distinctions that matter: `ばら` and `はら` (dakuten), or Indic, Thai and Arabic words that differ by a vowel sign,
     normalise to the same string, so the second is refused as a duplicate of the first. A false `409` for a legitimate,
     different name. Narrowing the normalizer to the Latin accents would change the reference tables too, so it is not done
     here; it is the one decision of this feature worth revisiting if lists are used in other scripts.
-13. The `maxLength: 32` of the emoji in `openapi.yaml` is in characters as OpenAPI counts them (code points), while the
-    validator counts UTF-16 units, the width of what it stores. No real emoji sequence is anywhere near the difference
-    (the longest recommended ones are under 20 units).
 
 ## Rejected alternatives
 

@@ -32,10 +32,11 @@ import static org.mockito.Mockito.verify;
  * who may touch it, and every status a list route can answer except the ones about the content of a list, which
  * {@link RecipeListContentIntegrationTest} has.
  * <p>
- * The repositories are spies (declared in {@link RecipeListsHttpSupport}) for two tests that make a race happen on
- * purpose: {@link #aNameThatPassesTheCheckButLosesTheInsert} needs the name check to say "free" for a name that is
- * taken, which is exactly what losing the race looks like, so that the request reaches the database constraint; and
- * {@link #aListDeletedBetweenTheCheckAndTheRename_is404_notAServerError} deletes the list between that check and the write.
+ * The repositories are spies (declared in {@link RecipeListsHttpSupport}) for the tests that make a race happen on
+ * purpose, by stubbing the check that comes before the write: {@link #aNameThatPassesTheCheckButLosesTheInsert} needs
+ * the name check to say "free" for a name that is taken, which is exactly what losing the race looks like, so that
+ * the request reaches the database constraint; the two tests that delete the list between its checks and the write
+ * (a rename and a delete) do it from inside the stubbed check or the stubbed delete.
  */
 class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
 

@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
@@ -64,6 +65,9 @@ public class RecipeListService {
 
     /** Pictures in the mosaic of a list tile. */
     public static final int COVER_MOSAIC_SIZE = 4;
+
+    /** PostgreSQL SQLState of a foreign key violation: the list or the recipe is gone. */
+    private static final String FOREIGN_KEY_VIOLATION = "23503";
 
     private final RecipeListsRepository listsRepository;
     private final RecipeListEntriesRepository entriesRepository;
@@ -171,10 +175,11 @@ public class RecipeListService {
      */
     private void applyTo(RecipeListEntity list, RecipeListRequest request, String ownerId, String ownListId) {
         String name = request.name().trim();
-        if (name.codePoints().anyMatch(codePoint -> Character.getType(codePoint) == Character.CONTROL)) {
+        if (name.codePoints().anyMatch(RecipeListService::isControlOrLineBreak)) {
             // A NUL is not a nicety: PostgreSQL refuses 0x00 in text, which would surface as a 500 for a name sent
-            // in a perfectly valid JSON string. A tab or a line break has no place in a one-line name either.
-            throw new InvalidInputException("The name must not contain control characters.");
+            // in a perfectly valid JSON string. A tab or a line break has no place in a one-line name either, and
+            // U+2028 and U+2029, which are not control characters, are line breaks too.
+            throw new InvalidInputException("The name must not contain control characters or line breaks.");
         }
         String normalizedName = normalizer.normalize(name);
         if (!hasVisibleCharacter(normalizedName)) {
@@ -187,6 +192,11 @@ public class RecipeListService {
         list.setName(name);
         list.setNormalizedName(normalizedName);
         list.setEmoji(request.emoji());
+    }
+
+    private static boolean isControlOrLineBreak(int codePoint) {
+        int type = Character.getType(codePoint);
+        return type == Character.CONTROL || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR;
     }
 
     /**
@@ -240,7 +250,8 @@ public class RecipeListService {
      * {@code ON CONFLICT DO NOTHING} covers the primary key and nothing else. If the list or the recipe is deleted
      * between the checks above the insert and the insert itself, the foreign key refuses it: nothing is wrong with
      * the request, the thing it names is gone, so that is a 404 and not the 500 an unrecognised integrity violation
-     * would be. No other constraint can refuse this insert, so any integrity violation here is that one.
+     * would be. Only a foreign key (SQLState 23503) is taken for that: any other integrity failure stays what it is,
+     * an unexpected one, so a constraint added to this table one day cannot turn into a silent 404.
      */
     @Transactional
     public void addRecipe(String listId, String recipeId) {
@@ -257,11 +268,13 @@ public class RecipeListService {
         int inserted;
         try {
             inserted = entriesRepository.insertIfAbsent(listId, recipeId, Instant.now(clock));
-        } catch (DataIntegrityViolationException deletedMeanwhile) {
-            // The cause is logged, not dropped: if a constraint other than the foreign keys ever refuses this insert,
-            // it must not turn into a silent 404.
+        } catch (DataIntegrityViolationException refused) {
+            if (!(refused.getMostSpecificCause() instanceof SQLException cause)
+                    || !FOREIGN_KEY_VIOLATION.equals(cause.getSQLState())) {
+                throw refused;
+            }
             log.info("Recipe list {} or recipe {} was deleted while the recipe was being added: {}", listId, recipeId,
-                    deletedMeanwhile.getMostSpecificCause().getMessage());
+                    cause.getMessage());
             throw new ResourceNotFoundException("The recipe list or the recipe no longer exists.");
         }
         if (inserted == 1) {
