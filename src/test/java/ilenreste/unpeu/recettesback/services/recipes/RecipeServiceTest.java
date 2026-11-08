@@ -6,6 +6,7 @@ import ilenreste.unpeu.recettesback.entities.reference.CategoryEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.exceptions.ForbiddenOperationException;
 import ilenreste.unpeu.recettesback.exceptions.InvalidReferenceException;
+import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.mappers.recipes.RecipeMapper;
 import ilenreste.unpeu.recettesback.mappers.reference.ReferenceMapper;
@@ -53,6 +54,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -67,6 +69,7 @@ class RecipeServiceTest {
     private MediaRepository mediaRepository;
     private CategoryRelationsRepository categoryRelationsRepository;
     private CategoryService categoryService;
+    private RecipeListService recipeListService;
     private RecipeService recipeService;
 
     @BeforeEach
@@ -77,12 +80,13 @@ class RecipeServiceTest {
         mediaRepository = mock(MediaRepository.class);
         categoryRelationsRepository = mock(CategoryRelationsRepository.class);
         categoryService = mock(CategoryService.class);
+        recipeListService = mock(RecipeListService.class);
         when(categoryRelationsRepository.parentIdsByCategoryId()).thenReturn(Map.of());
         recipeService = new RecipeService(recipesRepository,
                 categoriesRepository, categoryRelationsRepository, mock(TagsRepository.class),
                 mock(IngredientsRepository.class), mock(UnitsRepository.class),
                 mediaRepository, new ReferenceResolver(), categoryService, new ReferenceNameNormalizer(),
-                currentUserService, new RecipeMapper(new ReferenceMapper()),
+                currentUserService, recipeListService, new RecipeMapper(new ReferenceMapper()),
                 mock(jakarta.persistence.EntityManager.class));
     }
 
@@ -105,13 +109,26 @@ class RecipeServiceTest {
 
     /** Every criterion absent: the home-page request, which must stay legal. */
     private static RecipeSearchRequest noFilters() {
-        return new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null, null);
+        return new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /** Only the list criterion on, with whatever ordering is given. */
+    private static RecipeSearchRequest inList(String listId, RecipeSortField sortBy, Sort.Direction direction) {
+        return new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, listId, sortBy,
+                direction);
+    }
+
+    private Sort sortUsed() {
+        ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
+        verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
+                anyLong(), any(), used.capture());
+        return used.getValue().getSort();
     }
 
     /** The search query finds nothing, so what a test asserts on is what the service asked it. */
     private void givenNoRecipeMatches(Pageable pageable) {
         when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
-                anyLong(), any())).thenReturn(Page.empty(pageable));
+                anyLong(), any(), any())).thenReturn(Page.empty(pageable));
     }
 
     /**
@@ -126,7 +143,7 @@ class RecipeServiceTest {
         Pageable pageable = PageRequest.of(0, 20);
         List<String> pageOfIds = List.of("r-1", "r-2", "r-3");
         when(recipesRepository.searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
-                anyLong(), any())).thenReturn(new PageImpl<>(pageOfIds, pageable, 3));
+                anyLong(), any(), any())).thenReturn(new PageImpl<>(pageOfIds, pageable, 3));
         // Deliberately shuffled, the way a database is free to return them.
         when(recipesRepository.findAllForSummary(pageOfIds)).thenReturn(List.of(
                 recipe("r-3", "u-1", "Third"),
@@ -148,12 +165,12 @@ class RecipeServiceTest {
         givenNoRecipeMatches(pageable);
 
         recipeService.search(
-                new RecipeSearchRequest("  ", "", null, "   ", "", null, null, "  ", null, null, null), pageable);
+                new RecipeSearchRequest("  ", "", null, "   ", "", null, null, "  ", null, null, null, null), pageable);
 
         // Blank category criteria are no category filter at all: the flag is off, and the taxonomy
         // is not even consulted.
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
-                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), eq(null), any(Pageable.class));
         verifyNoInteractions(categoryService);
     }
 
@@ -165,11 +182,11 @@ class RecipeServiceTest {
         givenNoRecipeMatches(pageable);
 
         recipeService.search(
-                new RecipeSearchRequest(null, null, null, null, null, null, null, "  V\u00c9G\u00c9TARIEN ", null, null, null),
+                new RecipeSearchRequest(null, null, null, null, null, null, null, "  V\u00c9G\u00c9TARIEN ", null, null, null, null),
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
-                eq(Set.of()), eq(0L), eq("vegetarien"), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq("vegetarien"), eq(Set.of()), eq(0L), eq(null), any(Pageable.class));
     }
 
     /**
@@ -184,11 +201,11 @@ class RecipeServiceTest {
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, null, null, null, null, null,
-                        new LinkedHashSet<>(Arrays.asList("farine", "  ", "pommes", "", " farine ")), null, null),
+                        new LinkedHashSet<>(Arrays.asList("farine", "  ", "pommes", "", " farine ")), null, null, null),
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
-                eq(Set.of()), eq(0L), eq(null), eq(Set.of("farine", "pommes")), eq(2L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of("farine", "pommes")), eq(2L), eq(null), any(Pageable.class));
     }
 
     /** Same reasoning as for the ingredients: the tag filter is an AND, counted against the distinct ids. */
@@ -199,12 +216,12 @@ class RecipeServiceTest {
 
         recipeService.search(
                 new RecipeSearchRequest(null, null, null, null, null, null,
-                        new LinkedHashSet<>(Arrays.asList("rapide", "  ", "vegetarien", "", " rapide ")), null, null,
+                        new LinkedHashSet<>(Arrays.asList("rapide", "  ", "vegetarien", "", " rapide ")), null, null, null,
                         null, null),
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(false), eq(Set.of()),
-                eq(Set.of("rapide", "vegetarien")), eq(2L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of("rapide", "vegetarien")), eq(2L), eq(null), eq(Set.of()), eq(0L), eq(null), any(Pageable.class));
     }
 
     /**
@@ -220,11 +237,11 @@ class RecipeServiceTest {
         givenNoRecipeMatches(pageable);
 
         recipeService.search(
-                new RecipeSearchRequest(null, null, null, "desserts", null, null, null, null, null, null, null), pageable);
+                new RecipeSearchRequest(null, null, null, "desserts", null, null, null, null, null, null, null, null), pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(true),
                 eq(Set.of("desserts", "tartes", "tartes-aux-pommes")), eq(Set.of()), eq(0L), eq(null),
-                eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), any(Pageable.class));
     }
 
     @Test
@@ -234,11 +251,11 @@ class RecipeServiceTest {
         givenNoRecipeMatches(pageable);
 
         recipeService.search(
-                new RecipeSearchRequest(null, null, null, "desserts", null, false, null, null, null, null, null), pageable);
+                new RecipeSearchRequest(null, null, null, "desserts", null, false, null, null, null, null, null, null), pageable);
 
         verify(categoryService).findMatchingIds("desserts", null, false);
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(true), eq(Set.of("desserts")),
-                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), eq(null), any(Pageable.class));
     }
 
     /**
@@ -253,11 +270,11 @@ class RecipeServiceTest {
         givenNoRecipeMatches(pageable);
 
         recipeService.search(
-                new RecipeSearchRequest(null, null, null, null, "inexistante", null, null, null, null, null, null),
+                new RecipeSearchRequest(null, null, null, null, "inexistante", null, null, null, null, null, null, null),
                 pageable);
 
         verify(recipesRepository).searchIds(eq(null), eq(null), eq(null), eq(true), eq(Set.of()),
-                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), any(Pageable.class));
+                eq(Set.of()), eq(0L), eq(null), eq(Set.of()), eq(0L), eq(null), any(Pageable.class));
     }
 
     @Test
@@ -268,12 +285,12 @@ class RecipeServiceTest {
         Pageable pageable = PageRequest.of(2, 5, Sort.by("somethingElse"));
         givenNoRecipeMatches(pageable);
 
-        recipeService.search(new RecipeSearchRequest(null, null, null, null, null, null, null, null, null,
+        recipeService.search(new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, null,
                 RecipeSortField.TITLE, Sort.Direction.ASC), pageable);
 
         ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
         verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
-                anyLong(), used.capture());
+                anyLong(), any(), used.capture());
         assertThat(used.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.ASC, "title"));
         // Page number and size still come from the Pageable; only the ordering is taken over.
         assertThat(used.getValue().getPageNumber()).isEqualTo(2);
@@ -289,8 +306,80 @@ class RecipeServiceTest {
 
         ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
         verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(), any(), any(),
-                anyLong(), used.capture());
+                anyLong(), any(), used.capture());
         assertThat(used.getValue().getSort()).isEqualTo(Sort.by(Sort.Direction.DESC, "createdAt"));
+    }
+
+    @Test
+    void asksTheListServiceWhetherTheCallerMaySeeTheList_beforeTheQueryRuns_andPassesItsId() {
+        Pageable pageable = PageRequest.of(0, 20);
+        givenNoRecipeMatches(pageable);
+
+        recipeService.search(inList("list-1", null, null), pageable);
+
+        org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(recipeListService, recipesRepository);
+        inOrder.verify(recipeListService).requireVisible("list-1");
+        inOrder.verify(recipesRepository).searchIds(any(), any(), any(), anyBoolean(), any(), any(), anyLong(),
+                any(), any(), anyLong(), eq("list-1"), any(Pageable.class));
+    }
+
+    /** The visibility rule has one home. Here it is a 401 or a 404 from that service, and no query runs. */
+    @Test
+    void aListTheCallerMayNotSee_stopsTheSearchBeforeAnyQuery() {
+        Pageable pageable = PageRequest.of(0, 20);
+        doThrow(ResourceNotFoundException.of("recipe list", "theirs")).when(recipeListService)
+                .requireVisible("theirs");
+
+        assertThatThrownBy(() -> recipeService.search(inList("theirs", null, null), pageable))
+                .isInstanceOf(ResourceNotFoundException.class);
+
+        verifyNoInteractions(recipesRepository);
+    }
+
+    @Test
+    void withoutAListId_theListServiceIsNeverAsked_soTheSearchStaysPublic() {
+        Pageable pageable = PageRequest.of(0, 20);
+        givenNoRecipeMatches(pageable);
+
+        recipeService.search(noFilters(), pageable);
+        recipeService.search(inList("   ", null, null), pageable);
+
+        verifyNoInteractions(recipeListService);
+    }
+
+    @Test
+    void inAList_theDefaultOrderIsMostRecentlyAddedFirst() {
+        givenNoRecipeMatches(PageRequest.of(0, 20));
+
+        recipeService.search(inList("list-1", null, null), PageRequest.of(0, 20));
+
+        assertThat(sortUsed()).isEqualTo(Sort.by(Sort.Direction.DESC, "e.addedAt"));
+    }
+
+    @Test
+    void inAList_aDirectionAloneReversesTheDefaultOrder_andAnotherSortIsHonoured() {
+        givenNoRecipeMatches(PageRequest.of(0, 20));
+
+        recipeService.search(inList("list-1", null, Sort.Direction.ASC), PageRequest.of(0, 20));
+        recipeService.search(inList("list-1", RecipeSortField.TITLE, null), PageRequest.of(0, 20));
+
+        ArgumentCaptor<Pageable> used = ArgumentCaptor.forClass(Pageable.class);
+        verify(recipesRepository, org.mockito.Mockito.times(2)).searchIds(any(), any(), any(), anyBoolean(), any(),
+                any(), anyLong(), any(), any(), anyLong(), any(), used.capture());
+        assertThat(used.getAllValues()).extracting(Pageable::getSort).containsExactly(
+                Sort.by(Sort.Direction.ASC, "e.addedAt"), Sort.by(Sort.Direction.DESC, "title"));
+    }
+
+    /** There is no entry whose date it could mean, so this is the caller's mistake: a 400, not a 500. */
+    @Test
+    void addedAtWithoutAList_isRefusedAsInvalidInput_beforeAnythingIsAsked() {
+        assertThatThrownBy(() -> recipeService.search(
+                inList(null, RecipeSortField.ADDED_AT, null), PageRequest.of(0, 20)))
+                .isInstanceOf(InvalidInputException.class)
+                .hasMessageContaining("ADDED_AT");
+
+        verifyNoInteractions(recipesRepository);
+        verifyNoInteractions(recipeListService);
     }
 
     @Test

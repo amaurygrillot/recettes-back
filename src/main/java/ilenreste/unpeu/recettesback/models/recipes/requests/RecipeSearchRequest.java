@@ -1,6 +1,7 @@
 package ilenreste.unpeu.recettesback.models.recipes.requests;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import jakarta.validation.constraints.Size;
 import org.springframework.data.domain.Sort;
 import org.springframework.util.StringUtils;
@@ -96,8 +97,16 @@ import java.util.stream.Collectors;
  *                             matches no recipe, which is the honest answer rather
  *                             than the whole library. At most twenty, so the
  *                             counting query stays small
+ * @param listId               only the recipes that are in this recipe list: the way the content of a
+ *                             list is read, with the cards, paging, search and sorts of this listing.
+ *                             Combined with AND like every other criterion. <strong>The only criterion that
+ *                             needs a login</strong> — the endpoint stays public, but a {@code listId}
+ *                             without a token is a 401, and a list that is not the caller's is a 404; both
+ *                             are decided by {@code RecipeListService}, not here. With it, and no
+ *                             {@code sortBy}, the order is {@code ADDED_AT} newest first
  * @param sortBy              which column to order by, from a closed set — see
- *                             {@link RecipeSortField} for why it is not free text
+ *                             {@link RecipeSortField} for why it is not free text. {@code ADDED_AT} is
+ *                             valid only with {@code listId}
  * @param direction            {@code ASC} or {@code DESC}. Independent of
  *                             {@code sortBy}, so "oldest first" and "reverse
  *                             alphabetical" are both already expressible
@@ -136,6 +145,9 @@ public record RecipeSearchRequest(
         @Size(max = 20)
         @JsonProperty(required = false)
         Set<String> ingredientIds,
+
+        @JsonProperty(required = false)
+        String listId,
 
         @JsonProperty(required = false)
         RecipeSortField sortBy,
@@ -191,6 +203,10 @@ public record RecipeSearchRequest(
         return absentIfBlank(tagName);
     }
 
+    public String listId() {
+        return absentIfBlank(listId);
+    }
+
     /**
      * The tags a recipe must all carry: never null, trimmed, without blank values. See
      * {@link #distinctNonBlank(Set)} for why the size of this set is the number the query counts against.
@@ -234,10 +250,20 @@ public record RecipeSearchRequest(
      * Defaulting here rather than with {@code @PageableDefault} on the controller,
      * because the sort is no longer carried by {@code Pageable} at all — see
      * {@link RecipeSortField}.
+     * <p>
+     * The default depends on whether a list was asked for: the recipes of a list come most recently
+     * <em>added</em> first, the library comes newest first. And {@code ADDED_AT} is refused without a list —
+     * there is no entry whose date it could mean.
+     *
+     * @throws InvalidInputException {@code sortBy=ADDED_AT} without a {@code listId}: a 400
      */
     public Sort sort() {
-        return Sort.by(direction == null ? DEFAULT_DIRECTION : direction,
-                (sortBy == null ? DEFAULT_SORT_FIELD : sortBy).property());
+        boolean inAList = listId() != null;
+        RecipeSortField field = sortBy != null ? sortBy : inAList ? RecipeSortField.ADDED_AT : DEFAULT_SORT_FIELD;
+        if (field == RecipeSortField.ADDED_AT && !inAList) {
+            throw new InvalidInputException("sortBy=ADDED_AT needs a listId: it orders by when a recipe was added to that list.");
+        }
+        return Sort.by(direction == null ? DEFAULT_DIRECTION : direction, field.property());
     }
 
 }

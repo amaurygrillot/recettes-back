@@ -69,6 +69,7 @@ public class RecipeService {
     private final CategoryService categoryService;
     private final ReferenceNameNormalizer normalizer;
     private final CurrentUserService currentUserService;
+    private final RecipeListService recipeListService;
     private final RecipeMapper mapper;
 
     /**
@@ -83,8 +84,8 @@ public class RecipeService {
                          UnitsRepository unitsRepository, MediaRepository mediaRepository,
                          ReferenceResolver referenceResolver, CategoryService categoryService,
                          ReferenceNameNormalizer normalizer,
-                         CurrentUserService currentUserService, RecipeMapper mapper,
-                         EntityManager entityManager) {
+                         CurrentUserService currentUserService, RecipeListService recipeListService,
+                         RecipeMapper mapper, EntityManager entityManager) {
         this.recipesRepository = recipesRepository;
         this.categoriesRepository = categoriesRepository;
         this.categoryRelationsRepository = categoryRelationsRepository;
@@ -96,6 +97,7 @@ public class RecipeService {
         this.categoryService = categoryService;
         this.normalizer = normalizer;
         this.currentUserService = currentUserService;
+        this.recipeListService = recipeListService;
         this.mapper = mapper;
         this.entityManager = entityManager;
     }
@@ -129,10 +131,19 @@ public class RecipeService {
      * <p>
      * The tag and ingredient filters need no such resolution: the ids are the criterion, and the query counts
      * how many of them a recipe has. See {@code RecipesRepository.searchIds}.
+     * <p>
+     * A {@code listId} is the one criterion that is not public: {@link RecipeListService#requireVisible} runs
+     * first, so an anonymous caller is a 401 and a list that is not the caller's is a 404 before any recipe is
+     * looked at. Whether a list is visible is that service's rule alone; this method never inspects an owner.
      */
     @Transactional(readOnly = true)
     public Page<RecipeSummaryResponse> search(RecipeSearchRequest request, Pageable pageable) {
+        // Sorted first: an ADDED_AT without a listId is a 400 whoever asks, signed in or not.
         Pageable sorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), request.sort());
+        String listId = request.listId();
+        if (listId != null) {
+            recipeListService.requireVisible(listId);
+        }
         Collection<String> categoryIds = resolveCategoryFilter(request);
         Set<String> tagIds = request.tagIds();
         Set<String> ingredientIds = request.ingredientIds();
@@ -147,6 +158,7 @@ public class RecipeService {
                 normalizedOrNull(request.tagName()),
                 ingredientIds,
                 ingredientIds.size(),
+                listId,
                 sorted);
         if (idPage.isEmpty()) {
             return Page.empty(sorted);
