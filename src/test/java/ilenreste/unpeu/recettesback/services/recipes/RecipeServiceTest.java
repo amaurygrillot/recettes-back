@@ -353,7 +353,8 @@ class RecipeServiceTest {
 
         recipeService.search(inList("list-1", null, null), PageRequest.of(0, 20));
 
-        assertThat(sortUsed()).isEqualTo(Sort.by(Sort.Direction.DESC, "e.addedAt"));
+        assertThat(sortUsed()).isEqualTo(
+                Sort.by(Sort.Direction.DESC, "e.addedAt").and(Sort.by(Sort.Direction.ASC, "id")));
     }
 
     @Test
@@ -367,7 +368,8 @@ class RecipeServiceTest {
         verify(recipesRepository, org.mockito.Mockito.times(2)).searchIds(any(), any(), any(), anyBoolean(), any(),
                 any(), anyLong(), any(), any(), anyLong(), any(), used.capture());
         assertThat(used.getAllValues()).extracting(Pageable::getSort).containsExactly(
-                Sort.by(Sort.Direction.ASC, "e.addedAt"), Sort.by(Sort.Direction.DESC, "title"));
+                Sort.by(Sort.Direction.ASC, "e.addedAt").and(Sort.by(Sort.Direction.ASC, "id")),
+                Sort.by(Sort.Direction.DESC, "title"));
     }
 
     /** There is no entry whose date it could mean, so this is the caller's mistake: a 400, not a 500. */

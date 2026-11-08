@@ -12,6 +12,7 @@ import ilenreste.unpeu.recettesback.entities.reference.IngredientEntity;
 import ilenreste.unpeu.recettesback.entities.reference.TagEntity;
 import ilenreste.unpeu.recettesback.entities.reference.UnitEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSearchRequest;
 import ilenreste.unpeu.recettesback.models.recipes.requests.RecipeSortField;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.reference.CategoriesRepository;
@@ -36,6 +37,7 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -721,6 +723,31 @@ class RecipesRepositoryTest {
 
         assertThat(inList(dimanche).getContent()).containsExactly(tarte.getId(), cake.getId());
         assertThat(inList(gouters).getContent()).containsExactly(cake.getId(), tarte.getId());
+    }
+
+    /**
+     * Entries added at the same instant (a bulk insert, a seed) would otherwise page in an unspecified order, and a
+     * recipe could appear on two pages while another appeared on none. The sort the request builds ends with the
+     * recipe id, so the order is total.
+     */
+    @Test
+    void recipesAddedAtTheSameInstant_pageWithoutRepeatsOrGaps_inRecipeIdOrder() {
+        RecipeListEntity list = listOfTheAuthor("Dimanche");
+        List<String> ids = new ArrayList<>();
+        for (int index = 0; index < 5; index++) {
+            RecipeEntity recipe = recipe("Recette " + index, List.of(category("plat")), List.of());
+            fixtures.put(list, recipe, NOON);
+            ids.add(recipe.getId());
+        }
+        Sort sort = new RecipeSearchRequest(null, null, null, null, null, null, null, null, null, list.getId(), null,
+                null).sort();
+
+        List<String> seen = new ArrayList<>();
+        for (int page = 0; page < 3; page++) {
+            seen.addAll(inList(list, sort, page, 2).getContent());
+        }
+
+        assertThat(seen).containsExactlyElementsOf(ids.stream().sorted().toList());
     }
 
     @Test

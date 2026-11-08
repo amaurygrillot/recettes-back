@@ -23,6 +23,7 @@ import java.util.stream.Stream;
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.verify;
 
@@ -323,6 +324,9 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
                 Arguments.of("a text-style heart without its variation selector", listJson("Desserts", "\u2764")),
                 Arguments.of("an emoji sequence over 32 characters",
                         listJson("Desserts", String.join("\u200D", Collections.nCopies(12, "\uD83D\uDC69")))),
+                Arguments.of("a name of no-break spaces", listJson(ofCodePoints(0x00A0, 0x00A0), CAKE)),
+                Arguments.of("a name of a zero-width space", listJson(ofCodePoints(0x200B), CAKE)),
+                Arguments.of("a name that is a lone combining accent", listJson(ofCodePoints(0x0301), CAKE)),
                 Arguments.of("a body that is not JSON", "{"),
                 Arguments.of("an empty object", "{}"));
     }
@@ -366,6 +370,10 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
     void everyKindOfEmoji_isAccepted(String description, String emoji) {
         assertThat(post("/lists", listJson(unique("List"), emoji), ownerToken).getStatusCode())
                 .as(description).isEqualTo(HttpStatus.CREATED);
+    }
+
+    private static String ofCodePoints(int... codePoints) {
+        return new String(codePoints, 0, codePoints.length);
     }
 
     static Stream<Arguments> validEmojis() {
@@ -457,6 +465,27 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
         assertThat(delete("/lists/" + first, ownerToken).getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
         assertThat(post("/lists", listJson("Une de plus", CAKE), ownerToken).getStatusCode())
                 .isEqualTo(HttpStatus.CREATED);
+    }
+
+    /**
+     * The list is deleted from another tab after the service loaded it and before its UPDATE: the UPDATE touches no
+     * row, Hibernate reports it as an optimistic-locking failure, and nothing is wrong with the request. The list is
+     * simply gone, which a retry would answer 404.
+     * <p>
+     * The name check, which runs after the list is loaded and before it is written, is spied: it deletes the row
+     * INSIDE the transaction of the service and answers what the real check would have, "that name is free".
+     */
+    @Test
+    void aListDeletedBetweenTheCheckAndTheRename_is404_notAServerError() {
+        String id = createList("Desserts", ownerToken);
+        doAnswer(check -> {
+            jdbc.update("DELETE FROM recipe_lists WHERE id = ?", id);
+            return Optional.empty();
+        }).when(spiedLists).findByOwnerIdAndNormalizedName(owner.id(), "gouters");
+
+        ResponseEntity<String> response = put("/lists/" + id, listJson("Gouters", PASTA), ownerToken);
+
+        assertProblem(response, HttpStatus.NOT_FOUND);
     }
 
     @Test

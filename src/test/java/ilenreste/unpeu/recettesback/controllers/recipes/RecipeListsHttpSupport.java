@@ -20,6 +20,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -27,7 +28,9 @@ import tools.jackson.databind.json.JsonMapper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -66,6 +69,8 @@ abstract class RecipeListsHttpSupport {
     @Autowired
     protected RecipeListEntriesRepository entriesRepository;
     @Autowired
+    protected JdbcTemplate jdbc;
+    @Autowired
     private RolesRepository rolesRepository;
     @Autowired
     private UserRolesRepository userRolesRepository;
@@ -93,16 +98,22 @@ abstract class RecipeListsHttpSupport {
         adminToken = admin.bearerToken(restTemplate);
     }
 
+    /**
+     * Cleans up whatever {@link #setUpAccounts()} got as far as creating, and keeps going when one step fails: these
+     * rows are committed to the development database, so a half-finished teardown is a leak in the library the
+     * developer actually uses.
+     */
     @AfterEach
     void tearDown() {
-        for (TestAccount account : List.of(owner, stranger, admin)) {
-            listsRepository.deleteAll(listsRepository.findByOwnerIdOrderByNormalizedNameAscNameAsc(account.id()));
+        List<TestAccount> accounts = Stream.of(owner, stranger, admin).filter(Objects::nonNull).toList();
+        try {
+            accounts.forEach(account -> listsRepository.deleteAll(
+                    listsRepository.findByOwnerIdOrderByNormalizedNameAscNameAsc(account.id())));
+            recipesRepository.deleteAllById(recipeIds);
+            mediaRepository.deleteAllById(mediaIds);
+        } finally {
+            accounts.reversed().forEach(TestAccount::close);
         }
-        recipesRepository.deleteAllById(recipeIds);
-        mediaRepository.deleteAllById(mediaIds);
-        admin.close();
-        stranger.close();
-        owner.close();
     }
 
     // ------------------------------------------------------------------------------------------ HTTP verbs

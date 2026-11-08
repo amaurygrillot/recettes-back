@@ -3,6 +3,7 @@ package ilenreste.unpeu.recettesback.services.recipes;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntryId;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
+import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
@@ -19,6 +20,11 @@ import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 
 import java.time.Clock;
@@ -27,6 +33,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -474,6 +481,93 @@ class RecipeListServiceTest {
         assertThatThrownBy(() -> service.removeRecipe("theirs", "tarte")).isInstanceOf(ResourceNotFoundException.class);
 
         verifyNoInteractions(entriesRepository);
+    }
+
+    // ------------------------------------------------------------------- a name with nothing to see in it
+
+    private static String ofCodePoints(int... codePoints) {
+        return new String(codePoints, 0, codePoints.length);
+    }
+
+    /**
+     * Bean validation rejects what String.isBlank() calls blank, and no more. These pass it, and a list called
+     * any of them shows an empty tile — the last one even normalises to the empty string, so the second such list
+     * would be refused as a duplicate of the first.
+     */
+    @ParameterizedTest(name = "a name made of {0}")
+    @MethodSource("namesWithNothingToSee")
+    void aNameWithNothingVisibleInIt_isRefused_beforeAnythingIsLookedUpOrSaved(String description, String name) {
+        assertThatThrownBy(() -> service.create(request(name))).isInstanceOf(InvalidInputException.class);
+
+        storedList("list-1", ME, "Desserts");
+        assertThatThrownBy(() -> service.update("list-1", request(name))).isInstanceOf(InvalidInputException.class);
+
+        verify(listsRepository, never()).saveAndFlush(any());
+        verify(listsRepository, never()).findByOwnerIdAndNormalizedName(anyString(), anyString());
+    }
+
+    static Stream<Arguments> namesWithNothingToSee() {
+        return Stream.of(
+                Arguments.of("a no-break space", ofCodePoints(0x00A0)),
+                Arguments.of("a zero-width space", ofCodePoints(0x200B)),
+                Arguments.of("a lone combining accent", ofCodePoints(0x0301)),
+                Arguments.of("an ideographic space", ofCodePoints(0x3000)),
+                Arguments.of("a soft hyphen", ofCodePoints(0x00AD)),
+                Arguments.of("spaces around a combining accent", "  " + ofCodePoints(0x0301) + " "));
+    }
+
+    @Test
+    void aNameWithAVisibleCharacterAmongTheInvisibleOnes_isAccepted() {
+        when(usersRepository.getReferenceById(ME)).thenReturn(user(ME));
+
+        assertThat(service.create(request(ofCodePoints(0x00A0) + "Tartes" + ofCodePoints(0x200B))).name())
+                .contains("Tartes");
+    }
+
+    // ------------------------------------------------------------------- the deletes that race a write
+
+    @Test
+    void addRecipe_whenTheListOrTheRecipeIsDeletedBeforeTheInsert_is404_notAServerError() {
+        storedList("list-1", ME, "Desserts");
+        when(recipesRepository.existsById("tarte")).thenReturn(true);
+        when(entriesRepository.insertIfAbsent("list-1", "tarte", NOW))
+                .thenThrow(new DataIntegrityViolationException("foreign key violation"));
+
+        assertThatThrownBy(() -> service.addRecipe("list-1", "tarte")).isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void update_whenTheListIsDeletedBeforeTheWrite_is404_notAServerError() {
+        storedList("list-1", ME, "Desserts");
+        when(listsRepository.saveAndFlush(any(RecipeListEntity.class)))
+                .thenThrow(new ObjectOptimisticLockingFailureException(RecipeListEntity.class, "list-1"));
+
+        assertThatThrownBy(() -> service.update("list-1", request("Gouters")))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessage("No recipe list with id list-1");
+    }
+
+    // ------------------------------------------------------------------- fewer round trips
+
+    @Test
+    void create_doesNotAskTheDatabaseToCountOrFindCoversForAListThatIsKnownToBeEmpty() {
+        when(usersRepository.getReferenceById(ME)).thenReturn(user(ME));
+
+        service.create(request("Desserts"));
+
+        verifyNoInteractions(entriesRepository);
+    }
+
+    @Test
+    void addRecipe_asksWhetherTheRecipeIsAlreadyThere_onlyWhenTheListIsFull() {
+        storedList("list-1", ME, "Desserts");
+        when(recipesRepository.existsById("tarte")).thenReturn(true);
+        when(entriesRepository.countByListId("list-1")).thenReturn(RecipeListService.MAX_RECIPES_PER_LIST - 1L);
+        when(entriesRepository.insertIfAbsent("list-1", "tarte", NOW)).thenReturn(1);
+
+        service.addRecipe("list-1", "tarte");
+
+        verify(entriesRepository, never()).existsById(any(RecipeListEntryId.class));
     }
 
     // ------------------------------------------------------------------------------------------------ helpers

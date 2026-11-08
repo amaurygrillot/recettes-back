@@ -167,7 +167,7 @@ public record RecipeSearchRequest(
     }
 
     /*
-     * The six text criteria below answer blank as null, which is what makes the
+     * The seven text criteria below answer blank as null, which is what makes the
      * promise in the class javadoc ("Blank strings are treated as absent") true of
      * this record rather than of whoever remembers to call a helper.
      *
@@ -263,7 +263,11 @@ public record RecipeSearchRequest(
         if (field == RecipeSortField.ADDED_AT && !inAList) {
             throw new InvalidInputException("sortBy=ADDED_AT needs a listId: it orders by when a recipe was added to that list.");
         }
-        return Sort.by(direction == null ? DEFAULT_DIRECTION : direction, field.property());
+        Sort sort = Sort.by(direction == null ? DEFAULT_DIRECTION : direction, field.property());
+        // Entries added at the same instant (a bulk insert, a seed) would otherwise page in an unspecified order, so a
+        // recipe could show up on two pages and another on none. The recipe id breaks the tie the same way the cover
+        // mosaic does, which keeps the two views of one list in step. The other sorts keep their historical behaviour.
+        return field == RecipeSortField.ADDED_AT ? sort.and(Sort.by(Sort.Direction.ASC, "id")) : sort;
     }
 
 }

@@ -4,6 +4,7 @@ import ilenreste.unpeu.recettesback.configuration.JpaAuditingConfig;
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
+import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntryId;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntryEntity;
 import ilenreste.unpeu.recettesback.entities.users.UserEntity;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
@@ -204,10 +205,8 @@ class RecipeListEntriesRepositoryTest {
         assertThat(first).isEqualTo(1);
         assertThat(again).isZero();
         entityManager.clear();
-        List<RecipeListEntryEntity> entries = entriesRepository.findAll();
-        assertThat(entries).filteredOn(entry -> entry.getList().getId().equals(list.getId()))
-                .singleElement()
-                .satisfies(entry -> assertThat(entry.getAddedAt()).isEqualTo(NOON));
+        assertThat(entriesRepository.findById(new RecipeListEntryId(list.getId(), recipe.getId())))
+                .get().satisfies(entry -> assertThat(entry.getAddedAt()).isEqualTo(NOON));
     }
 
     @Test

@@ -2,6 +2,7 @@ package ilenreste.unpeu.recettesback.services.recipes;
 
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntryId;
+import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.mappers.recipes.RecipeListMapper;
@@ -16,6 +17,8 @@ import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -127,36 +130,66 @@ public class RecipeListService {
             log.info("User {} cannot create another recipe list: they have {}", ownerId, MAX_LISTS_PER_MEMBER);
             throw RecipeListConflictException.tooManyLists(MAX_LISTS_PER_MEMBER);
         }
-        String name = request.name().trim();
-        String normalizedName = normalizer.normalize(name);
-        requireNameFree(ownerId, normalizedName, null);
-
         RecipeListEntity list = new RecipeListEntity();
         list.setOwner(usersRepository.getReferenceById(ownerId));
-        list.setName(name);
-        list.setNormalizedName(normalizedName);
-        list.setEmoji(request.emoji());
+        applyTo(list, request, ownerId, null);
         // Flushed here so that losing the name race to a concurrent request fails inside this method, as the
         // typed conflict the handler recognises, rather than at commit after the response has been built.
         RecipeListEntity saved = listsRepository.saveAndFlush(list);
         log.info("User {} created recipe list {}", ownerId, saved.getId());
-        return summariseOne(saved);
+        // A list that was just created holds nothing: no need to ask the database to count and to look for covers.
+        return mapper.toResponse(saved, 0, List.of(), null);
     }
 
-    /** Replaces the name and the emoji. {@code updatedAt} moves only if one of them actually changed. */
+    /**
+     * Replaces the name and the emoji. {@code updatedAt} moves only if one of them actually changed.
+     * <p>
+     * If the list is deleted from another tab between the check and the write, the UPDATE touches no row and
+     * Hibernate reports it as an optimistic-locking failure. Nothing is wrong with the request, and the list is
+     * simply gone: that is the 404 a retry would answer, not a 500.
+     */
     @Transactional
     public RecipeListResponse update(String listId, RecipeListRequest request) {
         RecipeListEntity list = ownedList(listId);
+        String ownerId = list.getOwner().getId();
+        applyTo(list, request, ownerId, listId);
+        try {
+            RecipeListEntity saved = listsRepository.saveAndFlush(list);
+            log.info("User {} updated recipe list {}", ownerId, listId);
+            return summariseOne(saved);
+        } catch (ObjectOptimisticLockingFailureException deletedMeanwhile) {
+            log.info("Recipe list {} was deleted while user {} was renaming it", listId, ownerId);
+            throw ResourceNotFoundException.of("recipe list", listId);
+        }
+    }
+
+    /**
+     * What create and update share: the name as typed (trimmed), its normalised form behind the uniqueness check,
+     * and the emoji.
+     *
+     * @param ownListId the list being updated, which may keep its own normalised name, or null when creating
+     */
+    private void applyTo(RecipeListEntity list, RecipeListRequest request, String ownerId, String ownListId) {
         String name = request.name().trim();
         String normalizedName = normalizer.normalize(name);
-        requireNameFree(list.getOwner().getId(), normalizedName, listId);
-
+        if (!hasVisibleCharacter(normalizedName)) {
+            // Bean validation only rejects what String.isBlank() calls blank. A name made of a no-break space, a
+            // zero-width space or a lone combining accent passes it, and the last one normalises to the empty string:
+            // a list whose tile shows nothing, and which would then collide with the next such name.
+            throw new InvalidInputException("The name must contain at least one visible character.");
+        }
+        requireNameFree(ownerId, normalizedName, ownListId);
         list.setName(name);
         list.setNormalizedName(normalizedName);
         list.setEmoji(request.emoji());
-        RecipeListEntity saved = listsRepository.saveAndFlush(list);
-        log.info("User {} updated recipe list {}", list.getOwner().getId(), listId);
-        return summariseOne(saved);
+    }
+
+    /** Something a person can see: not whitespace, a separator, a control character or an invisible format mark. */
+    private static boolean hasVisibleCharacter(String text) {
+        return text.codePoints().anyMatch(codePoint -> !Character.isWhitespace(codePoint)
+                && !Character.isSpaceChar(codePoint)
+                && Character.getType(codePoint) != Character.CONTROL
+                && Character.getType(codePoint) != Character.FORMAT);
     }
 
     /** Deletes the list and, by the database's cascade, its entries. Never the recipes. */
@@ -173,19 +206,32 @@ public class RecipeListService {
      * <p>
      * The list is checked before the recipe, so a request about someone else's list never learns whether the
      * recipe exists.
+     * <p>
+     * {@code ON CONFLICT DO NOTHING} covers the primary key and nothing else. If the list or the recipe is deleted
+     * between the checks above the insert and the insert itself, the foreign key refuses it: nothing is wrong with
+     * the request, the thing it names is gone, so that is a 404 and not the 500 an unrecognised integrity violation
+     * would be. No other constraint can refuse this insert, so any integrity violation here is that one.
      */
     @Transactional
     public void addRecipe(String listId, String recipeId) {
         ownedList(listId);
         requireRecipe(recipeId);
-        boolean alreadyThere = entriesRepository.existsById(new RecipeListEntryId(listId, recipeId));
-        if (!alreadyThere && entriesRepository.countByListId(listId) >= MAX_RECIPES_PER_LIST) {
+        // Counted first and the existence asked only for a full list: the common add costs one query, not two.
+        boolean full = entriesRepository.countByListId(listId) >= MAX_RECIPES_PER_LIST;
+        if (full && !entriesRepository.existsById(new RecipeListEntryId(listId, recipeId))) {
             log.info("Recipe list {} is full: refusing recipe {}", listId, recipeId);
             throw RecipeListConflictException.listFull(MAX_RECIPES_PER_LIST);
         }
         // Atomic, so that two identical requests in flight both succeed: the check above is not what
         // guarantees "once per list", this statement is.
-        if (entriesRepository.insertIfAbsent(listId, recipeId, Instant.now(clock)) == 1) {
+        int inserted;
+        try {
+            inserted = entriesRepository.insertIfAbsent(listId, recipeId, Instant.now(clock));
+        } catch (DataIntegrityViolationException deletedMeanwhile) {
+            log.info("Recipe list {} or recipe {} was deleted while the recipe was being added", listId, recipeId);
+            throw new ResourceNotFoundException("The recipe list or the recipe no longer exists.");
+        }
+        if (inserted == 1) {
             log.info("Recipe {} added to recipe list {}", recipeId, listId);
         } else {
             log.debug("Recipe {} was already in recipe list {}", recipeId, listId);

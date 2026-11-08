@@ -1,21 +1,26 @@
 package ilenreste.unpeu.recettesback.controllers.recipes;
 
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
+import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.services.recipes.RecipeListService;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * What is in a list, over real HTTP: adding and removing recipes, the count and the cover mosaic, the
@@ -23,6 +28,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * through {@code GET /recipes?listId=} with its default order and its {@code ADDED_AT} sort.
  */
 class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
+
+    /** Spied for one reason: to delete a list or a recipe between the checks of the service and its insert. */
+    @MockitoSpyBean
+    private RecipesRepository spiedRecipes;
 
     private static List<String> titlesOf(ResponseEntity<String> page) {
         assertThat(page.getStatusCode()).as("%s", page.getBody()).isEqualTo(HttpStatus.OK);
@@ -60,22 +69,36 @@ class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
         assertThat(titlesOf(get("/recipes?listId=" + list, ownerToken))).containsExactly("B second", "A first");
     }
 
-    /** A double click, or a client retry: both requests must succeed, not one of them lose a race. */
+    /**
+     * A double click, or a client retry: both requests must succeed, not one of them lose a race.
+     * <p>
+     * The callers are released together by a start gate. Without it the first would usually finish before the last
+     * had been scheduled, and a regression to "check, then insert" would pass most of the time.
+     */
     @Test
     void identicalAddsInFlightAtTheSameTime_allSucceed() throws Exception {
         String list = createList("Desserts", ownerToken);
         String recipe = recipe(unique("Tarte"));
         int callers = 8;
+        CountDownLatch everyoneIsWaiting = new CountDownLatch(callers);
+        CountDownLatch go = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(callers);
         try {
-            List<Callable<HttpStatus>> adds = IntStream.range(0, callers)
-                    .<Callable<HttpStatus>>mapToObj(index ->
-                            () -> HttpStatus.valueOf(put("/lists/" + list + "/recipes/" + recipe, null, ownerToken)
-                                    .getStatusCode().value()))
-                    .toList();
+            List<Future<HttpStatus>> adds = new ArrayList<>();
+            for (int caller = 0; caller < callers; caller++) {
+                adds.add(pool.submit(() -> {
+                    everyoneIsWaiting.countDown();
+                    go.await();
+                    return HttpStatus.valueOf(put("/lists/" + list + "/recipes/" + recipe, null, ownerToken)
+                            .getStatusCode().value());
+                }));
+            }
+            assertThat(everyoneIsWaiting.await(10, TimeUnit.SECONDS)).as("every caller is ready").isTrue();
+            go.countDown();
+
             List<HttpStatus> statuses = new ArrayList<>();
-            for (Future<HttpStatus> add : pool.invokeAll(adds)) {
-                statuses.add(add.get());
+            for (Future<HttpStatus> add : adds) {
+                statuses.add(add.get(30, TimeUnit.SECONDS));
             }
 
             assertThat(statuses).hasSize(callers).containsOnly(HttpStatus.NO_CONTENT);
@@ -83,6 +106,45 @@ class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
             pool.shutdownNow();
         }
         assertThat(listOf(list, ownerToken).path("recipeCount").asLong()).isEqualTo(1);
+    }
+
+    /**
+     * ON CONFLICT DO NOTHING covers the primary key and not the foreign keys. A list (or a recipe) deleted between
+     * the checks of the service and its insert is refused by the foreign key; the thing the request names is gone,
+     * so that is the 404 a retry would answer, not a 500.
+     * <p>
+     * To land in that window on purpose, the last check before the insert (does the recipe exist?) is spied: it
+     * deletes the row, INSIDE the transaction of the service, and answers what the real check would have answered a
+     * moment earlier.
+     */
+    @Test
+    void aListDeletedBetweenTheCheckAndTheInsert_is404_notAServerError() {
+        String list = createList("Desserts", ownerToken);
+        String recipe = recipe(unique("Tarte"));
+        doAnswer(check -> {
+            jdbc.update("DELETE FROM recipe_lists WHERE id = ?", list);
+            return true;
+        }).when(spiedRecipes).existsById(recipe);
+
+        ResponseEntity<String> response = put("/lists/" + list + "/recipes/" + recipe, null, ownerToken);
+
+        assertThat(response.getStatusCode()).as("%s", response.getBody()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+    }
+
+    @Test
+    void aRecipeDeletedBetweenTheCheckAndTheInsert_is404_notAServerError() {
+        String list = createList("Desserts", ownerToken);
+        String recipe = recipe(unique("Tarte"));
+        doAnswer(check -> {
+            jdbc.update("DELETE FROM recipes WHERE id = ?", recipe);
+            return true;
+        }).when(spiedRecipes).existsById(recipe);
+
+        ResponseEntity<String> response = put("/lists/" + list + "/recipes/" + recipe, null, ownerToken);
+
+        assertThat(response.getStatusCode()).as("%s", response.getBody()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(listOf(list, ownerToken).path("recipeCount").asLong()).as("nothing half-added").isZero();
     }
 
     @Test
@@ -208,15 +270,25 @@ class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 
+    /**
+     * Both members file the same recipe. Each must be told about their own list only: with the owner filter missing
+     * from the query, each answer would carry both lists.
+     */
     @Test
     void containing_onlyEverTellsAboutTheCallersOwnLists() {
         String mine = createList("Mine", ownerToken);
+        String theirs = createList("Theirs", strangerToken);
         String recipe = recipe(unique("Tarte"));
         addToList(mine, recipe, ownerToken);
+        addToList(theirs, recipe, strangerToken);
 
+        JsonNode owners = json(get("/lists?containing=" + recipe, ownerToken));
         JsonNode strangers = json(get("/lists?containing=" + recipe, strangerToken));
 
-        assertThat(strangers).as("the stranger has no list, and learns nothing about mine").isEmpty();
+        assertThat(owners).extracting(list -> list.path("id").asString()).containsExactly(mine);
+        assertThat(strangers).extracting(list -> list.path("id").asString()).containsExactly(theirs);
+        assertThat(owners.get(0).path("containsRecipe").asBoolean()).isTrue();
+        assertThat(strangers.get(0).path("containsRecipe").asBoolean()).isTrue();
     }
 
     // ------------------------------------------------------------------------------------ count and mosaic
