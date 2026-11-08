@@ -27,7 +27,7 @@ import java.util.UUID;
  */
 public final class RecipeListFixtures {
 
-    public static final String CAKE = "🎂";
+    public static final String CAKE = "\uD83C\uDF82";
 
     private final UsersRepository usersRepository;
     private final RecipesRepository recipesRepository;

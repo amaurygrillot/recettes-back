@@ -24,9 +24,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class SingleEmojiValidatorTest {
 
-    private static final String ZWJ = "‍";
-    private static final String VARIATION_SELECTOR_16 = "️";
-    private static final String KEYCAP = "⃣";
+    private static final String ZWJ = "\u200D";
+    private static final String VARIATION_SELECTOR_16 = "\uFE0F";
+    private static final String KEYCAP = "\u20E3";
     private static final String MEDIUM_SKIN_TONE = new String(Character.toChars(0x1F3FD));
     private static final String WOMAN = new String(Character.toChars(0x1F469));
 
@@ -58,22 +58,22 @@ class SingleEmojiValidatorTest {
 
     static Stream<String> accepted() {
         return Stream.of(
-                "🎂",                                         // 🎂 birthday cake: emoji by default
-                "🍝",                                         // 🍝 spaghetti
-                "❤" + VARIATION_SELECTOR_16,                       // ❤️ text by default, qualified by U+FE0F
-                WOMAN + ZWJ + "🍳",                           // 👩‍🍳 woman cook: a ZWJ sequence
-                "👍" + MEDIUM_SKIN_TONE,                      // 👍🏽 a modifier base and a skin tone
-                "🇫🇷",                             // 🇫🇷 two regional indicators
+                "\uD83C\uDF82",                                         // 🎂 birthday cake: emoji by default
+                "\uD83C\uDF5D",                                         // 🍝 spaghetti
+                "\u2764" + VARIATION_SELECTOR_16,                       // ❤️ text by default, qualified by U+FE0F
+                WOMAN + ZWJ + "\uD83C\uDF73",                           // 👩‍🍳 woman cook: a ZWJ sequence
+                "\uD83D\uDC4D" + MEDIUM_SKIN_TONE,                      // 👍🏽 a modifier base and a skin tone
+                "\uD83C\uDDEB\uD83C\uDDF7",                             // 🇫🇷 two regional indicators
                 "1" + VARIATION_SELECTOR_16 + KEYCAP,                   // 1️⃣ keycap
                 "#" + VARIATION_SELECTOR_16 + KEYCAP,                   // #️⃣
                 "*" + VARIATION_SELECTOR_16 + KEYCAP,                   // *️⃣
-                "🏳" + VARIATION_SELECTOR_16 + ZWJ + "🌈",  // 🏳️‍🌈 text-default element inside a ZWJ
-                "🏃" + MEDIUM_SKIN_TONE + ZWJ + "♂" + VARIATION_SELECTOR_16, // 🏃🏽‍♂️ tone, then a qualified sign
-                WOMAN + ZWJ + "👩" + ZWJ + "👧" + ZWJ + "👦",  // 👩‍👩‍👧‍👦 a family
-                "☝" + MEDIUM_SKIN_TONE,                            // ☝🏽 text-default base: the tone qualifies it
+                "\uD83C\uDFF3" + VARIATION_SELECTOR_16 + ZWJ + "\uD83C\uDF08",  // 🏳️‍🌈 text-default element inside a ZWJ
+                "\uD83C\uDFC3" + MEDIUM_SKIN_TONE + ZWJ + "\u2642" + VARIATION_SELECTOR_16, // 🏃🏽‍♂️ tone, then a qualified sign
+                WOMAN + ZWJ + "\uD83D\uDC69" + ZWJ + "\uD83D\uDC67" + ZWJ + "\uD83D\uDC66",  // 👩‍👩‍👧‍👦 a family
+                "\u261D" + MEDIUM_SKIN_TONE,                            // ☝🏽 text-default base: the tone qualifies it
                 codePoints(0x1F3F4, 0xE0067, 0xE0062, 0xE0065, 0xE006E, 0xE0067, 0xE007F), // 🏴󠁧󠁢󠁥󠁮󠁧󠁿 England: a tag sequence
                 codePoints(0x1F3F4, 0x200D, 0x2620, 0xFE0F),            // 🏴‍☠️ pirate flag: the black flag WITHOUT tags
-                "©" + VARIATION_SELECTOR_16,                       // ©️ a text symbol, qualified
+                "\u00A9" + VARIATION_SELECTOR_16,                       // ©️ a text symbol, qualified
                 // 11 woman emojis joined by ZWJ: 11 * 2 + 10 = 32 characters, exactly the column width.
                 String.join(ZWJ, java.util.Collections.nCopies(11, WOMAN)));
     }
@@ -86,33 +86,33 @@ class SingleEmojiValidatorTest {
                 "1",                                                    // Character.isEmoji is true for a bare digit
                 "#",                                                    // ... and for these two
                 "*",
-                "→",                                               // → an arrow, not an emoji
-                "🎂🎂",                             // 🎂🎂 two clusters
-                "🎂a",                                        // 🎂a an emoji and a letter
-                "a🎂",
-                " 🎂",                                        // padding counts: it is a second cluster
-                "🎂 ",
+                "\u2192",                                               // → an arrow, not an emoji
+                "\uD83C\uDF82\uD83C\uDF82",                             // 🎂🎂 two clusters
+                "\uD83C\uDF82a",                                        // 🎂a an emoji and a letter
+                "a\uD83C\uDF82",
+                " \uD83C\uDF82",                                        // padding counts: it is a second cluster
+                "\uD83C\uDF82 ",
                 ZWJ,                                                    // a lone ZWJ
                 MEDIUM_SKIN_TONE,                                       // a lone skin-tone modifier
                 MEDIUM_SKIN_TONE + MEDIUM_SKIN_TONE,                    // modifiers with nothing to modify
-                "🎂" + ZWJ,                                   // a ZWJ that joins nothing
-                ZWJ + "🎂",
-                "🎂" + MEDIUM_SKIN_TONE,                      // a skin tone on a cake: not a modifier base
-                "❤",                                               // ❤ without U+FE0F: the text-style heart
-                "❤︎",                                         // ❤︎ explicitly text-style
-                "©",                                               // © a copyright sign is not an emoji until qualified
+                "\uD83C\uDF82" + ZWJ,                                   // a ZWJ that joins nothing
+                ZWJ + "\uD83C\uDF82",
+                "\uD83C\uDF82" + MEDIUM_SKIN_TONE,                      // a skin tone on a cake: not a modifier base
+                "\u2764",                                               // ❤ without U+FE0F: the text-style heart
+                "\u2764\uFE0E",                                         // ❤︎ explicitly text-style
+                "\u00A9",                                               // © a copyright sign is not an emoji until qualified
                 VARIATION_SELECTOR_16,                                  // a lone variation selector
                 KEYCAP,                                                 // a lone combining keycap
                 "1" + KEYCAP,                                           // 1⃣ a keycap not qualified by U+FE0F
                 "a" + VARIATION_SELECTOR_16 + KEYCAP,                   // a keycap of a letter
-                "🇫",                                         // 🇫 one regional indicator
-                "🇫🇷🇩🇪",     // 🇫🇷🇩🇪 two flags are two clusters
+                "\uD83C\uDDEB",                                         // 🇫 one regional indicator
+                "\uD83C\uDDEB\uD83C\uDDF7\uD83C\uDDE9\uD83C\uDDEA",     // 🇫🇷🇩🇪 two flags are two clusters
                 codePoints(0x1F3F4, 0xE0067, 0xE0062, 0xE0065, 0xE006E, 0xE0067), // England without the cancel tag
                 codePoints(0x1F382, 0xE0067, 0xE007F),                  // a tag sequence on something that is not a flag
-                "é",                                              // é as e plus an accent: one cluster, not an emoji
+                "e\u0301",                                              // é as e plus an accent: one cluster, not an emoji
                 // 12 woman emojis joined by ZWJ: a valid sequence, 35 characters, wider than the column.
                 String.join(ZWJ, java.util.Collections.nCopies(12, WOMAN)),
-                "🎂".repeat(17));                             // over 32 characters, and 17 clusters anyway
+                "\uD83C\uDF82".repeat(17));                             // over 32 characters, and 17 clusters anyway
     }
 
     @ParameterizedTest(name = "accepts {0}")

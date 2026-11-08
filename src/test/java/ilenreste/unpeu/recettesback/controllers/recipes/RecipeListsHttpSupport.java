@@ -48,8 +48,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 abstract class RecipeListsHttpSupport {
 
     /** 🎂 and 🍝, spelled with escapes so a source encoding can never change what is sent. */
-    protected static final String CAKE = "🎂";
-    protected static final String PASTA = "🍝";
+    protected static final String CAKE = "\uD83C\uDF82";
+    protected static final String PASTA = "\uD83C\uDF5D";
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
 

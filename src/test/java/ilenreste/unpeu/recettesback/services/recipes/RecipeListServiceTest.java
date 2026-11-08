@@ -49,7 +49,7 @@ class RecipeListServiceTest {
 
     private static final String ME = "user-me";
     private static final String SOMEONE_ELSE = "user-else";
-    private static final String CAKE = "🎂";
+    private static final String CAKE = "\uD83C\uDF82";
     private static final Instant NOW = Instant.parse("2026-11-08T12:00:00Z");
 
     private RecipeListsRepository listsRepository;
@@ -104,11 +104,11 @@ class RecipeListServiceTest {
     void create_storesTheTrimmedNameItsNormalisedFormAndTheEmoji_forTheCaller() {
         when(usersRepository.getReferenceById(ME)).thenReturn(user(ME));
 
-        RecipeListResponse created = service.create(new RecipeListRequest("  Pour le Dimanche  ", "🍝"));
+        RecipeListResponse created = service.create(new RecipeListRequest("  Pour le Dimanche  ", "\uD83C\uDF5D"));
 
         verify(listsRepository).saveAndFlush(any(RecipeListEntity.class));
         assertThat(created.name()).isEqualTo("Pour le Dimanche");
-        assertThat(created.emoji()).isEqualTo("🍝");
+        assertThat(created.emoji()).isEqualTo("\uD83C\uDF5D");
         assertThat(created.recipeCount()).isZero();
         assertThat(created.coverMediaIds()).isEmpty();
         assertThat(created.containsRecipe()).as("only GET /lists?containing= sets it").isNull();
@@ -149,7 +149,7 @@ class RecipeListServiceTest {
         RecipeListEntity existing = storedList("existing", ME, "Desserts");
         when(listsRepository.findByOwnerIdAndNormalizedName(ME, "desserts")).thenReturn(Optional.of(existing));
 
-        assertThatThrownBy(() -> service.create(request("  DÉSSERTS ")))
+        assertThatThrownBy(() -> service.create(request("  D\u00C9SSERTS ")))
                 .isInstanceOfSatisfying(RecipeListConflictException.class,
                         exception -> assertThat(exception.conflict()).isEqualTo(RecipeListConflict.NAME_TAKEN));
 
@@ -181,10 +181,10 @@ class RecipeListServiceTest {
     void update_replacesTheNameAndTheEmoji() {
         storedList("list-1", ME, "Desserts");
 
-        RecipeListResponse updated = service.update("list-1", new RecipeListRequest("Gouters", "🍝"));
+        RecipeListResponse updated = service.update("list-1", new RecipeListRequest("Gouters", "\uD83C\uDF5D"));
 
         assertThat(updated.name()).isEqualTo("Gouters");
-        assertThat(updated.emoji()).isEqualTo("🍝");
+        assertThat(updated.emoji()).isEqualTo("\uD83C\uDF5D");
     }
 
     @Test
@@ -192,7 +192,7 @@ class RecipeListServiceTest {
         RecipeListEntity own = storedList("list-1", ME, "desserts");
         when(listsRepository.findByOwnerIdAndNormalizedName(ME, "desserts")).thenReturn(Optional.of(own));
 
-        assertThat(service.update("list-1", request("Désserts")).name()).isEqualTo("Désserts");
+        assertThat(service.update("list-1", request("D\u00E9sserts")).name()).isEqualTo("D\u00E9sserts");
     }
 
     @Test

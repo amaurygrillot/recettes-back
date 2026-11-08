@@ -175,14 +175,14 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
     @Test
     void theListsOfAMember_comeSortedByNormalisedName_accentsAndCaseIgnored() {
         createList("zeste", ownerToken);
-        createList("Épices", ownerToken);
+        createList("\u00C9pices", ownerToken);
         createList("banane", ownerToken);
         createList("Citron", ownerToken);
 
         JsonNode lists = json(get("/lists", ownerToken));
 
         assertThat(lists).extracting(list -> list.path("name").asString())
-                .containsExactly("banane", "Citron", "Épices", "zeste");
+                .containsExactly("banane", "Citron", "\u00C9pices", "zeste");
         assertThat(lists).allSatisfy(list -> assertThat(list.has("containsRecipe")).isFalse());
     }
 
@@ -267,9 +267,9 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
         return Stream.of(
                 Arguments.of(HttpMethod.GET, "/lists", null),
                 Arguments.of(HttpMethod.GET, "/lists?containing=anything", null),
-                Arguments.of(HttpMethod.POST, "/lists", "{\"name\":\"x\",\"emoji\":\"🎂\"}"),
+                Arguments.of(HttpMethod.POST, "/lists", "{\"name\":\"x\",\"emoji\":\"\uD83C\uDF82\"}"),
                 Arguments.of(HttpMethod.GET, "/lists/anything", null),
-                Arguments.of(HttpMethod.PUT, "/lists/anything", "{\"name\":\"x\",\"emoji\":\"🎂\"}"),
+                Arguments.of(HttpMethod.PUT, "/lists/anything", "{\"name\":\"x\",\"emoji\":\"\uD83C\uDF82\"}"),
                 Arguments.of(HttpMethod.DELETE, "/lists/anything", null),
                 Arguments.of(HttpMethod.PUT, "/lists/anything/recipes/anything", null),
                 Arguments.of(HttpMethod.DELETE, "/lists/anything/recipes/anything", null),
@@ -307,22 +307,22 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
 
     static Stream<Arguments> invalidBodies() {
         return Stream.of(
-                Arguments.of("a blank name", "{\"name\":\"   \",\"emoji\":\"🎂\"}"),
-                Arguments.of("an empty name", "{\"name\":\"\",\"emoji\":\"🎂\"}"),
-                Arguments.of("no name", "{\"emoji\":\"🎂\"}"),
-                Arguments.of("a null name", "{\"name\":null,\"emoji\":\"🎂\"}"),
+                Arguments.of("a blank name", "{\"name\":\"   \",\"emoji\":\"\uD83C\uDF82\"}"),
+                Arguments.of("an empty name", "{\"name\":\"\",\"emoji\":\"\uD83C\uDF82\"}"),
+                Arguments.of("no name", "{\"emoji\":\"\uD83C\uDF82\"}"),
+                Arguments.of("a null name", "{\"name\":null,\"emoji\":\"\uD83C\uDF82\"}"),
                 Arguments.of("a name of 101 characters", listJson("x".repeat(101), CAKE)),
                 Arguments.of("no emoji", "{\"name\":\"Desserts\"}"),
                 Arguments.of("a null emoji", "{\"name\":\"Desserts\",\"emoji\":null}"),
                 Arguments.of("an empty emoji", "{\"name\":\"Desserts\",\"emoji\":\"\"}"),
                 Arguments.of("a letter for an emoji", "{\"name\":\"Desserts\",\"emoji\":\"a\"}"),
                 Arguments.of("a digit for an emoji", "{\"name\":\"Desserts\",\"emoji\":\"1\"}"),
-                Arguments.of("an arrow for an emoji", "{\"name\":\"Desserts\",\"emoji\":\"→\"}"),
+                Arguments.of("an arrow for an emoji", "{\"name\":\"Desserts\",\"emoji\":\"\u2192\"}"),
                 Arguments.of("two emojis", listJson("Desserts", CAKE + CAKE)),
                 Arguments.of("an emoji and a letter", listJson("Desserts", CAKE + "a")),
-                Arguments.of("a text-style heart without its variation selector", listJson("Desserts", "❤")),
+                Arguments.of("a text-style heart without its variation selector", listJson("Desserts", "\u2764")),
                 Arguments.of("an emoji sequence over 32 characters",
-                        listJson("Desserts", String.join("‍", Collections.nCopies(12, "👩")))),
+                        listJson("Desserts", String.join("\u200D", Collections.nCopies(12, "\uD83D\uDC69")))),
                 Arguments.of("a body that is not JSON", "{"),
                 Arguments.of("an empty object", "{}"));
     }
@@ -356,7 +356,7 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
      */
     @Test
     void aKoreanNameOfTheMaximumLength_isAccepted_evenThoughNormalisingTriplesIt() {
-        ResponseEntity<String> created = post("/lists", listJson("한".repeat(100), CAKE), ownerToken);
+        ResponseEntity<String> created = post("/lists", listJson("\uD55C".repeat(100), CAKE), ownerToken);
 
         assertThat(created.getStatusCode()).as("%s", created.getBody()).isEqualTo(HttpStatus.CREATED);
     }
@@ -370,12 +370,12 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
 
     static Stream<Arguments> validEmojis() {
         return Stream.of(
-                Arguments.of("a plain pictograph", "🎂"),
-                Arguments.of("a qualified text-default symbol", "❤️"),
-                Arguments.of("a ZWJ sequence", "👩‍🍳"),
-                Arguments.of("a skin tone", "👍🏽"),
-                Arguments.of("a flag", "🇫🇷"),
-                Arguments.of("a keycap", "1️⃣"));
+                Arguments.of("a plain pictograph", "\uD83C\uDF82"),
+                Arguments.of("a qualified text-default symbol", "\u2764\uFE0F"),
+                Arguments.of("a ZWJ sequence", "\uD83D\uDC69\u200D\uD83C\uDF73"),
+                Arguments.of("a skin tone", "\uD83D\uDC4D\uD83C\uDFFD"),
+                Arguments.of("a flag", "\uD83C\uDDEB\uD83C\uDDF7"),
+                Arguments.of("a keycap", "1\uFE0F\u20E3"));
     }
 
     // ------------------------------------------------------------------------------------------ 409
@@ -393,7 +393,7 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
 
     @Test
     void aNameAlreadyUsed_isRecognisedWhateverTheAccentsCaseAndSpacing() {
-        createList("Désserts de Noël", ownerToken);
+        createList("D\u00E9sserts de No\u00EBl", ownerToken);
 
         ResponseEntity<String> duplicate = post("/lists", listJson("  desserts   DE noel ", CAKE), ownerToken);
 

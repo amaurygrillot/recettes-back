@@ -61,13 +61,13 @@ class RecipeListsRepositoryTest {
     @Test
     void listsAMembersListsByNormalisedName_ignoringAccentsAndCase_andNobodyElses() {
         fixtures.list(owner, "zeste");
-        fixtures.list(owner, "Épices");
+        fixtures.list(owner, "\u00C9pices");
         fixtures.list(owner, "banane");
         fixtures.list(other, "Aaa, someone else's");
 
         assertThat(listsRepository.findByOwnerIdOrderByNormalizedNameAscNameAsc(owner.getId()))
                 .extracting(RecipeListEntity::getName)
-                .containsExactly("banane", "Épices", "zeste");
+                .containsExactly("banane", "\u00C9pices", "zeste");
     }
 
     @Test
@@ -82,7 +82,7 @@ class RecipeListsRepositoryTest {
 
     @Test
     void findsAListByNormalisedNameWithinOneMember() {
-        RecipeListEntity tartes = fixtures.list(owner, "Tartes salées");
+        RecipeListEntity tartes = fixtures.list(owner, "Tartes sal\u00E9es");
 
         assertThat(listsRepository.findByOwnerIdAndNormalizedName(owner.getId(), "tartes salees"))
                 .map(RecipeListEntity::getId).contains(tartes.getId());
@@ -105,7 +105,7 @@ class RecipeListsRepositoryTest {
     void theUniqueConstraintRefusesTheSameNormalisedNameForOneMember_andIsNamed() {
         fixtures.list(owner, "Desserts");
 
-        assertThatThrownBy(() -> fixtures.list(owner, "  désserts "))
+        assertThatThrownBy(() -> fixtures.list(owner, "  d\u00E9sserts "))
                 .as("a different spelling that normalises to the same name")
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(constraintNameOf(exception))
@@ -128,7 +128,7 @@ class RecipeListsRepositoryTest {
      */
     @Test
     void aNameOfTheMaximumLengthFitsEvenWhenNormalisationTriplesIt() {
-        String hangul = "한".repeat(100); // 한, which NFD splits into three jamo
+        String hangul = "\uD55C".repeat(100); // 한, which NFD splits into three jamo
         RecipeListEntity list = fixtures.list(owner, hangul);
         entityManager.clear();
 
@@ -146,7 +146,7 @@ class RecipeListsRepositoryTest {
         assertThat(list.getUpdatedAt()).isEqualTo(created);
 
         Thread.sleep(5);
-        list.setEmoji("🍝");
+        list.setEmoji("\uD83C\uDF5D");
         listsRepository.saveAndFlush(list);
 
         assertThat(list.getCreatedAt()).isEqualTo(created);
