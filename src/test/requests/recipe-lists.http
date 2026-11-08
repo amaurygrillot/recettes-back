@@ -1,0 +1,682 @@
+### Recipe lists
+### Covers: GET /lists, GET /lists?containing=, POST /lists, GET /lists/{id}, PUT /lists/{id}, DELETE /lists/{id},
+###         PUT /lists/{id}/recipes/{recipeId}, DELETE /lists/{id}/recipes/{recipeId},
+###         and the content of a list: GET /recipes?listId=
+###
+### A list is a member's PRIVATE shelf of recipes, with a name and an emoji. Only its owner can see, change or use
+### it: no other member, no visitor, no administrator. Every route needs a token. The reasoning is in
+### docs/recipe-lists.md.
+###
+### The two members below are needed to show the privacy rules: whatever the first one creates, the second one
+### gets exactly the answer it would get for a list that does not exist (404), never a 403.
+###
+### Needs at least two recipes in the library (request 4 picks the two newest). The limits (50 lists, 200 recipes
+### per list) are asserted for real by RecipeListsIntegrationTest and RecipeListContentIntegrationTest; requests 29
+### and 30 show the two answers and say how to reach them by hand.
+
+@baseUrl = http://localhost:8080
+@memberUsername = lists-member
+@memberPassword = Password123
+@memberEmail = lists-member@example.com
+@otherUsername = lists-other
+@otherPassword = Password123
+@otherEmail = lists-other@example.com
+
+### 1. Register the two members -> 201 Created (409 Conflict on a re-run: they already exist, carry on)
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "{{memberUsername}}",
+  "password": "{{memberPassword}}",
+  "email": "{{memberEmail}}"
+}
+
+> {%
+    client.test("Returns 201, or 409 if the member already exists", function () {
+        client.assert(response.status === 201 || response.status === 409, "Expected 201 or 409 but got " + response.status);
+    });
+%}
+
+### 2. Register the other member -> 201 Created (409 on a re-run)
+POST {{baseUrl}}/users/create
+Content-Type: application/json
+
+{
+  "username": "{{otherUsername}}",
+  "password": "{{otherPassword}}",
+  "email": "{{otherEmail}}"
+}
+
+> {%
+    client.test("Returns 201, or 409 if the member already exists", function () {
+        client.assert(response.status === 201 || response.status === 409, "Expected 201 or 409 but got " + response.status);
+    });
+%}
+
+### 3. Log in as each member -> 200 OK, a token each
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{memberUsername}}",
+  "password": "{{memberPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("memberToken", response.body);
+    });
+%}
+
+###
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{otherUsername}}",
+  "password": "{{otherPassword}}"
+}
+
+> {%
+    client.test("Returns 200 with a token", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.global.set("otherToken", response.body);
+    });
+%}
+
+### 4. Pick two recipes to file -> 200 OK
+### Any two recipes of the library will do. Lists hold other people's recipes as readily as one's own.
+GET {{baseUrl}}/recipes?size=2
+
+> {%
+    client.test("Returns 200 with at least two recipes", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.content.length >= 2, "Create two recipes first (recipes.http)");
+        client.global.set("recipeId", response.body.content[0].id);
+        client.global.set("secondRecipeId", response.body.content[1].id);
+    });
+%}
+
+### 5. List the lists with no token -> 401 Unauthorized
+### Every list route needs a token; there is no public read.
+GET {{baseUrl}}/lists
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 6. Create a list -> 201 Created, with a Location header and the stored list
+### The name is trimmed. The emoji is required and must be exactly one emoji. The new list is empty.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "  Pour le dimanche  ",
+  "emoji": "🍝"
+}
+
+> {%
+    client.test("Returns 201 with an empty list, trimmed", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.name === "Pour le dimanche", "Expected the trimmed name");
+        client.assert(response.body.recipeCount === 0, "Expected an empty list");
+        client.assert(response.body.coverMediaIds.length === 0, "Expected no cover yet");
+        client.assert(response.body.containsRecipe === undefined, "containsRecipe only exists with ?containing=");
+        client.assert(response.headers.valueOf("Location").endsWith(response.body.id), "Expected a Location");
+        client.global.set("listId", response.body.id);
+    });
+%}
+
+### 7. Create a list with the same name once accents, case and spacing are ignored -> 409 Conflict
+### The problem `type` is what tells this conflict from the two limits (requests 29 and 30) - never the detail.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "pour LE   dimanche",
+  "emoji": "🎂"
+}
+
+> {%
+    client.test("Returns 409 of type recipe-list-name-taken", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+        client.assert(response.body.type === "urn:recettes:problem:recipe-list-name-taken", "Got type " + response.body.type);
+    });
+%}
+
+### 8. A different member may have a list with the same name -> 201 Created
+### Uniqueness is per member.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{otherToken}}
+Content-Type: application/json
+
+{
+  "name": "Pour le dimanche",
+  "emoji": "🍝"
+}
+
+> {%
+    client.test("Returns 201", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("otherListId", response.body.id);
+    });
+%}
+
+### 9. Create a list with a blank name -> 400 Bad Request
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "   ",
+  "emoji": "🎂"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 10. Create a list with no emoji -> 400 Bad Request
+### The front proposes a default; the back requires a value.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Sans emoji"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 11. Create a list whose emoji is a letter -> 400 Bad Request
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Pas un emoji",
+  "emoji": "a"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 12. Create a list whose emoji is a bare digit -> 400 Bad Request
+### The Unicode "Emoji" property is true of digits, # and *; only 1️⃣ (a keycap) is an emoji.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Un chiffre",
+  "emoji": "1"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 13. Create a list with two emojis -> 400 Bad Request
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Deux emojis",
+  "emoji": "🎂🎂"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 14. A ZWJ sequence is ONE emoji -> 201 Created
+### 👩‍🍳 is a woman and a cooking pot joined by a zero-width joiner: a single grapheme cluster.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Recettes de mamie",
+  "emoji": "👩‍🍳"
+}
+
+> {%
+    client.test("Returns 201", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.global.set("secondListId", response.body.id);
+    });
+%}
+
+### 15. List the member's lists -> 200 OK, sorted by name, not paged
+### Accents and case do not decide the order. Only the caller's own lists appear: the other member's
+### "Pour le dimanche" is not here.
+GET {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200 with the two lists of the member, by name", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.length === 2, "Expected 2 lists but got " + response.body.length);
+        client.assert(response.body[0].name === "Pour le dimanche", "Expected the lists sorted by name");
+        client.assert(response.body[1].name === "Recettes de mamie", "Expected the lists sorted by name");
+    });
+%}
+
+### 16. Read one list -> 200 OK
+GET {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.id === client.global.get("listId"), "Expected the list asked for");
+    });
+%}
+
+### 17. Rename a list and change its emoji -> 200 OK
+### Both fields are required: a PUT replaces, it does not patch. `updatedAt` changes now, and only when the
+### name or the emoji does (never when a recipe is added or removed).
+PUT {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Repas du dimanche",
+  "emoji": "🍽️"
+}
+
+> {%
+    client.test("Returns 200 with the new name", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.name === "Repas du dimanche", "Expected the new name");
+        client.assert(response.body.updatedAt !== response.body.createdAt, "Expected updatedAt to have moved");
+    });
+%}
+
+### 18. Rename a list to another of the member's lists' names -> 409 Conflict
+PUT {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "recettes DE MAMIE",
+  "emoji": "🍽️"
+}
+
+> {%
+    client.test("Returns 409 of type recipe-list-name-taken", function () {
+        client.assert(response.status === 409, "Expected 409 but got " + response.status);
+        client.assert(response.body.type === "urn:recettes:problem:recipe-list-name-taken", "Got type " + response.body.type);
+    });
+%}
+
+### 19. Replace with only a name -> 400 Bad Request
+### A PUT needs both fields.
+PUT {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Seulement un nom"
+}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 20. Privacy: the other member reads the member's list -> 404 Not Found
+### 404 and never 403: a 403 would confirm that the id exists and is somebody's. The answer is the same as for an
+### id that names nothing (request 21).
+GET {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 21. A list that does not exist -> 404 Not Found
+GET {{baseUrl}}/lists/no-such-list
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 22. Privacy: the other member renames, deletes and fills the member's list -> 404 Not Found each time
+PUT {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{otherToken}}
+Content-Type: application/json
+
+{
+  "name": "Volée",
+  "emoji": "🏴‍☠️"
+}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+###
+DELETE {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+###
+PUT {{baseUrl}}/lists/{{listId}}/recipes/{{recipeId}}
+Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 23. Put a recipe in a list -> 204 No Content
+PUT {{baseUrl}}/lists/{{listId}}/recipes/{{recipeId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 24. Put the same recipe in again -> 204 No Content
+### Idempotent: a success that changes nothing, so a double click or a retry is harmless.
+PUT {{baseUrl}}/lists/{{listId}}/recipes/{{recipeId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204 again", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 25. Put a recipe that does not exist in a list -> 404 Not Found
+PUT {{baseUrl}}/lists/{{listId}}/recipes/no-such-recipe
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 26. Put a second recipe in the list, then read the list -> 204, then 200 with a count and a mosaic
+PUT {{baseUrl}}/lists/{{listId}}/recipes/{{secondRecipeId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+###
+GET {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Counts both recipes", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.recipeCount === 2, "Expected 2 recipes but got " + response.body.recipeCount);
+        // Up to 4 media ids: the first cover of the most recently added recipes that have one, newest first.
+        // Fewer (or none) if those recipes have no picture.
+        client.assert(response.body.coverMediaIds.length <= 4, "Expected at most 4 covers");
+    });
+%}
+
+### 27. "Which of my lists hold this recipe?" -> 200 OK, with containsRecipe on every item
+### What the « Ajouter à une liste » sheet needs. `containsRecipe` exists ONLY when `containing` is given.
+GET {{baseUrl}}/lists?containing={{recipeId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200 with containsRecipe on each list", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        var repas = response.body.find(function (list) { return list.id === client.global.get("listId"); });
+        var mamie = response.body.find(function (list) { return list.id === client.global.get("secondListId"); });
+        client.assert(repas.containsRecipe === true, "Expected the list holding the recipe to say true");
+        client.assert(mamie.containsRecipe === false, "Expected the other list to say false");
+    });
+%}
+
+###
+### 27b. ... with a recipe that does not exist -> 404 Not Found
+GET {{baseUrl}}/lists?containing=no-such-recipe
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 28. Read the content of a list through the recipe search -> 200 OK, most recently added first
+### Same cards, paging, search and sorts as the rest of the library. `listId` is combined with AND with every
+### other criterion, and is the only criterion that needs a token.
+GET {{baseUrl}}/recipes?listId={{listId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns the two recipes, the last one added first", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.totalElements === 2, "Expected 2 recipes");
+        client.assert(response.body.content[0].id === client.global.get("secondRecipeId"), "Expected the second recipe first");
+        client.assert(response.body.content[1].id === client.global.get("recipeId"), "Expected the first recipe last");
+    });
+%}
+
+###
+### 28b. ... oldest added first -> 200 OK
+GET {{baseUrl}}/recipes?listId={{listId}}&sortBy=ADDED_AT&direction=ASC
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns the first recipe added, first", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.content[0].id === client.global.get("recipeId"), "Expected the first recipe first");
+    });
+%}
+
+###
+### 28c. ... sorted by title instead -> 200 OK
+GET {{baseUrl}}/recipes?listId={{listId}}&sortBy=TITLE&direction=ASC
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+###
+### 28d. ADDED_AT without a listId -> 400 Bad Request
+### There is no list whose "added at" it could mean.
+GET {{baseUrl}}/recipes?sortBy=ADDED_AT
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+###
+### 28e. A listId with no token -> 401 Unauthorized
+### The search stays public; only this criterion needs a login.
+GET {{baseUrl}}/recipes?listId={{listId}}
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+###
+### 28f. The other member asks for the content of the member's list -> 404 Not Found
+GET {{baseUrl}}/recipes?listId={{listId}}
+Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 29. Create lists beyond the limit of 50 -> 201 Created until the member has 50, then 409 Conflict
+### NOT SCRIPTABLE end to end: a .http file cannot loop. Send this request again and again; each run uses a fresh
+### name ({{$uuid}}), so it creates one more list until the member has 50, then answers 409 with the type
+### urn:recettes:problem:too-many-recipe-lists. RecipeListsIntegrationTest does it for real.
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Liste {{$uuid}}",
+  "emoji": "📚"
+}
+
+> {%
+    client.test("Returns 201 until the limit, then 409 of type too-many-recipe-lists", function () {
+        client.assert(response.status === 201 || response.status === 409, "Expected 201 or 409 but got " + response.status);
+        if (response.status === 409) {
+            client.assert(response.body.type === "urn:recettes:problem:too-many-recipe-lists", "Got type " + response.body.type);
+        }
+    });
+%}
+
+### 30. Put a 201st recipe in a full list -> 409 Conflict
+### NOT SCRIPTABLE end to end: it needs a list holding 200 recipes. Set @fullListId to such a list (the integration
+### test builds one) and @notInItRecipeId to a recipe that is not in it. The answer is 409 with the type
+### urn:recettes:problem:recipe-list-full - and 204 for a recipe that IS already in the list, because nothing would
+### be added.
+@fullListId = replace-with-a-list-holding-200-recipes
+@notInItRecipeId = replace-with-a-recipe-that-is-not-in-it
+PUT {{baseUrl}}/lists/{{fullListId}}/recipes/{{notInItRecipeId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 409 of type recipe-list-full (404 until the placeholders are replaced)", function () {
+        client.assert(response.status === 409 || response.status === 404, "Expected 409 (or 404 for the placeholders) but got " + response.status);
+        if (response.status === 409) {
+            client.assert(response.body.type === "urn:recettes:problem:recipe-list-full", "Got type " + response.body.type);
+        }
+    });
+%}
+
+### 31. Take a recipe out of a list -> 204 No Content
+DELETE {{baseUrl}}/lists/{{listId}}/recipes/{{recipeId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 32. Take it out again -> 204 No Content
+### Idempotent: removing a recipe that is not in the list is a success, and so is removing one that no longer
+### exists at all (a recipe deleted in the meantime has already left every list).
+DELETE {{baseUrl}}/lists/{{listId}}/recipes/{{recipeId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204 again", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+###
+DELETE {{baseUrl}}/lists/{{listId}}/recipes/no-such-recipe
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204 for a recipe that does not exist", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 33. Delete a list -> 204 No Content
+### Deletes its entries, never the recipes (request 34 shows the recipe is still there).
+DELETE {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### 34. The list is gone, the recipe is not -> 404, then 200
+GET {{baseUrl}}/lists/{{listId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+###
+GET {{baseUrl}}/recipes/{{secondRecipeId}}
+
+> {%
+    client.test("Returns 200: deleting a list never deletes a recipe", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+    });
+%}
+
+### 35. Clean up: delete the other lists -> 204 No Content
+### Deleting a RECIPE removes it from every list the same way (cascade in the database); try it with
+### DELETE /recipes/{id} from recipes.http, then GET /lists to see the count drop.
+DELETE {{baseUrl}}/lists/{{secondListId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+###
+DELETE {{baseUrl}}/lists/{{otherListId}}
+Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
