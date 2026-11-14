@@ -500,7 +500,7 @@ class RecipeServiceTest {
         MediaEntity first = media("media-1");
         MediaEntity second = media("media-2");
         MediaEntity third = media("media-3");
-        when(mediaRepository.findAllById(any())).thenAnswer(invocation -> {
+        when(mediaRepository.findAllPublicById(any())).thenAnswer(invocation -> {
             Collection<String> ids = invocation.getArgument(0);
             return Stream.of(first, second, third)
                     .filter(entity -> ids.contains(entity.getId()))
@@ -552,7 +552,7 @@ class RecipeServiceTest {
         category.setId("cat-1");
         category.setName("Dessert");
         when(categoriesRepository.findAllById(any())).thenReturn(List.of(category));
-        when(mediaRepository.findAllById(any())).thenReturn(List.of());
+        when(mediaRepository.findAllPublicById(any())).thenReturn(List.of());
         when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
 
         CreateRecipeRequest request = new CreateRecipeRequest("Tarte", null, null,

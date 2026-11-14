@@ -25,7 +25,9 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import java.io.UncheckedIOException;
@@ -109,6 +111,26 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 : "That file is too large.";
         return handleExceptionInternal(exception, ProblemDetail.forStatusAndDetail(status, detail),
                 headers, status, request);
+    }
+
+    /**
+     * A file sent the wrong way: the request is not {@code multipart/form-data}, so Spring has no part to give the
+     * controller — a 415, and not the 500 it fell to when nothing mapped it.
+     * <p>
+     * Only that case. A {@link MultipartException} on a request that <em>is</em> multipart is a body that could not be
+     * parsed or a temporary file that could not be written, which can be the server's own failure (a full disk, an
+     * antivirus quarantining the spooled part), so it stays the unexpected failure it was. Its subclass
+     * {@link MaxUploadSizeExceededException} keeps the 413 of the hook above: the handler whose declared type is
+     * closest wins.
+     */
+    @ExceptionHandler(MultipartException.class)
+    ResponseEntity<ProblemDetail> handleMultipart(MultipartException exception, HttpServletRequest request) {
+        if (StringUtils.startsWithIgnoreCase(request.getContentType(), "multipart/")) {
+            return handleUnexpected(exception, request);
+        }
+        log.debug("Rejecting a file upload that is not multipart/form-data: {}", exception.getMessage());
+        return problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                "The file must be sent as multipart/form-data, in a part named 'file'.");
     }
 
     /**

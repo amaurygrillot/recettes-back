@@ -1,7 +1,10 @@
 package ilenreste.unpeu.recettesback.services.recipes;
 
+import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntryId;
+import ilenreste.unpeu.recettesback.services.media.MediaService;
+import java.util.function.Function;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
@@ -77,11 +80,13 @@ public class RecipeListService {
     private final ReferenceNameNormalizer normalizer;
     private final RecipeListMapper mapper;
     private final Clock clock;
+    private final MediaService mediaService;
 
     public RecipeListService(RecipeListsRepository listsRepository, RecipeListEntriesRepository entriesRepository,
                              RecipesRepository recipesRepository, UsersRepository usersRepository,
                              CurrentUserService currentUserService, ReferenceNameNormalizer normalizer,
-                             RecipeListMapper mapper, Clock clock) {
+                             RecipeListMapper mapper, Clock clock, MediaService mediaService) {
+        this.mediaService = mediaService;
         this.listsRepository = listsRepository;
         this.entriesRepository = entriesRepository;
         this.recipesRepository = recipesRepository;
@@ -228,14 +233,17 @@ public class RecipeListService {
      */
     @Transactional
     public void delete(String listId) {
-        RecipeListEntity list = ownedList(listId);
+        // Loaded WITH the row lock, so a PUT /lists/{id}/cover that is attaching a photo finishes first and this
+        // sees it: the photo's files can only be deleted if they are known. A second delete of the same list waits
+        // here and then finds nothing, which is a 404, so no optimistic-locking catch is needed any more.
+        RecipeListEntity list = ownedListForUpdate(listId);
         String ownerId = list.getOwner().getId();
-        try {
-            listsRepository.delete(list);
-            listsRepository.flush();
-        } catch (ObjectOptimisticLockingFailureException deletedMeanwhile) {
-            log.info("Recipe list {} was already deleted when user {} deleted it", listId, ownerId);
-            throw ResourceNotFoundException.of("recipe list", listId);
+        MediaEntity cover = list.getCover();
+        // The list first: its row references the photo's, which cannot be deleted while it is there.
+        listsRepository.delete(list);
+        if (cover != null) {
+            // Reads the photo's storage keys before anything is deleted, and deletes the files after commit.
+            mediaService.deleteAfterCommit(cover);
         }
         log.info("User {} deleted recipe list {}", ownerId, listId);
     }
@@ -301,14 +309,35 @@ public class RecipeListService {
 
     // ------------------------------------------------------------------------------------- who may do what
 
-    /** The one place that decides who may <em>see</em> a list. */
-    private RecipeListEntity visibleList(String listId) {
-        return load(listId, this::isVisibleTo);
+    /**
+     * What a write to a list's photo asks first, before it spends an upload: may the caller change this list?
+     *
+     * @throws ResourceNotFoundException if the list does not exist or is not the caller's
+     */
+    @Transactional(readOnly = true)
+    public void requireOwned(String listId) {
+        ownedList(listId);
+    }
+
+    /**
+     * The one place that decides who may <em>see</em> a list. Package-private so that the cover service of a list
+     * asks the same question instead of copying it: a list's photo is visible to exactly whoever may see the list.
+     */
+    RecipeListEntity visibleList(String listId) {
+        return load(listId, this::isVisibleTo, listsRepository::findById);
     }
 
     /** Who may <em>change</em> a list. Not the same question as {@link #visibleList}, and it stays owner-only. */
-    private RecipeListEntity ownedList(String listId) {
-        return load(listId, this::isOwnedBy);
+    RecipeListEntity ownedList(String listId) {
+        return load(listId, this::isOwnedBy, listsRepository::findById);
+    }
+
+    /**
+     * {@link #ownedList} with the row lock ({@code PESSIMISTIC_WRITE}), for what writes the list's photo or deletes the
+     * list. Must be the first load of the list in its transaction, or the lock would return the state read before it.
+     */
+    RecipeListEntity ownedListForUpdate(String listId) {
+        return load(listId, this::isOwnedBy, listsRepository::findWithLockById);
     }
 
     private boolean isVisibleTo(RecipeListEntity list, String userId) {
@@ -324,9 +353,10 @@ public class RecipeListService {
      * the id exists and is somebody's. They are logged differently: a stale id is routine, a list that exists
      * and is not the caller's is somebody probing, and the log is the only place that difference is visible.
      */
-    private RecipeListEntity load(String listId, BiPredicate<RecipeListEntity, String> rule) {
+    private RecipeListEntity load(String listId, BiPredicate<RecipeListEntity, String> rule,
+                                  Function<String, Optional<RecipeListEntity>> finder) {
         String callerId = callerId();
-        Optional<RecipeListEntity> found = listsRepository.findById(listId);
+        Optional<RecipeListEntity> found = finder.apply(listId);
         if (found.isEmpty()) {
             log.debug("User {} asked for recipe list {}, which does not exist", callerId, listId);
         } else if (!rule.test(found.get(), callerId)) {
@@ -360,7 +390,8 @@ public class RecipeListService {
 
     // -------------------------------------------------------------------------------------------- mapping
 
-    private RecipeListResponse summariseOne(RecipeListEntity list) {
+    /** The response for one list, mapped inside the transaction that loaded it. Shared with the cover service. */
+    RecipeListResponse summariseOne(RecipeListEntity list) {
         return summarise(List.of(list), null).getFirst();
     }
 

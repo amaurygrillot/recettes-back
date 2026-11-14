@@ -65,7 +65,7 @@ class IngredientServiceTest {
         when(ingredientsRepository.findByNormalizedName(anyString())).thenReturn(Optional.empty());
         when(ingredientsRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         MediaEntity icon = new MediaEntity();
-        when(mediaRepository.findById("media-1")).thenReturn(Optional.of(icon));
+        when(mediaRepository.findPublicById("media-1")).thenReturn(Optional.of(icon));
 
         ingredientService.createIngredient(new IngredientRequest("Farine", "media-1"));
 
@@ -77,7 +77,7 @@ class IngredientServiceTest {
         // 400, not 404: /ingredients exists and is perfectly reachable, and a 404 here would send
         // anyone debugging the call looking for a missing route.
         when(ingredientsRepository.findByNormalizedName(anyString())).thenReturn(Optional.empty());
-        when(mediaRepository.findById("ghost")).thenReturn(Optional.empty());
+        when(mediaRepository.findPublicById("ghost")).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> ingredientService.createIngredient(
                 new IngredientRequest("Farine", "ghost")))
@@ -131,7 +131,7 @@ class IngredientServiceTest {
         when(ingredientsRepository.findByNormalizedName(anyString())).thenReturn(Optional.empty());
         when(ingredientsRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         MediaEntity icon = new MediaEntity();
-        when(mediaRepository.findById("media-1")).thenReturn(Optional.of(icon));
+        when(mediaRepository.findPublicById("media-1")).thenReturn(Optional.of(icon));
 
         ingredientService.createIngredient(new IngredientRequest("Farine", "media-1"));
 

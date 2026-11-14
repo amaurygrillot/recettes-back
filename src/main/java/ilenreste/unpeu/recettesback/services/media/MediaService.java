@@ -15,6 +15,8 @@ import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -31,7 +33,7 @@ import java.util.stream.Collectors;
 /**
  * The upload and download pipeline for user-supplied images.
  * <p>
- * Every step of {@link #upload} is a gate, and a failure at any of them stores
+ * Every step of {@link #intake} is a gate, and a failure at any of them stores
  * nothing:
  * <ol>
  *   <li><strong>Size</strong> — enforced by the servlet container before a byte
@@ -48,13 +50,15 @@ import java.util.stream.Collectors;
  *   <li><strong>Re-encode</strong> — so the stored bytes are ours, not the
  *       uploader's.</li>
  *   <li><strong>Write</strong> under a server-generated key, atomically.</li>
- *   <li><strong>Insert</strong> the row, measuring every column from the
- *       artefact of steps 4 and 5.</li>
  * </ol>
- * Steps 6 and 7 share one {@code try}: if either file write <em>or</em> the
- * insert fails, every file already written is deleted, so the claim above —
- * a failure at any step stores nothing — holds for the thumbnail write too and
- * not only for the insert.
+ * Those are {@link #intake}, and they <strong>create no row</strong>: what the two files become is the caller's
+ * decision. {@link #upload} ({@code POST /media}) then inserts a public row, measuring every column from the
+ * artefact of the steps above; a list's own photo is attached in the transaction of its list, so that its row is
+ * born attached and never exists as an ordinary, publicly readable image (see {@code docs/recipe-list-cover.md}).
+ * Whoever cannot finish must {@link #discard} the files, since no transaction covers the filesystem.
+ * <p>
+ * The two file writes share one {@code try}: if either fails, both files are deleted, so the claim above — a
+ * failure at any step stores nothing — holds for the thumbnail write as well as for the insert.
  */
 @Log4j2
 @Service
@@ -96,6 +100,36 @@ public class MediaService {
     }
 
     public MediaResponse upload(MultipartFile file) {
+        StoredImage image = intake(file);
+        try {
+            MediaEntity saved = persist(image);
+            log.info("Stored media {} as {}x{} {}", saved.getId(),
+                    saved.getWidth(), saved.getHeight(), saved.getContentType());
+            return mediaMapper.toResponse(saved);
+        } catch (RuntimeException exception) {
+            // The files are on disk and no transaction covers them, so unwind by hand -
+            // otherwise every failed upload leaves orphans nothing will ever reference.
+            log.error("Rolling back the files written for a media upload that could not be completed",
+                    exception);
+            discard(image);
+            throw exception;
+        }
+    }
+
+    /**
+     * The gates of the pipeline, then both files on disk. <strong>No row, no transaction</strong>: it holds no
+     * database connection while an image decodes or while the request waits for a processing permit, which is why a
+     * caller that needs a transaction opens it <em>after</em> this returns.
+     * <p>
+     * Shared by {@code POST /media} and by a list's own photo, which therefore answer the same statuses, are counted
+     * by the same rate limit and decode under the same pool.
+     *
+     * @throws ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException (429) the account's allowance is spent
+     * @throws InvalidInputException                                               (400) no file, not an allowed
+     *                                                                             image, undecodable or too large
+     * @throws ServiceOverloadedException                                          (503) the decode pool is full
+     */
+    public StoredImage intake(MultipartFile file) {
         // First, and before the bytes are read into the heap: a refusal here must be the cheapest
         // thing this method can do, or the limit protecting the disk becomes a way to spend memory.
         enforceRateLimit();
@@ -114,47 +148,105 @@ public class MediaService {
         String storageKey = storageKeyFor(storageId, reencoded.format(), "");
         String thumbnailKey = storageKeyFor(storageId, reencoded.format(), "_thumb");
 
-        // Both writes are inside the try, not just the insert. The thumbnail write can fail on its
-        // own - a full disk, a directory that turned unwritable between the two calls - and when it
-        // did, the full-size file written the line before stayed on disk with no row pointing at
-        // it. Nothing would ever find it again: the orphan sweep enumerates media rows, so a file
-        // with no row is invisible to it permanently. delete() is best-effort and swallows its own
-        // failures, so unwinding a file that was never written is harmless.
+        // Both writes are inside the try. The thumbnail write can fail on its own - a full disk, a
+        // directory that turned unwritable between the two calls - and when it did, the full-size
+        // file written the line before stayed on disk with no row pointing at it. Nothing would
+        // ever find it again: the orphan sweep enumerates media rows, so a file with no row is
+        // invisible to it permanently. delete() is best-effort and swallows its own failures, so
+        // unwinding a file that was never written is harmless.
         try {
             storageService.store(storageKey, reencoded.full());
             storageService.store(thumbnailKey, reencoded.thumb());
-
-            MediaEntity saved = mediaRepository.save(toEntity(reencoded, storageKey, thumbnailKey));
-            log.info("Stored media {} as {}x{} {}", saved.getId(),
-                    saved.getWidth(), saved.getHeight(), saved.getContentType());
-            return mediaMapper.toResponse(saved);
         } catch (RuntimeException exception) {
-            // The files may already be on disk and no transaction covers them, so unwind by hand -
-            // otherwise every failed upload leaves orphans nothing will ever reference.
             log.error("Rolling back the files written for a media upload that could not be completed",
                     exception);
             storageService.delete(storageKey);
             storageService.delete(thumbnailKey);
             throw exception;
         }
+        // Every field is measured from what we wrote, never from what was uploaded.
+        return new StoredImage(storageKey, thumbnailKey, reencoded.format(), reencoded.width(), reencoded.height(),
+                reencoded.full().length, sha256(reencoded.full()));
     }
 
     /**
-     * The bytes to serve for one media id and variant.
+     * Inserts the row for the files {@link #intake} wrote. It joins the caller's transaction if there is one, which is
+     * how a list's own photo is inserted and attached in a single commit.
+     */
+    public MediaEntity persist(StoredImage image) {
+        MediaEntity media = new MediaEntity();
+        // Read off the format rather than hard-coded here: the format is what knows whether it
+        // produces a photo or a video, so the day VIDEO exists there is no branch to remember.
+        media.setMediaType(image.format().mediaType());
+        media.setStorageKey(image.storageKey());
+        media.setThumbnailStorageKey(image.thumbnailStorageKey());
+        media.setContentType(image.format().contentType());
+        media.setWidth(image.width());
+        media.setHeight(image.height());
+        media.setSizeBytes(image.sizeBytes());
+        media.setChecksumSha256(image.checksumSha256());
+        return mediaRepository.save(media);
+    }
+
+    /**
+     * Deletes the files of an {@link #intake} whose row will never exist. Best effort, like every delete of the
+     * storage: a file that cannot be deleted is logged by {@link MediaStorageService#delete} with its key.
+     */
+    public void discard(StoredImage image) {
+        storageService.delete(image.storageKey());
+        storageService.delete(image.thumbnailStorageKey());
+    }
+
+    /**
+     * Deletes the row now, and both files <strong>once the surrounding transaction has committed</strong>, so that a
+     * rollback never leaves a row pointing at a deleted file. A file that cannot be deleted is logged by
+     * {@link MediaStorageService#delete} with its key and does not fail the request: there is no second log line and
+     * no second delete path.
+     * <p>
+     * Only for a row nothing else references, which is true of a list's own photo and of nothing else: nothing accepts
+     * its id as a recipe's picture or an ingredient's icon.
      *
-     * @throws ResourceNotFoundException if there is no such row, <em>or</em> the row
+     * @throws IllegalStateException if no transaction is active, which is a bug in the caller
+     */
+    public void deleteAfterCommit(MediaEntity media) {
+        String storageKey = media.getStorageKey();
+        String thumbnailKey = media.getThumbnailStorageKey();
+        mediaRepository.delete(media);
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                storageService.delete(storageKey);
+                storageService.delete(thumbnailKey);
+            }
+        });
+    }
+
+    /**
+     * The bytes to serve for one media id and variant, <strong>for a public id</strong>: a list's own photo is not
+     * found here, whoever asks, and answers exactly like an id that does not exist.
+     *
+     * @throws ResourceNotFoundException if there is no such public row, <em>or</em> the row
      *                                   exists but its file does not. The second case is real:
      *                                   restoring a database newer than the media directory
      *                                   leaves rows pointing at missing files, and that must be
      *                                   a 404 rather than a 500
      */
     public StoredMedia load(String id, MediaVariant variant) {
-        MediaEntity media = mediaRepository.findById(id)
+        MediaEntity media = mediaRepository.findPublicById(id)
                 .orElseThrow(() -> ResourceNotFoundException.of("media", id));
+        return open(media, variant);
+    }
 
+    /**
+     * The bytes of a row the caller has <strong>already decided may be read</strong>. This does not look at who is
+     * asking: {@link #load} decides it for a public id, and the cover service of a list for its own photo.
+     *
+     * @throws ResourceNotFoundException if the row's file is gone
+     */
+    public StoredMedia open(MediaEntity media, MediaVariant variant) {
         String key = variant == MediaVariant.THUMBNAIL ? media.getThumbnailStorageKey() : media.getStorageKey();
         Resource resource = storageService.load(key)
-                .orElseThrow(() -> ResourceNotFoundException.of("media file for", id));
+                .orElseThrow(() -> ResourceNotFoundException.of("media file for", media.getId()));
 
         String extension = ImageFormat.fromContentType(media.getContentType()).extension();
         return new StoredMedia(resource, media.getContentType(),
@@ -208,22 +300,6 @@ public class MediaService {
     private String storageKeyFor(String storageId, ImageFormat format, String suffix) {
         return "%s/%s/%s%s.%s".formatted(
                 storageId.substring(0, 2), storageId.substring(2, 4), storageId, suffix, format.extension());
-    }
-
-    private MediaEntity toEntity(ReencodedImage reencoded, String storageKey, String thumbnailKey) {
-        MediaEntity media = new MediaEntity();
-        // Read off the format rather than hard-coded here: the format is what knows whether it
-        // produces a photo or a video, so the day VIDEO exists there is no branch to remember.
-        media.setMediaType(reencoded.format().mediaType());
-        media.setStorageKey(storageKey);
-        media.setThumbnailStorageKey(thumbnailKey);
-        // Every column below is measured from what we wrote, never from what was uploaded.
-        media.setContentType(reencoded.format().contentType());
-        media.setWidth(reencoded.width());
-        media.setHeight(reencoded.height());
-        media.setSizeBytes(reencoded.full().length);
-        media.setChecksumSha256(sha256(reencoded.full()));
-        return media;
     }
 
     /**

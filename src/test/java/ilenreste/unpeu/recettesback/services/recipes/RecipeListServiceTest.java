@@ -17,6 +17,7 @@ import ilenreste.unpeu.recettesback.repositories.recipes.RecipeListsRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
+import ilenreste.unpeu.recettesback.services.media.MediaService;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,6 +67,7 @@ class RecipeListServiceTest {
     private RecipesRepository recipesRepository;
     private UsersRepository usersRepository;
     private CurrentUserService currentUserService;
+    private MediaService mediaService;
     private RecipeListService service;
 
     @BeforeEach
@@ -75,9 +77,10 @@ class RecipeListServiceTest {
         recipesRepository = mock(RecipesRepository.class);
         usersRepository = mock(UsersRepository.class);
         currentUserService = mock(CurrentUserService.class);
+        mediaService = mock(MediaService.class);
         service = new RecipeListService(listsRepository, entriesRepository, recipesRepository, usersRepository,
                 currentUserService, new ReferenceNameNormalizer(), new RecipeListMapper(),
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC), mediaService);
         signInAs(ME);
         when(listsRepository.saveAndFlush(any(RecipeListEntity.class))).thenAnswer(call -> call.getArgument(0));
     }
@@ -100,6 +103,7 @@ class RecipeListServiceTest {
         list.setNormalizedName(new ReferenceNameNormalizer().normalize(name));
         list.setEmoji(CAKE);
         when(listsRepository.findById(id)).thenReturn(Optional.of(list));
+        when(listsRepository.findWithLockById(id)).thenReturn(Optional.of(list));
         return list;
     }
 
@@ -119,7 +123,7 @@ class RecipeListServiceTest {
         assertThat(created.name()).isEqualTo("Pour le Dimanche");
         assertThat(created.emoji()).isEqualTo("\uD83C\uDF5D");
         assertThat(created.recipeCount()).isZero();
-        assertThat(created.coverMediaIds()).isEmpty();
+        assertThat(created.recipeCoverMediaIds()).isEmpty();
         assertThat(created.containsRecipe()).as("only GET /lists?containing= sets it").isNull();
     }
 
@@ -245,7 +249,7 @@ class RecipeListServiceTest {
         RecipeListResponse response = service.get("list-1");
 
         assertThat(response.recipeCount()).isEqualTo(12);
-        assertThat(response.coverMediaIds()).containsExactly("m1", "m2");
+        assertThat(response.recipeCoverMediaIds()).containsExactly("m1", "m2");
         assertThat(response.containsRecipe()).isNull();
     }
 
@@ -299,9 +303,9 @@ class RecipeListServiceTest {
 
         assertThat(lists).extracting(RecipeListResponse::name).containsExactly("Pleine", "Vide");
         assertThat(lists.get(0).recipeCount()).isEqualTo(3);
-        assertThat(lists.get(0).coverMediaIds()).containsExactly("m1");
+        assertThat(lists.get(0).recipeCoverMediaIds()).containsExactly("m1");
         assertThat(lists.get(1).recipeCount()).isZero();
-        assertThat(lists.get(1).coverMediaIds()).isEmpty();
+        assertThat(lists.get(1).recipeCoverMediaIds()).isEmpty();
         assertThat(lists).extracting(RecipeListResponse::containsRecipe).containsOnlyNulls();
         verify(entriesRepository).countEntriesOf(anyCollection());
         verify(entriesRepository).findCovers(anyCollection(), anyInt());
@@ -357,17 +361,6 @@ class RecipeListServiceTest {
         service.delete("mine");
 
         verify(listsRepository).delete(mine);
-    }
-
-    /** Two overlapping deletes: the loser's DELETE touches no row, and the list is gone. */
-    @Test
-    void delete_whenTheListIsDeletedByAnotherRequestFirst_is404_notAServerError() {
-        storedList("mine", ME, "Desserts");
-        doThrow(new ObjectOptimisticLockingFailureException(RecipeListEntity.class, "mine"))
-                .when(listsRepository).flush();
-
-        assertThatThrownBy(() -> service.delete("mine")).isInstanceOf(ResourceNotFoundException.class)
-                .hasMessage("No recipe list with id mine");
     }
 
     @Test

@@ -14,6 +14,7 @@ import ilenreste.unpeu.recettesback.repositories.recipes.RecipeListsRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
+import ilenreste.unpeu.recettesback.services.media.MediaService;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import ilenreste.unpeu.recettesback.support.RecipeListFixtures;
 import jakarta.persistence.EntityManager;
@@ -26,6 +27,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.context.annotation.Import;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.time.Instant;
 import java.util.List;
@@ -50,6 +52,9 @@ class RecipeListServiceQueryCountTest {
 
     private static final Instant NOON = Instant.parse("2026-11-08T12:00:00Z");
 
+    /** The list service deletes a list's photo through it; this test never deletes a list. */
+    @MockitoBean
+    private MediaService mediaService;
     @Autowired
     private RecipeListService service;
     @Autowired
@@ -147,7 +152,7 @@ class RecipeListServiceQueryCountTest {
 
         assertThat(lists).hasSize(20).allSatisfy(list -> {
             assertThat(list.recipeCount()).isEqualTo(4);
-            assertThat(list.coverMediaIds()).hasSize(3);
+            assertThat(list.recipeCoverMediaIds()).hasSize(3);
             assertThat(list.containsRecipe()).isTrue();
         });
     }

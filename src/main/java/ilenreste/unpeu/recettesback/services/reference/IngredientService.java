@@ -111,7 +111,10 @@ public class IngredientService extends AbstractReferenceService<IngredientEntity
     }
 
     /**
-     * @throws InvalidReferenceException if the id names no media row — a 400,
+     * The <em>public</em> lookup, not {@code findById}: the id of a recipe list's own photo is refused here exactly
+     * like an id that does not exist. See {@code MediaRepository}.
+     *
+     * @throws InvalidReferenceException if the id names no public media row — a 400,
      *                                   because {@code /ingredients} is perfectly
      *                                   reachable and it is the payload that is
      *                                   wrong
@@ -120,7 +123,7 @@ public class IngredientService extends AbstractReferenceService<IngredientEntity
         if (!StringUtils.hasText(mediaId)) {
             return null;
         }
-        return mediaRepository.findById(mediaId)
+        return mediaRepository.findPublicById(mediaId)
                 .orElseThrow(() -> new InvalidReferenceException("iconMediaId", List.of(mediaId)));
     }
 }

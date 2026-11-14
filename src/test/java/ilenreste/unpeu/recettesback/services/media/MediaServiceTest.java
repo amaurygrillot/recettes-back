@@ -261,7 +261,7 @@ class MediaServiceTest {
     @Test
     void servesTheFullVariantByDefault_andTheThumbnailWhenAsked() {
         MediaEntity media = storedMedia();
-        when(mediaRepository.findById("media-1")).thenReturn(Optional.of(media));
+        when(mediaRepository.findPublicById("media-1")).thenReturn(Optional.of(media));
         Resource resource = new ByteArrayResource(new byte[]{1});
         when(storageService.load(anyString())).thenReturn(Optional.of(resource));
 
@@ -278,7 +278,7 @@ class MediaServiceTest {
 
     @Test
     void reportsAnUnknownIdAsNotFound() {
-        when(mediaRepository.findById("nope")).thenReturn(Optional.empty());
+        when(mediaRepository.findPublicById("nope")).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> mediaService.load("nope", MediaVariant.FULL))
                 .isInstanceOf(ResourceNotFoundException.class);
@@ -289,7 +289,7 @@ class MediaServiceTest {
     void reportsARowWhoseFileIsMissingAsNotFound_notAsAServerError() {
         // The documented cost of keeping bytes outside the database: restoring a database newer
         // than the media directory leaves rows pointing at files that are not there.
-        when(mediaRepository.findById("media-1")).thenReturn(Optional.of(storedMedia()));
+        when(mediaRepository.findPublicById("media-1")).thenReturn(Optional.of(storedMedia()));
         when(storageService.load(anyString())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> mediaService.load("media-1", MediaVariant.FULL))
