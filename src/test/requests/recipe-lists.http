@@ -1,7 +1,8 @@
 ### Recipe lists
 ### Covers: GET /lists, GET /lists?containing=, POST /lists, GET /lists/{id}, PUT /lists/{id}, DELETE /lists/{id},
 ###         PUT /lists/{id}/recipes/{recipeId}, DELETE /lists/{id}/recipes/{recipeId},
-###         and the content of a list: GET /recipes?listId=
+###         the content of a list: GET /recipes?listId=,
+###         and the photo of a list's own: PUT, GET and DELETE /lists/{id}/cover (requests 36 to 59)
 ###
 ### A list is a member's PRIVATE shelf of recipes, with a name and an emoji. Only its owner can see, change or use
 ### it: no other member, no visitor, no administrator. Every route needs a token. The reasoning is in
@@ -13,6 +14,12 @@
 ### Needs at least two recipes in the library (request 4 picks the two newest). The limits (50 lists, 200 recipes
 ### per list) are asserted for real by RecipeListsIntegrationTest and RecipeListContentIntegrationTest; requests 29
 ### and 30 show the two answers and say how to reach them by hand.
+###
+### The photo section (requests 36 to 59) uploads real files, which a .http file cannot create: put these next to this
+### file first (any JPEG/PNG will do, they are only ever read):
+###   ./sample.jpg  ./sample-2.jpg  a second, different photo      ./not-an-image.txt  plain text
+###   ./photo.heic  any HEIC photo                                   ./too-big.jpg       a file over 8 MB
+### The photo is PRIVATE like the list. Reasoning, order of the gates and the cache rules: docs/recipe-list-cover.md.
 
 @baseUrl = http://localhost:8080
 @memberUsername = lists-member
@@ -149,7 +156,8 @@ Content-Type: application/json
         client.assert(response.status === 201, "Expected 201 but got " + response.status);
         client.assert(response.body.name === "Pour le dimanche", "Expected the trimmed name");
         client.assert(response.body.recipeCount === 0, "Expected an empty list");
-        client.assert(response.body.coverMediaIds.length === 0, "Expected no cover yet");
+        client.assert(response.body.recipeCoverMediaIds.length === 0, "Expected no cover yet");
+        client.assert(response.body.coverVersion === null, "Expected no photo of its own: a list is created without one");
         client.assert(response.body.containsRecipe === undefined, "containsRecipe only exists with ?containing=");
         client.assert(response.headers.valueOf("Location").endsWith(response.body.id), "Expected a Location");
         client.global.set("listId", response.body.id);
@@ -513,7 +521,7 @@ Authorization: Bearer {{memberToken}}
         client.assert(response.body.recipeCount === 2, "Expected 2 recipes but got " + response.body.recipeCount);
         // Up to 4 media ids: the first cover of the most recently added recipes that have one, newest first.
         // Fewer (or none) if those recipes have no picture.
-        client.assert(response.body.coverMediaIds.length <= 4, "Expected at most 4 covers");
+        client.assert(response.body.recipeCoverMediaIds.length <= 4, "Expected at most 4 covers");
     });
 %}
 
@@ -734,6 +742,338 @@ Authorization: Bearer {{memberToken}}
 ###
 DELETE {{baseUrl}}/lists/{{otherListId}}
 Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 204", function () {
+        client.assert(response.status === 204, "Expected 204 but got " + response.status);
+    });
+%}
+
+### ---------------------------------------------------------------------------------------------------------------
+### The photo of a list's own
+### ---------------------------------------------------------------------------------------------------------------
+
+### 36. Create a list for the photo -> 201 Created, with no photo
+POST {{baseUrl}}/lists
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{
+  "name": "Recettes de mamie",
+  "emoji": "\uD83C\uDF82"
+}
+
+> {%
+    client.test("Returns 201 with coverVersion null", function () {
+        client.assert(response.status === 201, "Expected 201 but got " + response.status);
+        client.assert(response.body.coverVersion === null, "A list is created without a photo");
+        client.global.set("photoListId", response.body.id);
+    });
+%}
+
+### 37. Give the list a photo -> 200 OK, the updated list with a coverVersion
+### multipart/form-data with ONE part named file, exactly as POST /media (8 MB at most, JPEG or PNG). It counts as one
+### upload against the same per-account limit as POST /media (admins are exempt). It never takes a media id.
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample.jpg"
+Content-Type: image/jpeg
+
+< ./sample.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 200 with the new version", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(typeof response.body.coverVersion === "string", "Expected a coverVersion");
+        client.assert(Array.isArray(response.body.recipeCoverMediaIds), "The mosaic is computed either way");
+        client.global.set("coverVersion", response.body.coverVersion);
+        // Used by media.http request 15: this id must not be served by GET /media/{id}.
+        client.global.set("listPhotoId", response.body.coverVersion);
+    });
+%}
+
+### 38. Read the list -> 200 OK, the same coverVersion
+GET {{baseUrl}}/lists/{{photoListId}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Shows the version", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.coverVersion === client.global.get("coverVersion"), "Expected the same version");
+    });
+%}
+
+### 39. Fetch the photo with no version -> 200 OK, private and revalidated
+### Without ?v= the browser may keep the photo but must revalidate it: Cache-Control is private, no-cache, never public.
+### Fetch it with fetch() and an Authorization header and show it from a blob: an <img src> cannot carry the token.
+GET {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200 with a private, no-cache photo", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        var cacheControl = response.headers.valueOf("Cache-Control");
+        client.assert(cacheControl.indexOf("private") >= 0 && cacheControl.indexOf("no-cache") >= 0, "Expected private, no-cache but got " + cacheControl);
+        client.assert(cacheControl.indexOf("public") < 0, "A list's photo is never public");
+        client.assert(response.headers.valueOf("X-Content-Type-Options") === "nosniff", "Expected nosniff");
+        client.global.set("photoEtag", response.headers.valueOf("ETag"));
+    });
+%}
+
+### 40. Fetch it with the current version, the thumbnail size -> 200 OK, private and immutable
+### Each version has its own URL, so a replaced photo can never come back from a cache.
+GET {{baseUrl}}/lists/{{photoListId}}/cover?v={{coverVersion}}&variant=thumbnail
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200, private and immutable", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        var cacheControl = response.headers.valueOf("Cache-Control");
+        client.assert(cacheControl.indexOf("private") >= 0 && cacheControl.indexOf("immutable") >= 0, "Expected private, immutable but got " + cacheControl);
+        client.assert(cacheControl.indexOf("public") < 0, "A list's photo is never public");
+    });
+%}
+
+### 41. Ask again with its ETag -> 304 Not Modified, repeating the Cache-Control
+### A browser does this by itself. A script must NOT set If-None-Match: the browser then bypasses its cache.
+GET {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+If-None-Match: {{photoEtag}}
+
+> {%
+    client.test("Returns 304, still private", function () {
+        client.assert(response.status === 304, "Expected 304 but got " + response.status);
+        client.assert(response.headers.valueOf("Cache-Control").indexOf("private") >= 0, "A 304 repeats the Cache-Control");
+    });
+%}
+
+### 42. Fetch a version that never existed -> 404 Not Found
+GET {{baseUrl}}/lists/{{photoListId}}/cover?v=never-existed
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 43. Ask for a size that does not exist -> 400 Bad Request
+GET {{baseUrl}}/lists/{{photoListId}}/cover?variant=enormous
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 400", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 44. Replace the photo -> 200 OK, a NEW coverVersion
+### The old photo is deleted, its row and both files, once this commits.
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample-2.jpg"
+Content-Type: image/jpeg
+
+< ./sample-2.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 200 with a different version", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.coverVersion !== client.global.get("coverVersion"), "Expected a new version");
+        client.global.set("staleVersion", client.global.get("coverVersion"));
+        client.global.set("coverVersion", response.body.coverVersion);
+        client.global.set("listPhotoId", response.body.coverVersion);
+    });
+%}
+
+### 45. Fetch the OLD version -> 404 Not Found
+### A stale version is never served, under a long cache or any other: the front reloads the list.
+GET {{baseUrl}}/lists/{{photoListId}}/cover?v={{staleVersion}}
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 46. Another member asks for the photo -> 404 Not Found
+### Never the bytes, never a 403: the answer is that of a list that does not exist. Visibility is checked before
+### If-None-Match, so a matching ETag from this member is a 404 too, never a 304.
+GET {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{otherToken}}
+If-None-Match: {{photoEtag}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 47. Another member replaces the photo -> 404 Not Found
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{otherToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample.jpg"
+Content-Type: image/jpeg
+
+< ./sample.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 404, and does not count as an upload", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 48. Another member removes the photo -> 404 Not Found
+DELETE {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{otherToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 49. The photo with no token -> 401 Unauthorized
+GET {{baseUrl}}/lists/{{photoListId}}/cover
+
+> {%
+    client.test("Returns 401", function () {
+        client.assert(response.status === 401, "Expected 401 but got " + response.status);
+    });
+%}
+
+### 50. Upload something that is not an image -> 400 Bad Request
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+< ./not-an-image.txt
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400: the format is judged by the bytes, not by the name or the declared type", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+    });
+%}
+
+### 51. Upload a HEIC photo -> 400 Bad Request, whose detail explains it
+### An iPhone shoots HEIC by default. The front has to explain this, or convert to JPEG before sending.
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="photo.heic"
+Content-Type: image/heic
+
+< ./photo.heic
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400 mentioning HEIC", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+        client.assert(response.body.detail.indexOf("HEIC") >= 0, "Expected the HEIC hint");
+    });
+%}
+
+### 52. Upload a file over 8 MB -> 413 Content Too Large
+### Answered by the servlet container before any code runs, so even on somebody else's list.
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="too-big.jpg"
+Content-Type: image/jpeg
+
+< ./too-big.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 413", function () {
+        client.assert(response.status === 413, "Expected 413 but got " + response.status);
+    });
+%}
+
+### 53. Send the file as JSON instead of multipart -> 415 Unsupported Media Type
+### It was a 500 before; POST /media answers the same 415 now.
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+Content-Type: application/json
+
+{ "file": "not a file" }
+
+> {%
+    client.test("Returns 415", function () {
+        client.assert(response.status === 415, "Expected 415 but got " + response.status);
+    });
+%}
+
+### 54. Exhaust this account's upload allowance -> 429 Too Many Requests with Retry-After
+### Not scripted as one request: the allowance is shared with POST /media (20 per 10 minutes by default, admins
+### exempt), so run request 44 more than app.media.upload-limit times inside the window - or see media.http request
+### 14, which does it with POST /media. The answer carries Retry-After; a request about somebody else's list is a 404
+### BEFORE the allowance is looked at, so it never costs an upload.
+
+### 55. Saturate the decode pool -> 503 Service Unavailable with Retry-After
+### Not scriptable by hand either: it needs more simultaneous uploads than app.media.max-concurrent-processing.
+### Same answer as POST /media (media.http request 13).
+
+### 56. Remove the photo -> 200 OK, the updated list with coverVersion null
+### The photo's row and both files are deleted once this commits, and the tile goes back to the mosaic.
+DELETE {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200 with no photo", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.coverVersion === null, "Expected no photo");
+    });
+%}
+
+### 57. Remove it again -> 200 OK, nothing changes
+### Idempotent, like removing a recipe that is not in the list: updatedAt is not touched either.
+DELETE {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 200, still no photo", function () {
+        client.assert(response.status === 200, "Expected 200 but got " + response.status);
+        client.assert(response.body.coverVersion === null, "Expected no photo");
+    });
+%}
+
+### 58. The photo of a list with none -> 404 Not Found
+GET {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 59. Clean up: delete the list -> 204 No Content
+### A list that still has a photo deletes it with the list, row and files.
+DELETE {{baseUrl}}/lists/{{photoListId}}
+Authorization: Bearer {{memberToken}}
 
 > {%
     client.test("Returns 204", function () {
