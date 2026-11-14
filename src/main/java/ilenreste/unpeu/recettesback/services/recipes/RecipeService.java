@@ -435,10 +435,15 @@ public class RecipeService {
         }
     }
 
+    /**
+     * The <em>public</em> lookup, not {@code findAllById}: the id of a recipe list's own photo is refused here with
+     * the same 400, field and wording as an id that does not exist, so the answer never reveals that it does. See
+     * {@code MediaRepository}.
+     */
     private Map<String, MediaEntity> resolveMedia(String field, List<RecipePictureRequest> pictures) {
         return referenceResolver.resolve(field,
                 new ArrayList<>(pictures.stream().map(RecipePictureRequest::mediaId).toList()),
-                mediaRepository::findAllById);
+                mediaRepository::findAllPublicById);
     }
 
     /**

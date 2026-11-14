@@ -4,7 +4,9 @@ Status: **implemented** (this document was written first and has been updated in
 the review proved a decision wrong). Companion documents: [recipes-domain-model.md](recipes-domain-model.md) (the model this
 extends), [api-error-handling.md](api-error-handling.md) (the statuses, and the three new `409`s),
 [service-controller-contract.md](service-controller-contract.md), [openapi.md](openapi.md),
-[optional-authentication.md](optional-authentication.md), [testing-database.md](testing-database.md).
+[optional-authentication.md](optional-authentication.md), [testing-database.md](testing-database.md). A list can also
+carry a photo of its own, which is specified in [recipe-list-cover.md](recipe-list-cover.md) (« La photo de la liste »,
+summarised [below](#la-photo-de-la-liste)).
 
 ## What the feature is for
 
@@ -17,8 +19,9 @@ The feature is deliberately small and uniform:
 - A list belongs to **one member** and is **private**: only its owner can see, change or use it. No other member, no
   visitor, **no admin bypass** — an administrator is a member like any other as far as someone else's list goes.
 - There are **no favorites**, not even as a special list, and no other kind of list. Every list behaves the same way.
-- A list has a name, an emoji, and a set of recipes. That is all (see [Planned evolutions](#planned-evolutions) for what
-  is intentionally *not* here yet).
+- A list has a name, an emoji, a set of recipes and, optionally, **a photo of its own** that takes the place of the
+  recipe mosaic on its tile ([below](#la-photo-de-la-liste)). That is all (see
+  [Planned evolutions](#planned-evolutions) for what is intentionally *not* here yet).
 
 ## Model
 
@@ -31,7 +34,7 @@ erDiagram
 
 | Table                 | Columns                                                                                           |
 |-----------------------|---------------------------------------------------------------------------------------------------|
-| `recipe_lists`        | `id` UUID, `owner_id` FK → `users` (not null, immutable), `name`, `normalized_name`, `emoji`, `created_at`, `updated_at` |
+| `recipe_lists`        | `id` UUID, `owner_id` FK → `users` (not null, immutable), `name`, `normalized_name`, `emoji`, `cover_media_id` FK → `media` (null, unique: the list's own photo), `created_at`, `updated_at` |
 | `recipe_list_entries` | `list_id` FK → `recipe_lists`, `recipe_id` FK → `recipes` (**composite PK**), `added_at`           |
 
 Package layout follows [recipes-domain-model.md](recipes-domain-model.md#package-layout): everything is in the
@@ -48,9 +51,10 @@ Package layout follows [recipes-domain-model.md](recipes-domain-model.md#package
 - **No `created_by` / `updated_by`.** The owner is the only person who can write the row, so both would hold the owner's
   id forever — the reasoning `RecipeEntity` documents for `author`. The entity therefore does not extend
   `AuditableEntity`; it carries `createdAt` and `updatedAt` through `@CreatedDate` / `@LastModifiedDate`.
-- **`updated_at` changes when the list is renamed or its emoji changes — and only then.** Adding or removing a recipe
-  does **not** touch it. Reasons: (1) `updatedAt` describes the list's own definition, while its content is already
-  described by `recipeCount`, `coverMediaIds` and each entry's `added_at`; (2) adding a recipe that is already there
+- **`updated_at` changes when the list is renamed, when its emoji changes, or when its photo is set, replaced or
+  removed — and only then.** Adding or removing a recipe does **not** touch it, and neither does removing a photo the
+  list does not have. Reasons: (1) `updatedAt` describes the list's own definition, while its content is already
+  described by `recipeCount`, `recipeCoverMediaIds` and each entry's `added_at`; (2) adding a recipe that is already there
   must be "a success that changes nothing", which would be false if it bumped a timestamp; (3) it would make every add
   write the list row, serialising concurrent adds to one list on a row lock for no reader's benefit. A `PUT` that sends
   the values the list already has changes nothing either (Hibernate sees no dirty field, so the timestamp stays).
@@ -124,21 +128,26 @@ success.
   insert, the foreign key refuses the insert; the thing the request names is gone, which is the `404` a retry would
   answer. The service translates that integrity violation, which can only be the foreign key since no other constraint can
   refuse this insert. The same goes for a rename that races a delete of the list: the `UPDATE` touches no row, Hibernate
-  reports an optimistic-locking failure, and the answer is `404`. So is a delete that races another delete of the same
-  list (a double click): the loser's `DELETE` touches no row, and the service flushes inside a `try` so that the failure
-  is seen there and not at commit. All three are reproduced on purpose, inside the transaction of the service, by tests
-  that delete the row between the check and the write.
+  reports an optimistic-locking failure, and the answer is `404`. Both are reproduced on purpose, inside the transaction
+  of the service, by tests that delete the row between the check and the write. **A delete that races another delete of
+  the same list (a double click) needs no such catch any more**: `DELETE /lists/{id}` loads the list with a row lock (it
+  has to, to read the photo's files before it removes the row, see
+  [recipe-list-cover.md](recipe-list-cover.md#deleting-the-list--delete-listsid)), so the second delete waits for the
+  first, finds no list when the first commits, and answers `404` like any other delete of a list that is gone.
 - `DELETE` does **not** check that the recipe exists. A recipe deleted by its author disappears from every list
   (cascade), and a front that still shows it must be able to "remove" it and get the same `204` it would have had a
   second earlier. `PUT` does check: adding something that does not exist is an error. (« À valider » below.)
 
 ### Who may see a list — one place
 
-`RecipeListService` decides it in exactly one private method, `visibleList`, whose predicate is `isVisibleTo`. Today it
-says "the caller owns it". Everything that **reads** a list goes through it: `GET /lists/{id}` and the `listId` filter of
-`GET /recipes` (which asks the service, the recipes search never inspects an owner itself).
+`RecipeListService` decides it in exactly one method, `visibleList` (package-private, so that `RecipeListCoverService` asks
+the same question and does not copy it), whose predicate is `isVisibleTo`. Today it says "the caller owns it".
+Everything that **reads** a list goes through it: `GET /lists/{id}`, the `listId` filter of `GET /recipes` (which asks
+the service, the recipes search never inspects an owner itself) and **`GET /lists/{id}/cover`**, so that a list's
+photo can never be seen by someone who may not see the list.
 
-Writes go through a *second*, deliberately separate method, `ownedList`, whose predicate is `isOwnedBy`. Today the two
+Writes go through a *second*, deliberately separate method, `ownedList`, whose predicate is `isOwnedBy`; the photo's
+writes use it too, in its locking form `ownedListForUpdate`. Today the two
 say the same thing; they are two methods because they will not stay the same. When a list can be made public, the
 visibility rule gains "or it is public" — **and nothing else changes**: writes still require ownership, because they use
 the other predicate. Had writes used `visibleList`, making a list public would have made it editable by everyone. A
@@ -207,6 +216,9 @@ controller is `RecipeListController`, implementing the generated `RecipeListsApi
 | DELETE | `/lists/{id}`                       | 204     | deletes its entries, never the recipes                                                    |
 | PUT    | `/lists/{id}/recipes/{recipeId}`    | 204     | idempotent                                                                                |
 | DELETE | `/lists/{id}/recipes/{recipeId}`    | 204     | idempotent                                                                                |
+| PUT    | `/lists/{id}/cover`                 | 200     | the list's own photo, `multipart/form-data`; answers the updated list                     |
+| DELETE | `/lists/{id}/cover`                 | 200     | removes the photo; idempotent; answers the updated list                                   |
+| GET    | `/lists/{id}/cover`                 | 200     | the photo's bytes; `?variant=thumbnail`, `?v=` — see [recipe-list-cover.md](recipe-list-cover.md) |
 | GET    | `/recipes?listId={id}`              | 200     | the content of a list — see below. Still public in general; `listId` needs a token       |
 
 ### The list item
@@ -216,17 +228,23 @@ controller is `RecipeListController`, implementing the generated `RecipeListsApi
   "id": "…", "name": "Pour le dimanche", "emoji": "🍝",
   "recipeCount": 12,
   "createdAt": "…", "updatedAt": "…",
-  "coverMediaIds": ["…", "…", "…", "…"],
+  "coverVersion": null,
+  "recipeCoverMediaIds": ["…", "…", "…", "…"],
   "containsRecipe": true
 }
 ```
 
 - `recipeCount` counts every recipe of the list, with or without a picture.
-- `coverMediaIds` holds **up to 4** media ids: the *first cover picture* (lowest `position`) of the *most recently added*
-  recipes of the list **that have one**, newest first. A recipe without a photo is skipped, not replaced by a blank, so a
-  list of ten recipes whose newest four have no photo still shows the pictures of the older ones. They drive the photo
-  mosaic of the list tile; each is fetched as `/media/{id}?variant=thumbnail`. The number 4 is one constant
-  (`RecipeListService.COVER_MOSAIC_SIZE`). Empty, never absent, when no recipe has a picture.
+- `recipeCoverMediaIds` holds **up to 4** media ids: the *first cover picture* (lowest `position`) of the *most recently
+  added* recipes of the list **that have one**, newest first. A recipe without a photo is skipped, not replaced by a
+  blank, so a list of ten recipes whose newest four have no photo still shows the pictures of the older ones. They drive
+  the photo mosaic of the list tile; each is fetched as `/media/{id}?variant=thumbnail`. The number 4 is one constant
+  (`RecipeListService.COVER_MOSAIC_SIZE`). Empty, never absent, when no recipe has a picture. It is computed **whether
+  or not the list has a photo of its own** — the front decides which to show. (Called `coverMediaIds` before the photo
+  existed; renamed, on this record only, because next to a photo of the list's own it would be ambiguous.
+  `RecipeSummaryResponse.coverMediaIds`, the cover pictures of a recipe card, is another field and keeps its name.)
+- `coverVersion` is `null` when the list has no photo of its own, and otherwise an opaque string that changes whenever
+  the photo does; it is the `v` of `GET /lists/{id}/cover`.
 - `containsRecipe` is **present only when `containing` was given** on `GET /lists`. It is omitted — not `null`, not
   `false` — otherwise, including on `GET /lists/{id}`, `POST` and `PUT`. (`@JsonInclude(NON_NULL)` on the record
   component; the YAML documents it as optional.)
@@ -296,11 +314,12 @@ address):
 
 | Level   | What                                                                                                              |
 |---------|-------------------------------------------------------------------------------------------------------------------|
-| `info`  | a change: list created, renamed or deleted, recipe added to or removed from a list; and the refusals a person can act on: name taken, limit reached, list full, a delete that raced a write |
+| `info`  | a change: list created, renamed or deleted, recipe added to or removed from a list, **a photo set, replaced or removed**; and the refusals a person can act on: name taken, limit reached, list full, a delete that raced a write |
 | `warn`  | a list that **exists and is not the caller's**: somebody is probing. The response says nothing; the log is the only place the difference between this and a stale id is visible |
-| `debug` | an idempotent no-op (recipe already in the list, not in the list), and a list that does not exist (a stale id is routine) |
+| `debug` | an idempotent no-op (recipe already in the list, not in the list, **a photo removed from a list that has none**), and a list that does not exist (a stale id is routine) |
 
-Reads log nothing: they change nothing, and `GET /lists` is polled.
+The routes of the photo log through the same rule, so a probe on someone else's list is a `warn` there too. Reads log
+nothing — `GET /lists` is polled, and so is a photo — except through that rule.
 
 ### MCP
 
@@ -315,7 +334,9 @@ administrator can read the content of *their own* lists, and any other member's 
 
 One request costs the same handful of statements whether the member has 2 lists or 50:
 
-1. the member's lists, sorted by `normalized_name` then `name` — a derived query. (« Then raw » cannot decide anything
+1. the member's lists, sorted by `normalized_name` then `name` — a derived query, which also carries each list's
+   `cover_media_id`: **`coverVersion` costs no statement**, it is read off the row (the id of the lazily referenced
+   photo, which does not load it). (« Then raw » cannot decide anything
    for one member today, because the unique constraint forbids two lists with the same normalised name; it keeps the order
    total should the constraint ever be relaxed.)
 2. the entry count of those lists — `SELECT e.list.id, COUNT(e) … WHERE e.list.id IN :ids GROUP BY e.list.id`;
@@ -329,7 +350,25 @@ One request costs the same handful of statements whether the member has 2 lists 
 
 `GET /lists/{id}`, `POST` and `PUT` map one list through the same code with a list of size one. The N+1 is proven by a
 `@DataJpaTest` that counts the statements Hibernate prepares for 2 lists and for 20 and asserts they are equal
-(`RecipeListServiceQueryCountTest`).
+(`RecipeListServiceQueryCountTest`), with a photo on some of the lists.
+
+## La photo de la liste
+
+A list can carry **one photo of its own**, optional, set and removed by its owner, which takes the place of the recipe
+mosaic on its tile and is shown on the open list. It is specified in [recipe-list-cover.md](recipe-list-cover.md); what
+matters here:
+
+- **It is private like the list**, and **read only through its list** (`GET /lists/{id}/cover`), by the same
+  `visibleList` rule as the list — so that when lists can be made public, their photo follows with no other change.
+  `GET /media/{id}` answers `404` for it, whoever asks.
+- **Three routes** (`PUT`, `DELETE`, `GET` on `/lists/{id}/cover`), and **two fields** on the list response:
+  `coverVersion` (new) and `recipeCoverMediaIds` (the old `coverMediaIds`, renamed).
+- **It reuses the upload pipeline of `POST /media`** — the size cap, the decoding limits, the re-encode, the thumbnail,
+  the processing pool and the per-account rate limit — and answers the same statuses.
+- **It is stored as a `media` row that only its list references**, created in the same transaction that attaches it, and
+  deleted, row and files, whenever it is replaced, removed or its list deleted. A list photo's id is never accepted as a
+  recipe's picture or an ingredient's icon.
+- **`updatedAt` moves** when it is set, replaced or removed.
 
 ## Decisions I had to make, and what stays open
 
@@ -396,9 +435,12 @@ Not built, and nothing is in the schema or the code for them (YAGNI). What makes
 
 - **Public lists.** A member could make a list readable by others. The one change to the *rule* is in `isVisibleTo`
   ("owned by the caller, or public"); a boolean column on `recipe_lists` is the schema change, and `GET /lists/{id}` and
-  `GET /recipes?listId=` pick it up because they already go through `visibleList`. Writes keep `isOwnedBy`. What is
-  *not* free: a way to discover other members' public lists (a new endpoint), and the `404`-versus-`403` question for a
-  visible list the caller may not change.
+  `GET /recipes?listId=` pick it up because they already go through `visibleList` — and so does
+  **`GET /lists/{id}/cover`**: the photo of a public list becomes visible with no other change, which is why the photo
+  is served through its list and never through `/media`. Writes keep `isOwnedBy`. What is *not* free: a way to discover
+  other members' public lists (a new endpoint), the `404`-versus-`403` question for a visible list the caller may not
+  change, and the cache header of a public list's photo, which stays `private` until someone decides otherwise (a
+  `public` photo would be a decision of its own, with a `Vary` question).
 - **A personal note per recipe inside a list** (« doubler les quantités, on sera 12 »). A nullable `note` column on
   `recipe_list_entries` — the row that already means "this recipe, in this list" — exposed on the entry. It is why entries
   are a table with a composite key and not a bare join table. It will need a way to carry the note in a list's content,
@@ -418,8 +460,9 @@ Not built, and nothing is in the schema or the code for them (YAGNI). What makes
 | Lifecycle, privacy (member and administrator), `401` on every route without a token and with a broken one, every `400`, the three `409`s, the limit of 50, the lost name race reaching the real constraint | `RecipeListsIntegrationTest` (`@SpringBootTest`, `RANDOM_PORT`, `TestAccount`) |
 | Add and remove, eight identical adds in flight at once, the limit of 200, `containing`, the count and the mosaic, `GET /recipes?listId=` | `RecipeListContentIntegrationTest` |
 | The typed `409`s and the constraint-name → typed `409` mapping                               | `ApiExceptionHandlerTest`                     |
+| The photo of a list: every route and status, the cache versioning, the lifecycle on disk, concurrent writes, the refusal of its id elsewhere | `RecipeListCoverIntegrationTest` (see [recipe-list-cover.md](recipe-list-cover.md#tests)) |
 | YAML and code agree; every operation answers what its `security` promises                    | `OpenApiContractTest`, `OpenApiSecurityConformanceTest` |
-| The walkthrough, success and failures                                                        | `src/test/requests/recipe-lists.http`         |
+| The walkthrough, success and failures, the photo included                                    | `src/test/requests/recipe-lists.http`         |
 
 The limits are asserted at their real values: 50 lists and 200 recipes are cheap to create over HTTP and through the
 repository, so no test needs the constants to be configurable.

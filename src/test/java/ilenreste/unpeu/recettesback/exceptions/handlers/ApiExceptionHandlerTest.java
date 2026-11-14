@@ -19,6 +19,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.web.multipart.MultipartException;
 
 import java.sql.SQLException;
 import java.time.Duration;
@@ -34,6 +35,37 @@ class ApiExceptionHandlerTest {
         MockHttpServletRequest request = new MockHttpServletRequest("POST", uri);
         request.setRequestURI(uri);
         return request;
+    }
+
+    @Test
+    void aFileSentAsAnythingButMultipart_is415_namingTheRightFormat() {
+        MockHttpServletRequest json = new MockHttpServletRequest("PUT", "/lists/1/cover");
+        json.setContentType("application/json");
+        MockHttpServletRequest none = new MockHttpServletRequest("POST", "/media");
+
+        for (MockHttpServletRequest request : List.of(json, none)) {
+            ResponseEntity<ProblemDetail> response = handler.handleMultipart(
+                    new MultipartException("Current request is not a multipart request"), request);
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+            assertThat(response.getBody().getDetail()).contains("multipart/form-data");
+        }
+    }
+
+    /**
+     * A multipart request whose body could not be parsed or spooled is not the caller's mistake to name: it can be a
+     * full disk or an antivirus, so it stays the unexpected failure it always was.
+     */
+    @Test
+    void aMultipartRequestThatFailed_staysA500_notA415() {
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/media");
+        request.setContentType("multipart/form-data; boundary=x");
+
+        ResponseEntity<ProblemDetail> response = handler.handleMultipart(
+                new MultipartException("Failed to parse multipart servlet request"), request);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody().getDetail()).isEqualTo(ApiExceptionHandler.GENERIC_500_DETAIL);
     }
 
     /** An untyped problem has no {@code type} (null here) or {@code about:blank}: the same thing on the wire. */

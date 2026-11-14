@@ -309,9 +309,9 @@ class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
         JsonNode read = listOf(list, ownerToken);
 
         assertThat(read.path("recipeCount").asLong()).isEqualTo(7);
-        assertThat(read.path("coverMediaIds")).extracting(JsonNode::asString)
+        assertThat(read.path("recipeCoverMediaIds")).extracting(JsonNode::asString)
                 .containsExactly(newest, fourth, third, second);
-        assertThat(json(get("/lists", ownerToken)).get(0).path("coverMediaIds")).extracting(JsonNode::asString)
+        assertThat(json(get("/lists", ownerToken)).get(0).path("recipeCoverMediaIds")).extracting(JsonNode::asString)
                 .as("the same on the collection").containsExactly(newest, fourth, third, second);
     }
 
@@ -323,8 +323,8 @@ class RecipeListContentIntegrationTest extends RecipeListsHttpSupport {
         JsonNode read = listOf(list, ownerToken);
 
         assertThat(read.path("recipeCount").asLong()).isEqualTo(1);
-        assertThat(read.has("coverMediaIds")).isTrue();
-        assertThat(read.path("coverMediaIds")).isEmpty();
+        assertThat(read.has("recipeCoverMediaIds")).isTrue();
+        assertThat(read.path("recipeCoverMediaIds")).isEmpty();
     }
 
     // ------------------------------------------------------------------------------------ GET /recipes?listId=

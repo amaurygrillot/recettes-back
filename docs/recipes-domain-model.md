@@ -34,14 +34,17 @@ erDiagram
     media ||--o{ recipe_cover_pictures : stores
     media ||--o{ recipe_step_pictures : stores
     media ||--o| ingredients : icon
+    media ||--o| recipe_lists : "photo of (private, one per list)"
     users ||--o{ recipe_lists : owns
     recipe_lists ||--o{ recipe_list_entries : contains
     recipes ||--o{ recipe_list_entries : appears_in
 ```
 
-The last three relationships are the **recipe lists** — a member's private shelves of recipes — and are specified in
+The last four relationships are the **recipe lists** — a member's private shelves of recipes — and are specified in
 [recipe-lists.md](recipe-lists.md). A recipe deleted here leaves every list it was in; a list deleted there never
-deletes a recipe.
+deletes a recipe. A list can also carry **a photo of its own**: a `media` row that only `recipe_lists.cover_media_id`
+points at (unique, so never shared), private to the list's owner and never served by `GET /media/{id}` —
+[recipe-list-cover.md](recipe-list-cover.md).
 
 ### Reference tables (shared, unique values)
 
@@ -588,9 +591,15 @@ long totalBytesUploadedBy(@Param("userId") String userId);
           AND NOT EXISTS (SELECT 1 FROM RecipeCoverPictureEntity c WHERE c.media = m)
           AND NOT EXISTS (SELECT 1 FROM RecipeStepPictureEntity  s WHERE s.media = m)
           AND NOT EXISTS (SELECT 1 FROM IngredientEntity         i WHERE i.icon  = m)
+          AND NOT EXISTS (SELECT 1 FROM RecipeListEntity         l WHERE l.cover = m)
         """)
 List<MediaEntity> findOrphans(@Param("threshold") Instant threshold);
 ```
+
+The fourth probe is the photo of a recipe list, which a list references and which must never be swept. Two more queries
+live next to it, `findPublicById` and `findAllPublicById`, which are the ones **public code** uses to resolve a media id —
+the same `NOT EXISTS` on the list's reference — so that a list photo's id is never served by `GET /media/{id}` nor accepted as
+a recipe's picture or an ingredient's icon ([media-storage.md](media-storage.md#a-kind-of-media-that-is-private-the-photo-of-a-list)).
 
 Both back gaps listed as deferred in [media-storage.md](media-storage.md) (per-user quota, orphan cleanup). They are
 specified now because both are cheap to add while the entity is being written and awkward to retrofit — but neither
@@ -615,17 +624,19 @@ Beyond the primary keys and the `unique` constraints on `normalized_name`:
 | `recipe_cover_pictures(media_id)`   | orphan sweep — first `NOT EXISTS`    |
 | `recipe_step_pictures(media_id)`    | orphan sweep — second `NOT EXISTS`   |
 | `ingredients(icon_media_id)`        | orphan sweep — third `NOT EXISTS`    |
+| `recipe_lists(cover_media_id)`      | orphan sweep — fourth `NOT EXISTS`, and the public lookups; its `unique` constraint is the index |
 
 The join tables get a PK index on `(recipe_id, category_id)` automatically, which covers lookups *from* a recipe; the
 second index above is what covers lookups *from* a category, and a composite PK's index cannot serve that direction.
 
-The same argument is what puts the last three rows in the table, and they are easy to leave out because the
+The same argument is what puts the last four rows in the table, and they are easy to leave out because the
 `created_at` index looks like it already covers the orphan sweep. It does not: `findOrphans` filters on `created_at`
 and then probes three separate tables through `NOT EXISTS`. **PostgreSQL does not index foreign-key columns
 automatically** — only primary keys and `unique` constraints get one for free. `recipe_cover_pictures` and
 `recipe_step_pictures` do have an index from their `UNIQUE (parent_id, position)` constraint, but its leading column is
 `recipe_id`/`step_id`, which cannot serve a lookup by `media_id`; `ingredients.icon_media_id` has nothing at all.
-Without these three, every candidate row in the sweep costs three sequential scans.
+Without these three, every candidate row in the sweep costs three sequential scans. `recipe_lists.cover_media_id` is
+unique, which is the index.
 
 The ordered child tables need no separate `parent_id` index: their `UNIQUE (parent_id, position)` constraint already
 provides one with `parent_id` leading, which is the direction those lookups actually go.

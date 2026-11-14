@@ -501,9 +501,11 @@ paths:
       summary: The caller's recipe lists
       description: >-
         Every list of the caller, sorted by name (normalised, so accents and case do not matter, then as typed). **Not
-        paged**: a member has at most 50. Each item carries its `recipeCount` and up to 4 `coverMediaIds`, the first
+        paged**: a member has at most 50. Each item carries its `recipeCount`, up to 4 `recipeCoverMediaIds` (the first
         cover picture of the most recently added recipes of the list that have one, newest first, for the photo mosaic of
-        a tile.
+        a tile) and its `coverVersion`, which is `null` unless the list has a photo of its own. A photo of its own takes
+        the place of the mosaic on the tile; `recipeCoverMediaIds` is computed either way, and the client decides which to
+        show.
 
 
         With `containing`, each item also carries `containsRecipe`, which says whether that recipe is in the list. The
@@ -603,7 +605,8 @@ paths:
       summary: Rename a recipe list or change its emoji
       description: >-
         Both fields are required: this replaces the list's name and emoji, it does not patch them. `updatedAt` changes
-        only if one of them does; adding or removing a recipe never touches it.
+        only if one of them does, or when the list's photo is set, replaced or removed; adding or removing a recipe never
+        touches it. **Never touches the list's photo**, which has its own routes.
       security:
         - bearerAuth: []
       requestBody:
@@ -638,7 +641,9 @@ paths:
       tags: [Recipe lists]
       operationId: deleteRecipeList
       summary: Delete a recipe list
-      description: Deletes the list and its entries, never the recipes in it.
+      description: >-
+        Deletes the list and its entries, never the recipes in it, and the list's own photo, row and files, if it has
+        one.
       security:
         - bearerAuth: []
       responses:
@@ -648,6 +653,190 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /lists/{id}/cover:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    put:
+      tags: [Recipe lists]
+      operationId: setRecipeListCover
+      summary: Give a list a photo of its own, or replace it
+      description: >-
+        The list's own photo, which takes the place of the recipe mosaic on its tile and is shown on the open list.
+        **Private**, like the list: only its owner can set, replace, remove or read it, an administrator included.
+        Answers the **updated list**, whose `coverVersion` is the new version of the photo. `updatedAt` changes.
+
+
+        Takes the bytes of an image, **never a media id**. Creating or renaming a list does not touch its photo; this is
+        the only way to set one. The pipeline is the one of `POST /media` (JPEG or PNG only, judged by magic bytes;
+        re-encoded; a full size and a thumbnail), and so is the per-account rate limit, **shared** with it: a list photo
+        counts as one upload, and admins are not limited. Cropping is the client's job (`object-fit: cover`).
+
+
+        The gates run in this order: `401`; `413` (the container, before any code runs); `404` (the list is missing or is
+        not the caller's, which is not counted against the rate limit); `429`; `400` (format and dimensions); `503`.
+        Two overlapping writes to the same list's photo are serialised: both answer `200`, the last to commit wins, and
+        every photo that is not the final one is deleted, row and files.
+
+
+        Unlike `POST /media` there is no `403`: the route needs a login and nothing more, like every list route.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The image. At most 8 MB.
+      responses:
+        '200':
+          description: The updated list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeListResponse'
+        '400':
+          description: No file, not a JPEG or PNG (HEIC included), undecodable, or too many pixels.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      tags: [Recipe lists]
+      operationId: removeRecipeListCover
+      summary: Remove a list's own photo
+      description: >-
+        Deletes the photo, row and files, and answers the **updated list** (`coverVersion` is then `null`, and the tile
+        goes back to the mosaic). **Idempotent**: removing a photo the list does not have is a success that changes
+        nothing, `updatedAt` included.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The updated list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    get:
+      tags: [Recipe lists]
+      operationId: downloadRecipeListCover
+      summary: Download a list's own photo
+      description: >-
+        The photo's bytes, for its **owner only**: a list that is missing or not the caller's, and a list with no photo,
+        answer `404`. It is the only way to read the photo: `GET /media/{id}` answers `404` for it, whoever asks. Fetch it
+        with `fetch` and an `Authorization` header and show it from a blob; an `<img src>` cannot carry the token.
+
+
+        Every header of `GET /media/{id}` is sent here too (`Content-Type`, `Content-Disposition` with a generated name,
+        `ETag`, `X-Content-Type-Options: nosniff`) and `If-None-Match` answers `304`. **The caching differs**:
+        `Cache-Control` is `private`, never `public`, and **a replaced photo must never come back from a cache**, so
+        each version has its own URL (`v`):
+
+
+        - without `v`: `private, no-cache`, with its `ETag`, so the browser revalidates;
+
+        - with the list's current `coverVersion`: `private, max-age=31536000, immutable`;
+
+        - with any other `v`: `404`. That version no longer exists, so the client reloads the list. A stale version is
+        never served.
+
+
+        Visibility is checked before `If-None-Match` is evaluated, so another member who sends a matching `ETag` gets
+        `404`, never `304`. A `304` repeats the `Cache-Control` of the `200`. Leave the revalidation to the browser's
+        HTTP cache: do not set `If-None-Match` from a script.
+      x-spring-provide-args:
+        - org.springframework.web.context.request.WebRequest webRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: v
+          in: query
+          required: false
+          description: >-
+            The `coverVersion` of the list, as read from the list response. A blank value is treated as absent. Any
+            value other than the current version is a 404.
+          schema:
+            type: string
+        - name: variant
+          in: query
+          required: false
+          description: >-
+            `full` (the default) or `thumbnail`. `thumb` is accepted as an alias of `thumbnail`, case-insensitively.
+            Anything else is a 400.
+          schema:
+            type: string
+            default: full
+      responses:
+        '200':
+          description: The image bytes.
+          headers:
+            ETag:
+              description: A strong validator built from the stored checksum and the variant.
+              schema:
+                type: string
+            Cache-Control:
+              description: >-
+                `private, no-cache` without `v`; `private, max-age=31536000, immutable` with the current `v`. Never
+                `public`.
+              schema:
+                type: string
+            Content-Disposition:
+              description: '`inline`, with a file name we generated.'
+              schema:
+                type: string
+            X-Content-Type-Options:
+              description: Always `nosniff`.
+              schema:
+                type: string
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '304':
+          description: The caller's cached copy is still current. No body; the `Cache-Control` of the 200 is repeated.
+        '400':
+          description: An unknown `variant`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >-
+            The list does not exist or belongs to someone else, it has no photo, or `v` is not its current version.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
 
   /lists/{id}/recipes/{recipeId}:
     parameters:
@@ -1335,6 +1524,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '503':
@@ -1350,7 +1541,12 @@ paths:
       description: >-
         Public, since recipes are public. Content never changes behind an id (editing a picture means uploading a new
         one), which is what makes the year-long `immutable` cache header honest; the `ETag` answers a conditional
-        request with `If-None-Match` by a 304 and no body.
+        request with `If-None-Match` by a 304 and no body, which repeats the `Cache-Control` of the 200.
+
+
+        **Never serves the photo of a recipe list**, whoever asks, its owner and an administrator included: that answers
+        404, exactly like an id that does not exist. A list's photo is read only through its list,
+        `GET /lists/{id}/cover`.
       x-spring-provide-args:
         - org.springframework.web.context.request.WebRequest webRequest
       security: []
@@ -1489,6 +1685,12 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
     PayloadTooLarge:
       description: The upload is over the size limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    UnsupportedMediaType:
+      description: The request is not `multipart/form-data`. The file goes in a part named `file`.
       content:
         application/problem+json:
           schema:
@@ -2038,13 +2240,23 @@ components:
         updatedAt:
           type: string
           format: date-time
-          description: Changes when the list is renamed or its emoji changes, and only then.
-        coverMediaIds:
+          description: >-
+            Changes when the list is renamed, when its emoji changes, or when its own photo is set, replaced or removed,
+            and only then. Removing a photo the list does not have changes nothing.
+        coverVersion:
+          type: string
+          nullable: true
+          description: >-
+            `null` when the list has no photo of its own. Otherwise an opaque string that **changes whenever the photo
+            does**, and that is the `v` of `GET /lists/{id}/cover`: each version has its own URL, so that a replaced photo
+            never comes back from a cache.
+        recipeCoverMediaIds:
           type: array
           description: >-
             Up to 4 media ids for the photo mosaic of the tile: the first cover picture of the most recently added
             recipes of the list that have one, newest first. Empty when no recipe of the list has a picture. Fetch each
-            as `/media/{id}?variant=thumbnail`.
+            as `/media/{id}?variant=thumbnail`. Computed whether or not the list has a photo of its own (`coverVersion`),
+            and the client decides which to show. Called `coverMediaIds` before lists could have a photo of their own.
           items:
             type: string
         containsRecipe:

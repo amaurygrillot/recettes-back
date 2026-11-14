@@ -299,3 +299,42 @@ Content-Type: image/jpeg
         client.assert(response.status === 400, "Expected 400 but got " + response.status);
     });
 %}
+
+### 15. Download a list's own photo through /media -> 404 Not Found
+### A recipe list's photo is PRIVATE: it is only ever read through its list (GET /lists/{id}/cover), by its owner. This
+### id answers 404 here whoever asks - its owner and an administrator included - with the answer of an id that does not
+### exist. A recipe's picture and an ingredient's icon refuse it too, with the 400 of an unknown id.
+###
+### {{listPhotoId}} is the coverVersion of a list that has a photo: recipe-lists.http request 37 or 44 sets it. Run this
+### request BETWEEN recipe-lists.http requests 37 and 56: after the photo is removed (56) or the list deleted (59), the
+### row is gone and a plain 404 proves nothing about privacy. Paste a live id here if you run this file on its own.
+GET {{baseUrl}}/media/{{listPhotoId}}
+
+> {%
+    client.test("Returns 404", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+###
+GET {{baseUrl}}/media/{{listPhotoId}}?variant=thumbnail
+
+> {%
+    client.test("Returns 404 for the thumbnail too", function () {
+        client.assert(response.status === 404, "Expected 404 but got " + response.status);
+    });
+%}
+
+### 16. Upload as JSON instead of multipart -> 415 Unsupported Media Type
+### It was a 500 before. PUT /lists/{id}/cover answers the same.
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "file": "not a file" }
+
+> {%
+    client.test("Returns 415", function () {
+        client.assert(response.status === 415, "Expected 415 but got " + response.status);
+    });
+%}

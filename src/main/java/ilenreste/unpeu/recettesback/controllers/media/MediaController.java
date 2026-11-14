@@ -8,10 +8,6 @@ import ilenreste.unpeu.recettesback.services.media.StoredMedia;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.core.io.Resource;
 import org.springframework.http.CacheControl;
-import org.springframework.http.ContentDisposition;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.context.request.WebRequest;
@@ -29,8 +25,8 @@ import java.time.Duration;
 @RestController
 public class MediaController implements MediaApi {
 
-    /** Not a constant on Spring's HttpHeaders, so it is spelled out here. */
-    private static final String X_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
+    /** Safe only because content is immutable per id: see {@link #downloadMedia}. */
+    private static final CacheControl PUBLIC_IMMUTABLE = CacheControl.maxAge(Duration.ofDays(365)).cachePublic().immutable();
 
     private final MediaService mediaService;
 
@@ -62,9 +58,11 @@ public class MediaController implements MediaApi {
     }
 
     /**
-     * Serves the stored bytes. Public, since recipes are public.
+     * Serves the stored bytes. Public, since recipes are public — except a recipe list's own photo, which answers 404
+     * here like an id that does not exist ({@code MediaService.load}).
      * <p>
-     * Five things about this response are load-bearing:
+     * The headers are built by {@link MediaResponses}, shared with the list photo. Five things about this response
+     * are load-bearing:
      * <ul>
      *   <li>{@code Content-Type} comes from the {@code media} row — our own
      *       recorded value, never sniffed from the file at read time.</li>
@@ -105,23 +103,7 @@ public class MediaController implements MediaApi {
     @Override
     public ResponseEntity<Resource> downloadMedia(String id, String variant, WebRequest webRequest) {
         StoredMedia media = mediaService.load(id, MediaVariant.from(variant));
-
-        // Sets the ETag header on the response as a side effect, whatever it returns.
-        if (webRequest.checkNotModified(media.entityTag())) {
-            log.debug("Media {} ({}) is unchanged for this caller", id, variant);
-            return ResponseEntity.status(HttpStatus.NOT_MODIFIED).build();
-        }
         log.debug("Serving media {} ({})", id, variant);
-
-        return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType(media.contentType()))
-                .eTag(media.entityTag())
-                .header(X_CONTENT_TYPE_OPTIONS, "nosniff")
-                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.inline()
-                        .filename(media.filename())
-                        .build()
-                        .toString())
-                .cacheControl(CacheControl.maxAge(Duration.ofDays(365)).cachePublic().immutable())
-                .body(media.resource());
+        return MediaResponses.download(media, PUBLIC_IMMUTABLE, webRequest);
     }
 }

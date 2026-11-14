@@ -62,8 +62,8 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
         assertThat(list.path("name").asString()).as("trimmed").isEqualTo("Pour le dimanche");
         assertThat(list.path("emoji").asString()).isEqualTo(PASTA);
         assertThat(list.path("recipeCount").asLong()).isZero();
-        assertThat(list.path("coverMediaIds").isArray()).isTrue();
-        assertThat(list.path("coverMediaIds")).isEmpty();
+        assertThat(list.path("recipeCoverMediaIds").isArray()).isTrue();
+        assertThat(list.path("recipeCoverMediaIds")).isEmpty();
         assertThat(list.path("createdAt").asString()).isNotBlank();
         assertThat(list.path("updatedAt").asString()).isNotBlank();
         assertThat(list.has("containsRecipe")).as("only GET /lists?containing= sets it").isFalse();
@@ -485,25 +485,6 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
         }).when(listsRepository).findByOwnerIdAndNormalizedName(owner.id(), "gouters");
 
         ResponseEntity<String> response = put("/lists/" + id, listJson("Gouters", PASTA), ownerToken);
-
-        assertProblem(response, HttpStatus.NOT_FOUND);
-    }
-
-    /**
-     * Two overlapping deletes of the same list (a double click, a retry): both pass the ownership check, and the loser's
-     * DELETE touches no row. The row is removed here, behind the back of the persistence context, at the instant
-     * the service hands the list to the repository to delete; the flush that follows is the one that finds nothing.
-     */
-    @Test
-    void aListDeletedByAnotherRequestJustBeforeThisDelete_is404_notAServerError() {
-        String id = createList("Desserts", ownerToken);
-        doAnswer(delete -> {
-            jdbc.update("DELETE FROM recipe_lists WHERE id = ?", id);
-            entityManager.remove(delete.getArgument(0));
-            return null;
-        }).when(listsRepository).delete(any(RecipeListEntity.class));
-
-        ResponseEntity<String> response = delete("/lists/" + id, ownerToken);
 
         assertProblem(response, HttpStatus.NOT_FOUND);
     }

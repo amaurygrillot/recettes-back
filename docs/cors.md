@@ -22,6 +22,22 @@ The policy is built by `CorsConfig` from the `CorsProperties` record and handed 
 `503`. A cross-origin script cannot read a response header that is not listed in `Access-Control-Expose-Headers`, so
 without them the headers are on the wire and invisible to the code that needs them.
 
+### A private image is fetched with `fetch`, not `<img>`
+
+The photo of a recipe list ([recipe-list-cover.md](recipe-list-cover.md)) needs the token, which an `<img src>` cannot
+carry, so the front fetches it with `fetch` and an `Authorization` header and shows the result from a blob. The policy
+above is enough for that:
+
+- `GET`, `PUT` and `DELETE` are allowed methods, and `Authorization` and `Content-Type` allowed request headers. The
+  preflight a cross-origin `fetch` with an `Authorization` header triggers carries no token and is answered before
+  authentication, as for every other route.
+- Reading the body as a blob needs no exposed header. `Content-Type` and `Cache-Control` are CORS-safelisted response
+  headers anyway.
+- **`ETag` and `Content-Disposition` are not exposed**, so the script cannot read them, and it does not need to: the
+  browser's HTTP cache revalidates by itself. The front must leave it to do so — it must never set `If-None-Match` (or
+  another conditional header) itself, because the browser then treats the request as uncacheable and hands the script the
+  bare `304`.
+
 ## Why an explicit list of origins, never `*`
 
 - **The list is the policy.** `*` is the absence of one: every site a user visits could then script this API from their

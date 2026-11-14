@@ -14,6 +14,7 @@ import ilenreste.unpeu.recettesback.repositories.recipes.RecipeListsRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
+import ilenreste.unpeu.recettesback.services.media.MediaService;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import ilenreste.unpeu.recettesback.support.RecipeListFixtures;
 import jakarta.persistence.EntityManager;
@@ -26,6 +27,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.context.annotation.Import;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.time.Instant;
 import java.util.List;
@@ -50,6 +52,9 @@ class RecipeListServiceQueryCountTest {
 
     private static final Instant NOON = Instant.parse("2026-11-08T12:00:00Z");
 
+    /** The list service deletes a list's photo through it; this test never deletes a list. */
+    @MockitoBean
+    private MediaService mediaService;
     @Autowired
     private RecipeListService service;
     @Autowired
@@ -84,10 +89,18 @@ class RecipeListServiceQueryCountTest {
         fixtures.signOut();
     }
 
-    /** Lists that each hold a few recipes with pictures, so every aggregate has something to aggregate. */
+    /**
+     * Lists that each hold a few recipes with pictures, so every aggregate has something to aggregate, and half of
+     * them a photo of their own, so that the version of a photo is shown to cost nothing.
+     */
     private void createLists(int howMany) {
         for (int index = 0; index < howMany; index++) {
             RecipeListEntity list = fixtures.list(owner, "Liste " + created++);
+            if (created % 2 == 0) {
+                // Every other list has a photo of its own: its version must come out of the same statements.
+                list.setCover(fixtures.media());
+                listsRepository.saveAndFlush(list);
+            }
             for (int slot = 0; slot < 3; slot++) {
                 MediaEntity media = fixtures.media();
                 fixtures.put(list, fixtures.recipeWithCovers("recipe " + created + "-" + slot, media),
@@ -147,9 +160,11 @@ class RecipeListServiceQueryCountTest {
 
         assertThat(lists).hasSize(20).allSatisfy(list -> {
             assertThat(list.recipeCount()).isEqualTo(4);
-            assertThat(list.coverMediaIds()).hasSize(3);
+            assertThat(list.recipeCoverMediaIds()).hasSize(3);
             assertThat(list.containsRecipe()).isTrue();
         });
+        assertThat(lists).as("half of them have a photo of their own")
+                .filteredOn(list -> list.coverVersion() != null).hasSize(10);
     }
 
     @Test
