@@ -130,8 +130,8 @@ public class RecipeListCoverService {
             throw new ResourceNotFoundException("That recipe list has no photo.");
         }
         if (StringUtils.hasText(version) && !version.equals(current)) {
-            log.debug("Recipe list {} was asked for version {} of its photo, which is not the current one",
-                    listId, version);
+            // The version is whatever the caller typed, so it is not written to the log.
+            log.debug("Recipe list {} was asked for a version of its photo that is not the current one", listId);
             throw new ResourceNotFoundException("That version of the photo no longer exists.");
         }
         return mediaService.open(list.getCover(), variant);

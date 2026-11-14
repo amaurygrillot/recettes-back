@@ -1,7 +1,7 @@
 # La photo de la liste — the photo of a recipe list
 
-Status: **design**, written before the code and updated in place wherever the implementation or the review proves a
-decision wrong. Companion documents: [recipe-lists.md](recipe-lists.md) (the lists this extends),
+Status: **implemented**. It was written before the code and is updated in place wherever the implementation or the
+review proves a decision wrong. Companion documents: [recipe-lists.md](recipe-lists.md) (the lists this extends),
 [media-storage.md](media-storage.md) (the pipeline it reuses), [api-error-handling.md](api-error-handling.md) (the
 statuses), [service-controller-contract.md](service-controller-contract.md), [openapi.md](openapi.md),
 [cors.md](cors.md), [testing-database.md](testing-database.md).
