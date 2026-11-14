@@ -7,7 +7,6 @@ import jakarta.persistence.LockModeType;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntryId;
 import ilenreste.unpeu.recettesback.services.media.MediaService;
-import java.util.function.Function;
 import ilenreste.unpeu.recettesback.exceptions.InvalidInputException;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
@@ -239,7 +238,7 @@ public class RecipeListService {
      */
     @Transactional
     public void delete(String listId) {
-        // Loaded WITH the row lock, so a PUT /lists/{id}/cover that is attaching a photo finishes first and this
+        // Checked as the owner, then locked (and re-read), so a PUT /lists/{id}/cover that is attaching a photo finishes first and this
         // sees it: the photo's files can only be deleted if they are known. A second delete of the same list waits
         // here and then finds nothing, which is a 404, so no optimistic-locking catch is needed any more.
         RecipeListEntity list = ownedListForUpdate(listId);
@@ -330,12 +329,12 @@ public class RecipeListService {
      * asks the same question instead of copying it: a list's photo is visible to exactly whoever may see the list.
      */
     RecipeListEntity visibleList(String listId) {
-        return load(listId, this::isVisibleTo, listsRepository::findById);
+        return load(listId, this::isVisibleTo);
     }
 
     /** Who may <em>change</em> a list. Not the same question as {@link #visibleList}, and it stays owner-only. */
     RecipeListEntity ownedList(String listId) {
-        return load(listId, this::isOwnedBy, listsRepository::findById);
+        return load(listId, this::isOwnedBy);
     }
 
     /**
@@ -371,10 +370,9 @@ public class RecipeListService {
      * the id exists and is somebody's. They are logged differently: a stale id is routine, a list that exists
      * and is not the caller's is somebody probing, and the log is the only place that difference is visible.
      */
-    private RecipeListEntity load(String listId, BiPredicate<RecipeListEntity, String> rule,
-                                  Function<String, Optional<RecipeListEntity>> finder) {
+    private RecipeListEntity load(String listId, BiPredicate<RecipeListEntity, String> rule) {
         String callerId = callerId();
-        Optional<RecipeListEntity> found = finder.apply(listId);
+        Optional<RecipeListEntity> found = listsRepository.findById(listId);
         if (found.isEmpty()) {
             log.debug("User {} asked for recipe list {}, which does not exist", callerId, listId);
         } else if (!rule.test(found.get(), callerId)) {

@@ -281,6 +281,17 @@ So that a rollback never leaves a row pointing at a deleted file. They are remov
 `MediaStorageService.delete`, which already logs a file it cannot delete — with its storage key, at `error` — and does
 not fail the request. There is no second log line and no second delete path.
 
+### Why the lock comes after the ownership check
+
+`ownedListForUpdate` reads the list **unlocked** and applies the ownership rule, and only then locks the row, with
+`EntityManager.refresh(list, PESSIMISTIC_WRITE)`, which re-reads it. Locking first would let anybody who learned a
+list's id (it is never shown to anyone but its owner) take the row lock with a request that ends in `404`, and make the
+owner's own writes queue behind it. Re-reading is what makes the lock useful: what was read a moment ago may no longer
+be what is there (a photo attached meanwhile), and a list deleted while the caller waited is a `404` too. The cost is
+one more statement per write, which is not on a hot path. One known edge: a rename that loaded the list before a photo
+was attached answers a `coverVersion` read before it, and the next read shows the photo; the photo itself is never
+lost (`@DynamicUpdate`).
+
 ### Overlapping writes
 
 The lock on the `recipe_lists` row serialises every write to one list's photo. Whatever the interleaving:

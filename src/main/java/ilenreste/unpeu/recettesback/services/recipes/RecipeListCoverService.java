@@ -34,7 +34,7 @@ import org.springframework.web.multipart.MultipartFile;
  * call from one method of a bean to another does not cross the proxy and would run with no transaction at all.
  *
  * <h2>The lock</h2>
- * The write transaction loads the list again {@code WITH A ROW LOCK}, reads the photo it holds <em>now</em>, swaps
+ * The write transaction locks the list's row again ({@code PESSIMISTIC_WRITE}, after the ownership check), reads the photo it holds <em>now</em>, swaps
  * it and schedules the old files for deletion after commit. Every write to the photo, and the deletion of the list,
  * takes that lock, which serialises them: the last to commit wins, and whatever is not the final photo is deleted,
  * row and files.
