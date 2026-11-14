@@ -1,6 +1,16 @@
 package ilenreste.unpeu.recettesback.controllers.recipes;
 
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeCoverPictureEntity;
+import ilenreste.unpeu.recettesback.properties.MediaProperties;
+import ilenreste.unpeu.recettesback.services.media.ImageReencoder;
+import ilenreste.unpeu.recettesback.services.media.UploadRateLimiter;
+import ilenreste.unpeu.recettesback.support.TestImages;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeEntity;
 import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.repositories.recipes.RecipeListEntriesRepository;
@@ -28,11 +38,18 @@ import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
@@ -55,7 +72,9 @@ import static org.assertj.core.api.Assertions.assertThat;
         // allows 100 connections in all. Ten idle connections per context is how a full build runs out of them
         // ("too many clients already") on a machine where the application and an IDE are connected too. Eight is the
         // most this suite needs at once, for the test that sends eight identical requests together.
-        properties = "spring.datasource.hikari.maximum-pool-size=8")
+        properties = {"spring.datasource.hikari.maximum-pool-size=8",
+                // Lists' photos write real files. Under target/, as MediaUploadIntegrationTest does, never ./media.
+                "app.media.storage-path=target/test-media-recipe-lists"})
 @AutoConfigureTestRestTemplate
 abstract class RecipeListsHttpSupport {
 
@@ -78,6 +97,16 @@ abstract class RecipeListsHttpSupport {
     protected RecipesRepository recipesRepository;
     @MockitoSpyBean
     protected RecipeListsRepository listsRepository;
+    /**
+     * Spied, here, for the same reason as the repositories above (one shared context): the tests that need a 429 or a
+     * 503 over real HTTP make these two throw, instead of spending twenty uploads or saturating the decode pool.
+     */
+    @MockitoSpyBean
+    protected UploadRateLimiter rateLimiter;
+    @MockitoSpyBean
+    protected ImageReencoder reencoder;
+    @Autowired
+    protected MediaProperties mediaProperties;
     @Autowired
     protected MediaRepository mediaRepository;
     @Autowired
@@ -124,13 +153,42 @@ abstract class RecipeListsHttpSupport {
     void tearDown() {
         List<TestAccount> accounts = Stream.of(owner, stranger, admin).filter(Objects::nonNull).toList();
         try {
+            // A list's photo is a media row the list points at: read where its files are before the list goes, delete
+            // the row after it (the list references it), then the files. The service does exactly this on a delete.
+            List<Map<String, Object>> photos = coverRowsOf(accounts);
             accounts.forEach(account -> listsRepository.deleteAll(
                     listsRepository.findByOwnerIdOrderByNormalizedNameAscNameAsc(account.id())));
             recipesRepository.deleteAllById(recipeIds);
             mediaRepository.deleteAllById(mediaIds);
+            photos.forEach(photo -> {
+                jdbc.update("DELETE FROM media WHERE id = ?", photo.get("id"));
+                deleteStoredFile((String) photo.get("storage_key"));
+                deleteStoredFile((String) photo.get("thumbnail_storage_key"));
+            });
         } finally {
             accounts.reversed().forEach(TestAccount::close);
         }
+    }
+
+    private List<Map<String, Object>> coverRowsOf(List<TestAccount> accounts) {
+        return accounts.stream()
+                .flatMap(account -> jdbc.queryForList("""
+                        SELECT m.id, m.storage_key, m.thumbnail_storage_key FROM media m
+                        JOIN recipe_lists l ON l.cover_media_id = m.id WHERE l.owner_id = ?
+                        """, account.id()).stream())
+                .toList();
+    }
+
+    private void deleteStoredFile(String storageKey) {
+        try {
+            Files.deleteIfExists(storageRoot().resolve(storageKey));
+        } catch (IOException exception) {
+            throw new UncheckedIOException(exception);
+        }
+    }
+
+    protected Path storageRoot() {
+        return mediaProperties.storagePath().toAbsolutePath().normalize();
     }
 
     // ------------------------------------------------------------------------------------------ HTTP verbs
@@ -149,6 +207,66 @@ abstract class RecipeListsHttpSupport {
 
     protected ResponseEntity<String> delete(String path, String token) {
         return restTemplate.exchange(path, HttpMethod.DELETE, body(null, token), String.class);
+    }
+
+    /** {@code multipart/form-data} with one part named {@code file}, sent with the given verb. */
+    protected ResponseEntity<String> sendFile(HttpMethod method, String path, byte[] content, String token) {
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("file", new ByteArrayResource(content) {
+            @Override
+            public String getFilename() {
+                return "photo.jpg";
+            }
+        });
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        if (token != null) {
+            headers.set(HttpHeaders.AUTHORIZATION, token);
+        }
+        return restTemplate.exchange(path, method, new HttpEntity<>(body, headers), String.class);
+    }
+
+    /** {@code PUT /lists/{id}/cover} with a small JPEG. */
+    protected ResponseEntity<String> putCover(String listId, String token) {
+        return sendFile(HttpMethod.PUT, "/lists/" + listId + "/cover", TestImages.jpeg(300, 200), token);
+    }
+
+    /** {@code GET} of any binary path, with optional extra headers (a conditional request, say). */
+    protected ResponseEntity<byte[]> getBytes(String path, String token, String... headerNameAndValue) {
+        HttpHeaders headers = new HttpHeaders();
+        if (token != null) {
+            headers.set(HttpHeaders.AUTHORIZATION, token);
+        }
+        for (int index = 0; index < headerNameAndValue.length; index += 2) {
+            headers.set(headerNameAndValue[index], headerNameAndValue[index + 1]);
+        }
+        return restTemplate.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), byte[].class);
+    }
+
+    /** Every file under the storage root, as a key relative to it. In-flight temporary files are not counted. */
+    protected Set<String> storedFiles() {
+        Path root = storageRoot();
+        if (!Files.isDirectory(root)) {
+            return Set.of();
+        }
+        try (Stream<Path> files = Files.walk(root)) {
+            return files.filter(Files::isRegularFile)
+                    .filter(file -> !file.getFileName().toString().startsWith(".upload-"))
+                    .map(file -> root.relativize(file).toString().replace('\\', '/'))
+                    .collect(Collectors.toSet());
+        } catch (IOException exception) {
+            throw new UncheckedIOException(exception);
+        }
+    }
+
+    /** The row and both files of a photo, read from the database by its id (its {@code coverVersion}). */
+    protected Optional<Map<String, Object>> mediaRow(String mediaId) {
+        return jdbc.queryForList("SELECT id, storage_key, thumbnail_storage_key FROM media WHERE id = ?", mediaId)
+                .stream().findFirst();
+    }
+
+    protected boolean fileExists(String storageKey) {
+        return Files.isRegularFile(storageRoot().resolve(storageKey));
     }
 
     protected static JsonNode json(ResponseEntity<String> response) {
