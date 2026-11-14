@@ -11,6 +11,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import tools.jackson.databind.JsonNode;
@@ -21,11 +22,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Supplier;
 
@@ -715,16 +718,52 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
         assertThat(mediaRowsUploadedBy(owner.id())).isZero();
     }
 
+    /**
+     * The rename loads the list, a photo is attached from another connection before the rename writes, and the rename
+     * must not write the old, empty {@code cover_media_id} back. Made deterministic the way the rename-versus-delete
+     * race is: the name check, which runs between the load and the write, is spied, and attaches the photo itself.
+     * Without {@code @DynamicUpdate} Hibernate rewrites every column and this loses the photo.
+     */
     @Test
-    void aRenameRacingAPhotoWrite_cannotEraseThePhoto() {
+    void aRenameThatLoadedTheListBeforeAPhotoWasAttached_cannotEraseThePhoto() {
         String id = createList(unique("Photo"), ownerToken);
+        String photoId = media();
+        doAnswer(check -> {
+            jdbc.update("UPDATE recipe_lists SET cover_media_id = ? WHERE id = ?", photoId, id);
+            return Optional.empty();
+        }).when(listsRepository).findByOwnerIdAndNormalizedName(owner.id(), "renamed");
 
-        List<ResponseEntity<String>> responses = inParallel(List.of(
-                () -> put("/lists/" + id, listJson(unique("Renamed"), PASTA), ownerToken),
-                () -> putCover(id, ownerToken)));
+        ResponseEntity<String> renamed = put("/lists/" + id, listJson("Renamed", PASTA), ownerToken);
 
-        assertThat(responses).extracting(ResponseEntity::getStatusCode).containsOnly(HttpStatus.OK);
-        assertThat(versionOf(id)).as("a rename writes its own columns only").isNotNull();
-        assertThat(mediaRowsUploadedBy(owner.id())).isEqualTo(1);
+        assertThat(renamed.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(versionOf(id)).as("a rename writes its own columns only").isEqualTo(photoId);
+    }
+
+    @Test
+    void theUploadRunsOutsideAnyTransaction_soNoConnectionIsHeldWhileAnImageDecodes() {
+        String id = createList(unique("Photo"), ownerToken);
+        AtomicBoolean transactionDuringDecode = new AtomicBoolean(true);
+        doAnswer(decode -> {
+            transactionDuringDecode.set(TransactionSynchronizationManager.isActualTransactionActive());
+            return decode.callRealMethod();
+        }).when(reencoder).reencode(any(), any());
+
+        assertThat(putCover(id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        assertThat(transactionDuringDecode).as("a transaction was open while the image decoded").isFalse();
+    }
+
+    @Test
+    void aStaleVersionWithAMatchingETag_is404_neverA304() {
+        String id = createList(unique("Photo"), ownerToken);
+        assertThat(putCover(id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.OK);
+        String stale = versionOf(id);
+        String etag = getBytes(coverPath(id) + "?v=" + stale, ownerToken).getHeaders().getETag();
+        assertThat(putCover(id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        ResponseEntity<byte[]> response = getBytes(coverPath(id) + "?v=" + stale, ownerToken,
+                HttpHeaders.IF_NONE_MATCH, etag);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 }

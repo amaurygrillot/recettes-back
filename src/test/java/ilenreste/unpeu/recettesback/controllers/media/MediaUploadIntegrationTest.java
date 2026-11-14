@@ -139,6 +139,26 @@ class MediaUploadIntegrationTest {
         assertThat(response.getBody()).isNotEmpty();
     }
 
+    /**
+     * The headers of a stored image are built in one place for this route and for a list's own photo. The 304 of the
+     * public route repeats the 200's {@code Cache-Control}, as RFC 9111 asks and this route did not do before.
+     */
+    @Test
+    void aConditionalRequestIsA304_thatRepeatsThePublicImmutableCacheControl() {
+        String id = uploadJpeg(50, 50);
+        String etag = restTemplate.getForEntity("/media/" + id, byte[].class).getHeaders().getETag();
+        HttpHeaders conditional = new HttpHeaders();
+        conditional.set(HttpHeaders.IF_NONE_MATCH, etag);
+
+        ResponseEntity<byte[]> response = restTemplate.exchange("/media/" + id, org.springframework.http.HttpMethod.GET,
+                new HttpEntity<>(conditional), byte[].class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_MODIFIED);
+        assertThat(response.getBody()).isNull();
+        assertThat(response.getHeaders().getCacheControl()).contains("public").contains("immutable")
+                .contains("max-age=31536000");
+    }
+
     @Test
     void thumbnailVariantIsSmallerThanTheFullImage() {
         String id = uploadJpeg(1200, 900);

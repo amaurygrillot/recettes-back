@@ -350,7 +350,7 @@ reloads the list and gets the new version.
 | Two concurrent writes to one list's photo: exactly one row and its two files remain                   | same                                        |
 | `findOrphans` does not return an attached photo and does return a detached one; `totalBytesUploadedBy` counts it | `MediaRepositoryTest` (`@DataJpaTest`) |
 | `GET /lists` out of N+1 with photos on some of the lists                                              | `RecipeListServiceQueryCountTest`           |
-| The `415` for a non-multipart request, on both routes; `413` still answered by its own handler        | `ApiExceptionHandlerTest`, `MediaUploadIntegrationTest` |
+| The `415` for a non-multipart request, on both routes, and `413` on a part over 8 MB (still answered by its own handler); the `304` of the public `GET /media/{id}` repeating its `Cache-Control` | `RecipeListCoverIntegrationTest`, `ApiExceptionHandlerTest`, `MediaUploadIntegrationTest` |
 | The preflight of the three routes                                                                     | `CorsIntegrationTest`                       |
 | YAML and code agree; every operation answers what its `security` promises                             | `OpenApiContractTest`, `OpenApiSecurityConformanceTest` |
 | The walkthrough, success and failures                                                                 | `src/test/requests/recipe-lists.http`, `media.http` |

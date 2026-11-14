@@ -21,7 +21,11 @@ Specifically:
   security layer, by `ProblemDetailErrorResponder`). The mapping lives in one place; see
   [api-error-handling.md](api-error-handling.md).
 - **Every write is transactional**, so a failure part-way through leaves nothing half-written. A create either
-  produced a complete row or produced none.
+  produced a complete row or produced none. (The one method that is not transactional *as a whole* is the upload of a
+  list's photo, `RecipeListCoverService.replace`, on purpose: it must hold no database connection while an image
+  decodes. It checks the list in one short transaction and attaches the photo in another, and deletes the files it wrote
+  by hand if the second fails, so the contract still holds: it returns the updated list or throws, and leaves nothing
+  behind. See [recipe-list-cover.md](recipe-list-cover.md#setting-or-replacing--put-listsidcover).)
 - **A create returns the row as flushed**, not the detached input — so the id is generated, the name is the stored
   (trimmed, normalised) one, and a mapper reading it back sees what the database has.
 

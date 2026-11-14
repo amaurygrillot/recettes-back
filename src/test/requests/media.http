@@ -305,8 +305,9 @@ Content-Type: image/jpeg
 ### id answers 404 here whoever asks - its owner and an administrator included - with the answer of an id that does not
 ### exist. A recipe's picture and an ingredient's icon refuse it too, with the 400 of an unknown id.
 ###
-### {{listPhotoId}} is the coverVersion of a list that has a photo: recipe-lists.http request 37 or 44 sets it. Paste
-### one here if you run this file on its own.
+### {{listPhotoId}} is the coverVersion of a list that has a photo: recipe-lists.http request 37 or 44 sets it. Run this
+### request BETWEEN recipe-lists.http requests 37 and 56: after the photo is removed (56) or the list deleted (59), the
+### row is gone and a plain 404 proves nothing about privacy. Paste a live id here if you run this file on its own.
 GET {{baseUrl}}/media/{{listPhotoId}}
 
 > {%

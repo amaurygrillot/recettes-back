@@ -1,6 +1,9 @@
 package ilenreste.unpeu.recettesback.services.recipes;
 
 import ilenreste.unpeu.recettesback.entities.media.MediaEntity;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityNotFoundException;
+import jakarta.persistence.LockModeType;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntryId;
 import ilenreste.unpeu.recettesback.services.media.MediaService;
@@ -81,12 +84,15 @@ public class RecipeListService {
     private final RecipeListMapper mapper;
     private final Clock clock;
     private final MediaService mediaService;
+    private final EntityManager entityManager;
 
     public RecipeListService(RecipeListsRepository listsRepository, RecipeListEntriesRepository entriesRepository,
                              RecipesRepository recipesRepository, UsersRepository usersRepository,
                              CurrentUserService currentUserService, ReferenceNameNormalizer normalizer,
-                             RecipeListMapper mapper, Clock clock, MediaService mediaService) {
+                             RecipeListMapper mapper, Clock clock, MediaService mediaService,
+                             EntityManager entityManager) {
         this.mediaService = mediaService;
+        this.entityManager = entityManager;
         this.listsRepository = listsRepository;
         this.entriesRepository = entriesRepository;
         this.recipesRepository = recipesRepository;
@@ -224,12 +230,12 @@ public class RecipeListService {
     }
 
     /**
-     * Deletes the list and, by the database's cascade, its entries. Never the recipes.
+     * Deletes the list and, by the database's cascade, its entries. Never the recipes. The list's own photo goes with
+     * it, row and files (the files after commit).
      * <p>
-     * Flushed here, inside the try, because a delete is only sent at commit otherwise: two overlapping requests for the
-     * same list (a double click, a retry) both pass the ownership check, the first commits, and the second's DELETE
-     * touches no row. Hibernate reports that as an optimistic-locking failure, which would surface from the commit as a
-     * 500. The list is gone, which is the 404 a request arriving a moment later would have been.
+     * Two overlapping deletes of the same list (a double click, a retry) are serialised by the row lock the list is
+     * loaded with: the second waits, and finds nothing once the first has committed, which is the 404 a request
+     * arriving a moment later would have been.
      */
     @Transactional
     public void delete(String listId) {
@@ -334,10 +340,22 @@ public class RecipeListService {
 
     /**
      * {@link #ownedList} with the row lock ({@code PESSIMISTIC_WRITE}), for what writes the list's photo or deletes the
-     * list. Must be the first load of the list in its transaction, or the lock would return the state read before it.
+     * list.
+     * <p>
+     * The rule is applied <strong>first, on an unlocked read</strong>, so that somebody who may not touch this list
+     * never takes its lock — and never makes the owner's own writes queue behind them — however they got hold of the
+     * id. The lock then <em>re-reads</em> the row: what was read a moment ago may no longer be what is there (a photo
+     * attached meanwhile), and a list deleted meanwhile is a 404.
      */
     RecipeListEntity ownedListForUpdate(String listId) {
-        return load(listId, this::isOwnedBy, listsRepository::findWithLockById);
+        RecipeListEntity list = ownedList(listId);
+        try {
+            entityManager.refresh(list, LockModeType.PESSIMISTIC_WRITE);
+        } catch (EntityNotFoundException deletedMeanwhile) {
+            log.debug("Recipe list {} was deleted while the caller waited for its lock", listId);
+            throw ResourceNotFoundException.of("recipe list", listId);
+        }
+        return list;
     }
 
     private boolean isVisibleTo(RecipeListEntity list, String userId) {

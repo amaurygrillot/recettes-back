@@ -18,6 +18,7 @@ import ilenreste.unpeu.recettesback.repositories.recipes.RecipesRepository;
 import ilenreste.unpeu.recettesback.repositories.users.UsersRepository;
 import ilenreste.unpeu.recettesback.services.reference.ReferenceNameNormalizer;
 import ilenreste.unpeu.recettesback.services.media.MediaService;
+import jakarta.persistence.EntityManager;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -80,7 +81,7 @@ class RecipeListServiceTest {
         mediaService = mock(MediaService.class);
         service = new RecipeListService(listsRepository, entriesRepository, recipesRepository, usersRepository,
                 currentUserService, new ReferenceNameNormalizer(), new RecipeListMapper(),
-                Clock.fixed(NOW, ZoneOffset.UTC), mediaService);
+                Clock.fixed(NOW, ZoneOffset.UTC), mediaService, mock(EntityManager.class));
         signInAs(ME);
         when(listsRepository.saveAndFlush(any(RecipeListEntity.class))).thenAnswer(call -> call.getArgument(0));
     }
@@ -103,7 +104,6 @@ class RecipeListServiceTest {
         list.setNormalizedName(new ReferenceNameNormalizer().normalize(name));
         list.setEmoji(CAKE);
         when(listsRepository.findById(id)).thenReturn(Optional.of(list));
-        when(listsRepository.findWithLockById(id)).thenReturn(Optional.of(list));
         return list;
     }
 
