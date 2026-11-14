@@ -87,6 +87,24 @@ class CorsIntegrationTest {
     }
 
     /**
+     * The photo of a list is fetched with {@code fetch} and an {@code Authorization} header, uploaded with a
+     * multipart {@code PUT} and removed with a {@code DELETE}: the three preflights a browser sends for it, which
+     * carry no token, must all be answered.
+     */
+    @Test
+    void preflight_isAnswered200_onTheThreeRoutesOfAListsPhoto() {
+        for (String method : new String[]{"GET", "PUT", "DELETE"}) {
+            ResponseEntity<String> response = preflight("/lists/some-id/cover", ALLOWED_ORIGIN, method,
+                    "authorization, content-type");
+
+            assertThat(response.getStatusCode()).as("preflight for %s", method).isEqualTo(HttpStatus.OK);
+            assertThat(response.getHeaders().getAccessControlAllowOrigin()).isEqualTo(ALLOWED_ORIGIN);
+            assertThat(response.getHeaders().getAccessControlAllowHeaders())
+                    .containsExactlyInAnyOrder("authorization", "content-type");
+        }
+    }
+
+    /**
      * The regression this configuration exists to prevent: CorsFilter sits ahead of
      * JwtAuthenticationFilter, so a dead token on the request is never even looked at. Were the order
      * reversed, this would be the same 401 as {@code OptionalAuthenticationTest}'s broken-token case.

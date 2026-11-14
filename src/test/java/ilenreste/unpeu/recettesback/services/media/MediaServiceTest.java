@@ -19,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.file.Path;
@@ -294,6 +295,84 @@ class MediaServiceTest {
 
         assertThatThrownBy(() -> mediaService.load("media-1", MediaVariant.FULL))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void intakeWritesBothFilesAndCreatesNoRow_theCallerDecidesWhatTheyBecome() {
+        StoredImage image = mediaService.intake(upload(TestImages.jpeg(600, 300)));
+
+        verify(storageService).store(org.mockito.ArgumentMatchers.eq(image.storageKey()), any(byte[].class));
+        verify(storageService).store(org.mockito.ArgumentMatchers.eq(image.thumbnailStorageKey()), any(byte[].class));
+        verifyNoInteractions(mediaRepository);
+        assertThat(image.width()).isEqualTo(200);
+        assertThat(image.height()).isEqualTo(100);
+        assertThat(image.storageKey()).matches("[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f-]{36}\\.jpg");
+        assertThat(image.thumbnailStorageKey()).endsWith("_thumb.jpg");
+        assertThat(image.checksumSha256()).hasSize(64);
+    }
+
+    @Test
+    void discardDeletesBothFilesOfAnIntakeThatWillNeverHaveARow() {
+        StoredImage image = mediaService.intake(upload(TestImages.jpeg(300, 300)));
+
+        mediaService.discard(image);
+
+        verify(storageService).delete(image.storageKey());
+        verify(storageService).delete(image.thumbnailStorageKey());
+    }
+
+    @Test
+    void deleteAfterCommitDeletesTheRowNow_andTheFilesOnlyOnceTheTransactionHasCommitted() {
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            MediaEntity media = storedMedia();
+
+            mediaService.deleteAfterCommit(media);
+
+            verify(mediaRepository).delete(media);
+            verify(storageService, never()).delete(anyString());
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(org.springframework.transaction.support.TransactionSynchronization::afterCommit);
+            verify(storageService).delete("ab/cd/file.jpg");
+            verify(storageService).delete("ab/cd/file_thumb.jpg");
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void deleteAfterCommitLeavesTheFilesAlone_whenTheTransactionRollsBack() {
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            mediaService.deleteAfterCommit(storedMedia());
+
+            TransactionSynchronizationManager.getSynchronizations().forEach(synchronization ->
+                    synchronization.afterCompletion(
+                            org.springframework.transaction.support.TransactionSynchronization.STATUS_ROLLED_BACK));
+
+            verify(storageService, never()).delete(anyString());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void deleteAfterCommitWithNoTransactionFailsLoudly_andDeletesNothing() {
+        assertThatThrownBy(() -> mediaService.deleteAfterCommit(storedMedia()))
+                .isInstanceOf(IllegalStateException.class);
+
+        verify(mediaRepository, never()).delete(any());
+        verify(storageService, never()).delete(anyString());
+    }
+
+    @Test
+    void opensARowTheCallerHasAlreadyAuthorised_withoutLookingItUp() {
+        when(storageService.load("ab/cd/file_thumb.jpg")).thenReturn(Optional.of(new ByteArrayResource(new byte[]{1})));
+
+        StoredMedia opened = mediaService.open(storedMedia(), MediaVariant.THUMBNAIL);
+
+        assertThat(opened.entityTag()).endsWith("-thumbnail\"");
+        verifyNoInteractions(mediaRepository);
     }
 
     private MediaEntity storedMedia() {

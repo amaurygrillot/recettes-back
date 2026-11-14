@@ -209,9 +209,10 @@ public class MediaService {
      * @throws IllegalStateException if no transaction is active, which is a bug in the caller
      */
     public void deleteAfterCommit(MediaEntity media) {
+        // The keys are read first, while the row is still there; and the hook is registered before anything is
+        // deleted, so that a caller with no transaction fails here and deletes nothing.
         String storageKey = media.getStorageKey();
         String thumbnailKey = media.getThumbnailStorageKey();
-        mediaRepository.delete(media);
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
@@ -219,6 +220,7 @@ public class MediaService {
                 storageService.delete(thumbnailKey);
             }
         });
+        mediaRepository.delete(media);
     }
 
     /**

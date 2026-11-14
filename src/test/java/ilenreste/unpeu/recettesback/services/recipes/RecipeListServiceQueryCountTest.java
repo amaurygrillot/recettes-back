@@ -89,10 +89,18 @@ class RecipeListServiceQueryCountTest {
         fixtures.signOut();
     }
 
-    /** Lists that each hold a few recipes with pictures, so every aggregate has something to aggregate. */
+    /**
+     * Lists that each hold a few recipes with pictures, so every aggregate has something to aggregate, and half of
+     * them a photo of their own, so that the version of a photo is shown to cost nothing.
+     */
     private void createLists(int howMany) {
         for (int index = 0; index < howMany; index++) {
             RecipeListEntity list = fixtures.list(owner, "Liste " + created++);
+            if (created % 2 == 0) {
+                // Every other list has a photo of its own: its version must come out of the same statements.
+                list.setCover(fixtures.media());
+                listsRepository.saveAndFlush(list);
+            }
             for (int slot = 0; slot < 3; slot++) {
                 MediaEntity media = fixtures.media();
                 fixtures.put(list, fixtures.recipeWithCovers("recipe " + created + "-" + slot, media),
@@ -155,6 +163,8 @@ class RecipeListServiceQueryCountTest {
             assertThat(list.recipeCoverMediaIds()).hasSize(3);
             assertThat(list.containsRecipe()).isTrue();
         });
+        assertThat(lists).as("half of them have a photo of their own")
+                .filteredOn(list -> list.coverVersion() != null).hasSize(10);
     }
 
     @Test
