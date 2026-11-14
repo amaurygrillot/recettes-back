@@ -250,8 +250,9 @@ and the wrong content type, the upload shapes, and each of anonymous, `USER` and
 text were compared. The first run found two differences (the `produces` and `consumes` conditions above), both fixed; the
 run after that found none, and it was repeated once more after the conditions moved from a runtime hook to the build-time
 step, again with none. The two 500s both builds share - a non-multipart `POST /media`, where `MultipartException` reaches the
-catch-all handler - are an existing bug, left alone because fixing it changes a status; mapping it to a 400 or 415 is a
-small follow-up.
+catch-all handler - were an existing bug, left alone because fixing it changes a status. **It is fixed now**, for
+`POST /media` and for `PUT /lists/{id}/cover`, which would have inherited it: a request that is not multipart answers
+`415` ([api-error-handling.md](api-error-handling.md#415--a-file-sent-the-wrong-way)), and both operations document it.
 
 Repeat the exercise when the generator or springdoc is upgraded: it is the only check that sees the mappings Spring really
 builds.

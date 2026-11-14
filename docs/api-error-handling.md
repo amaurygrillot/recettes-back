@@ -190,6 +190,19 @@ sending the reader to the wrong place. They share one private helper, which floo
 is whole seconds, and a sub-second wait renders as `0`, which a client reads as "retry immediately" — a hot loop
 against the thing that just asked it to slow down.
 
+### `415` — a file sent the wrong way
+
+`POST /media` and `PUT /lists/{id}/cover` take `multipart/form-data`. A request that is not (a JSON body, no body at
+all) made Spring raise a `MultipartException` ("Current request is not a multipart request") that nothing mapped, so it
+fell to the catch-all and answered `500` with a stack trace in the log, for a mistake that is the caller's. It is now a
+**`415 Unsupported Media Type`**, `about:blank`, whose `detail` names `multipart/form-data`.
+
+The handler is narrow on purpose. A `MultipartException` on a request that *is* multipart means the body could not be
+parsed or its temporary file could not be written — which can be the server's own failure (a full disk, an antivirus
+quarantining the spooled part, see [media-storage.md](media-storage.md#a-note-for-whoever-runs-the-tests-on-windows)) —
+so it keeps answering as the unexpected failure it was. `MaxUploadSizeExceededException`, a subclass, keeps the `413` of
+its own hook: Spring picks the handler whose declared type is closest, and the exact type wins.
+
 The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
 `media.created_at NOT NULL` trap in [recipes-domain-model.md](recipes-domain-model.md#auditing) and any missed
 `@NotBlank` on a child request record both surface as `DataIntegrityViolationException` and would otherwise be
