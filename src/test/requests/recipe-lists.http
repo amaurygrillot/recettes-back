@@ -158,6 +158,11 @@ Content-Type: application/json
         client.assert(response.body.recipeCount === 0, "Expected an empty list");
         client.assert(response.body.recipeCoverMediaIds.length === 0, "Expected no cover yet");
         client.assert(response.body.coverVersion === null, "Expected no photo of its own: a list is created without one");
+        // The contract (RecipeListResponse.required) says what is ALWAYS sent: all of this, on every route that answers a
+        // list, coverVersion as an explicit null and never an absent key. Only containsRecipe is sometimes missing.
+        ["id", "name", "emoji", "recipeCount", "createdAt", "updatedAt", "coverVersion", "recipeCoverMediaIds"].forEach(function (field) {
+            client.assert(Object.prototype.hasOwnProperty.call(response.body, field), "Expected " + field + " in the answer");
+        });
         client.assert(response.body.containsRecipe === undefined, "containsRecipe only exists with ?containing=");
         client.assert(response.headers.valueOf("Location").endsWith(response.body.id), "Expected a Location");
         client.global.set("listId", response.body.id);
@@ -791,6 +796,7 @@ Content-Type: image/jpeg
         client.assert(typeof response.body.coverVersion === "string", "Expected a coverVersion");
         client.assert(Array.isArray(response.body.recipeCoverMediaIds), "The mosaic is computed either way");
         client.global.set("coverVersion", response.body.coverVersion);
+        client.global.set("coverUpdatedAt", response.body.updatedAt);
         // Used by media.http request 15: this id must not be served by GET /media/{id}.
         client.global.set("listPhotoId", response.body.coverVersion);
     });
@@ -804,6 +810,9 @@ Authorization: Bearer {{memberToken}}
     client.test("Shows the version", function () {
         client.assert(response.status === 200, "Expected 200 but got " + response.status);
         client.assert(response.body.coverVersion === client.global.get("coverVersion"), "Expected the same version");
+        // createdAt and updatedAt are microseconds in a write's answer and in the next read alike (the application's Clock
+        // ticks in microseconds, which is what PostgreSQL keeps), so the two spellings of the instant are the same text.
+        client.assert(response.body.updatedAt === client.global.get("coverUpdatedAt"), "Expected the updatedAt of the write");
     });
 %}
 
@@ -1038,7 +1047,10 @@ Content-Type: image/jpeg
 %}
 
 ### 53. Send the file as JSON instead of multipart -> 415 Unsupported Media Type
-### It was a 500 before; POST /media answers the same 415 now.
+### It was a 500 before; POST /media answers the same 415 now. The shape of the request is judged BEFORE the list: this
+### is a 415 (and a request with no file part a 400) even on a list that is not yours, where a good request is a 404.
+### The order of the gates, with the one thing that surprises (a 503 before the 400 of a too-large image): see
+### docs/recipe-list-cover.md.
 PUT {{baseUrl}}/lists/{{photoListId}}/cover
 Authorization: Bearer {{memberToken}}
 Content-Type: application/json
