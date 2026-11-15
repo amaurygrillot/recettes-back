@@ -702,7 +702,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/RecipeListResponse'
         '400':
-          description: No file, not a JPEG or PNG (HEIC included), undecodable, or too many pixels.
+          description: No file, not a JPEG or PNG (HEIC included), undecodable or cut short, or too many pixels.
           content:
             application/problem+json:
               schema:
@@ -1513,7 +1513,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/MediaResponse'
         '400':
-          description: No file, not a JPEG or PNG, undecodable, or too many pixels.
+          description: No file, not a JPEG or PNG, undecodable or cut short, or too many pixels.
           content:
             application/problem+json:
               schema:
@@ -1614,7 +1614,10 @@ components:
       schema:
         type: string
     RetryAfter:
-      description: Whole seconds to wait before trying again. Never less than 1.
+      description: >-
+        Whole seconds to wait before trying again, rounded up, never less than 1. On a 429 it is the wait until the
+        account's oldest upload of the rolling window ages out, so at most the window (600 with the default 10 minutes).
+        On a 503 it is the time the request waited for the decode pool (10 with the defaults).
       schema:
         type: integer
         format: int32

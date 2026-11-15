@@ -29,6 +29,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.resttestclient.TestRestTemplate;
 import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRestTemplate;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -84,6 +85,9 @@ abstract class RecipeListsHttpSupport {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
+    /** For the tests that speak raw HTTP on a socket, which {@link #restTemplate} cannot do (hanging up mid-body). */
+    @LocalServerPort
+    protected int port;
     @Autowired
     protected TestRestTemplate restTemplate;
     @Autowired
@@ -229,6 +233,32 @@ abstract class RecipeListsHttpSupport {
     /** {@code PUT /lists/{id}/cover} with a small JPEG. */
     protected ResponseEntity<String> putCover(String listId, String token) {
         return sendFile(HttpMethod.PUT, "/lists/" + listId + "/cover", TestImages.jpeg(300, 200), token);
+    }
+
+    protected static String coverPath(String listId) {
+        return "/lists/" + listId + "/cover";
+    }
+
+    /** Creates a list and gives it a photo; returns the list id. */
+    protected String listWithCover(String token) {
+        String id = createList(unique("Photo"), token);
+        assertThat(putCover(id, token).getStatusCode()).isEqualTo(HttpStatus.OK);
+        return id;
+    }
+
+    /** The {@code coverVersion} the owner reads off the list, or {@code null} when it has no photo. */
+    protected String versionOf(String listId) {
+        JsonNode version = listOf(listId, ownerToken).path("coverVersion");
+        return version.isNull() ? null : version.asString();
+    }
+
+    protected long mediaRowsUploadedBy(String userId) {
+        Long count = jdbc.queryForObject("SELECT count(*) FROM media WHERE uploaded_by_id = ?", Long.class, userId);
+        return count == null ? 0 : count;
+    }
+
+    protected static String detailOf(ResponseEntity<String> response) {
+        return json(response).path("detail").asString();
     }
 
     /** {@code GET} of any binary path, with optional extra headers (a conditional request, say). */

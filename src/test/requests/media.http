@@ -208,6 +208,27 @@ Content-Type: image/heic
     });
 %}
 
+### 10b. Upload a JPEG that was cut short -> 400 Bad Request
+### A placeholder next to this file: any photo with its last third cut off. The decoder would store it with the missing
+### part filled grey; it is refused, as on PUT /lists/{id}/cover (recipe-lists.http request 50b).
+POST {{baseUrl}}/media
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="cut-short.jpg"
+Content-Type: image/jpeg
+
+< ./cut-short.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400 saying the file is truncated", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+        client.assert(response.body.detail.indexOf("truncated") >= 0, "Expected the truncation hint");
+    });
+%}
+
 ### 11. Upload a file larger than 8 MB -> 413 Content Too Large
 ### Rejected by the servlet container before any application code runs. Put anything over
 ### spring.servlet.multipart.max-file-size at ./too-big.jpg.
@@ -247,6 +268,8 @@ Content-Type: image/jpeg
 ### had their share. The limit exists because every other gate in the pipeline looks at one file,
 ### and one account posting a thousand valid files in a row fills a disk that Postgres writes to.
 ### The allowance is per account and rolls continuously, so it does not reset on a clock boundary.
+### Retry-After is the wait until the oldest upload of the window ages out, in whole seconds rounded UP: 1 to 600 with
+### the defaults (nearly 600 right after a burst of 20), and the detail says the same number.
 ### Admins have no allowance: with an admin token this block never answers 429 however often it is
 ### re-run, so use a plain USER token for this scenario.
 ### Counters live in this instance's heap: restarting the app forgives everyone. UploadRateLimiter

@@ -66,31 +66,6 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
 
     // ------------------------------------------------------------------------------------------------- helpers
 
-    private String coverPath(String listId) {
-        return "/lists/" + listId + "/cover";
-    }
-
-    /** Creates a list and gives it a photo; returns the list id. */
-    private String listWithCover(String token) {
-        String id = createList(unique("Photo"), token);
-        assertThat(putCover(id, token).getStatusCode()).isEqualTo(HttpStatus.OK);
-        return id;
-    }
-
-    private String versionOf(String listId) {
-        JsonNode version = listOf(listId, ownerToken).path("coverVersion");
-        return version.isNull() ? null : version.asString();
-    }
-
-    private long mediaRowsUploadedBy(String userId) {
-        Long count = jdbc.queryForObject("SELECT count(*) FROM media WHERE uploaded_by_id = ?", Long.class, userId);
-        return count == null ? 0 : count;
-    }
-
-    private static String detailOf(ResponseEntity<String> response) {
-        return json(response).path("detail").asString();
-    }
-
     private static List<ResponseEntity<String>> inParallel(List<Supplier<ResponseEntity<String>>> calls) {
         ExecutorService pool = Executors.newFixedThreadPool(calls.size());
         CountDownLatch go = new CountDownLatch(1);

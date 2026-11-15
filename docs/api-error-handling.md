@@ -186,9 +186,18 @@ Two handlers answer with a `Retry-After` header, and they are not interchangeabl
 | `429`  | `RateLimitExceededException`  | the **caller** has made too many of these requests          |
 
 Collapsing them would tell a throttled client the server is unwell and a queued client that it is being throttled, each
-sending the reader to the wrong place. They share one private helper, which floors the header at one second: the header
-is whole seconds, and a sub-second wait renders as `0`, which a client reads as "retry immediately" — a hot loop
-against the thing that just asked it to slow down.
+sending the reader to the wrong place. Both extend `RetryableException`, which holds the wait and is the **one place** it
+becomes whole seconds (`wholeSeconds`), for the header and for the sentence in `detail` alike. The header is whole
+seconds, so the wait is **rounded up** and **floored at one second**:
+
+- rounded up, because truncating a wait of 59.4 s to `59` sends a client that obeys the header back 0.4 s early, to be
+  refused a second time (it was truncated until the audit of the photo of a list, which has a countdown button that makes
+  the early retry visible);
+- floored at one, because a sub-second wait would render as `0`, which a client reads as "retry immediately" — a hot loop
+  against the thing that just asked it to slow down.
+
+With the default properties a `429` of the upload limit carries 1 to 600 and a `503` of the decode pool always carries 10
+([recipe-list-cover.md](recipe-list-cover.md#1-retry-after-whole-seconds-rounded-up-and-what-values-it-can-carry)).
 
 ### `415` — a file sent the wrong way
 
@@ -202,6 +211,14 @@ parsed or its temporary file could not be written — which can be the server's 
 quarantining the spooled part, see [media-storage.md](media-storage.md#a-note-for-whoever-runs-the-tests-on-windows)) —
 so it keeps answering as the unexpected failure it was. `MaxUploadSizeExceededException`, a subclass, keeps the `413` of
 its own hook: Spring picks the handler whose declared type is closest, and the exact type wins.
+
+**One cause is the client's and is not a failure: a hang-up.** When the client closes the connection before it has sent
+the whole body (the member cancels an upload, a phone loses its signal), Tomcat cannot finish reading the part and Spring
+raises the same `MultipartException`, whose cause chain holds Tomcat's `ClientAbortException`. That used to fall to the
+catch-all: an `ERROR` line with a hundred-line stack trace, *Unhandled exception while serving PUT …*, for something the
+member did on purpose. It is now a `400` ("The upload was interrupted before it was complete.", which nobody reads: the
+connection is gone) and **one `info` line**. The test is on the type in the chain, not on the message. What the front must
+know about a cancel is in [recipe-list-cover.md](recipe-list-cover.md#2-closing-the-form-while-the-photo-is-uploading).
 
 The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
 `media.created_at NOT NULL` trap in [recipes-domain-model.md](recipes-domain-model.md#auditing) and any missed
@@ -332,6 +349,15 @@ All three were 500s for conditions the caller caused, which `CLAUDE.md` reserves
 Genuine storage failures — a full disk, an unwritable media root — now have their own
 `@ExceptionHandler(UncheckedIOException.class)`. Still a 500, because it is the server that failed, but logged
 distinctly instead of being filed with the programming bugs.
+
+### The opposite mistake: a truncated JPEG answered 200
+
+Found by the audit of the photo of a list, which checked that every file the server cannot use is a `400`. The JPEG decoder
+does not fail on a file that stops early: it returns what it decoded and fills the rest of the picture grey, so the upload
+answered **200** and stored a half-grey photo. `ImageReencoder` now reads the decoder's « Truncated File - Missing EOI
+marker » warning and answers **400** ("That file is truncated"). Only that warning: the others (a stray byte before a marker)
+are routine for real cameras. Twelve thousand randomly damaged JPEGs and PNGs were also run through the decoder, and none
+escaped as anything but a `400` or an accepted image, so nothing broader than the `IOException` it already catches is needed.
 
 ## `instance` is the framework's job
 

@@ -100,7 +100,7 @@ three `409`s of the lists themselves.
 | the list has no photo                                                                              | 404    | `GET`            |
 | `v` is not the list's current version (a replaced or removed photo)                                | 404    | `GET`            |
 | the row exists but its file is gone (a database restored from a newer backup than the media directory) | 404 | `GET`            |
-| no `file` part, an empty file, a format that is not JPEG/PNG (**HEIC among them**), a file that cannot be decoded, too many pixels | 400 | `PUT` |
+| no `file` part, an empty file, a format that is not JPEG/PNG (**HEIC among them**), a file that cannot be decoded **or was cut short**, too many pixels | 400 | `PUT` |
 | an unknown `variant`                                                                               | 400    | `GET`            |
 | the part is over 8 MB                                                                              | 413    | `PUT`            |
 | **the request is not `multipart/form-data`**                                                       | **415** | `PUT` (and `POST /media`) |
@@ -314,6 +314,111 @@ means no route can serve it.
 A request that is reading the photo while it is replaced can find its file gone as the response streams. The front
 reloads the list and gets the new version.
 
+## What the upload form relies on
+
+The front-end design (the « Listes » boards, a countdown button, a cancel while uploading, one message for any `400`)
+assumes six things of `PUT /lists/{id}/cover`. They were audited after the feature merged, each one with a test in
+`RecipeListCoverUploadIntegrationTest` (real HTTP, the real database, real files) or in the unit test named below. Two
+of them were wrong and were fixed; the rest held and are written down here so the front can rely on them.
+
+### 1. `Retry-After`: whole seconds, rounded up, and what values it can carry
+
+| Status | Header value, default properties | Why |
+|---|---|---|
+| `429` | **1 to 600** | the wait until the caller's *oldest* upload of the rolling window ages out: `upload-limit-window` (10 min) is the most it can be, which is what a member who just spent all 20 uploads in a burst is told (`UploadRateLimiterTest`, and over HTTP with the real limiter in `RecipeListCoverUploadIntegrationTest`); it shrinks as that upload ages, down to 1 |
+| `503` | **10, always** | the decode pool is full, so the request waited `app.media.processing-timeout` (10 s) for a permit and is told to come back after that long. There is no other value: the same constant at both places that raise it (`MediaService`) |
+
+- The value is **whole seconds, rounded up, never below 1** (`RetryableException.wholeSeconds`). It used to be truncated,
+  so a wait of 59.4 s was sent as `59`: a client that obeyed the header came back 0.4 s early and was refused a second
+  time, which the countdown button of the design would have shown as a button that re-enables and fails. The sentence in
+  `detail` (« Try again in N seconds ») is computed by the same method and always says the number of the header.
+- **The browser can read it.** `Retry-After` is in `Access-Control-Expose-Headers` ([cors.md](cors.md)), and a `429` and
+  a `503` of this route carry it from another origin (`RecipeListCoverUploadIntegrationTest` sends the real `Origin` and
+  asserts both headers). The front takes N **from the header**, never a constant.
+- A `429` can be as long as ten minutes, so « N s » is wrong above a minute: show minutes from 60 s up.
+- `Retry-After` is the earliest time a retry can succeed, not a promise: the allowance is the account's, so another tab
+  or device that uploads meanwhile spends the slot, and the next answer is a new `429` with a new header.
+
+### 2. Closing the form while the photo is uploading
+
+What the server does depends on **whether the last byte had arrived**, and the front cannot tell from the cancel alone.
+
+| The member cancels… | What happens | Counted against the allowance | The list |
+|---|---|---|---|
+| **before the whole body arrived** (progress under 100 %) | the container cannot finish reading the multipart body, so the request **never reaches the controller**: no row, no file, no decode permit taken, nothing deleted. Logged at `info`, one line, not as an error. | **No** | untouched |
+| **after the whole body arrived** (the server is decoding or attaching) | the server cannot know and does not stop: the photo is decoded, attached and the old one deleted, exactly as if the member had stayed. The answer is written to a closed connection and lost. The decode permit is released as always. | **Yes, once** | **changed** |
+
+- Both cases, for a reset and for an ordinary close of the connection, are tested (hanging up on a raw socket, because
+  `fetch` cannot be made to do it halfway). The row, the files, the version, `updatedAt` and the bytes served are the
+  same after the abort as before it; the permit count is back to full; a request that follows works.
+- **What the front does:** a cancel after the progress reached 100 % must **read the list again** (`GET /lists/{id}`)
+  before assuming anything, because the photo may have been set. A cancel before it needs nothing.
+- It used to be logged at `error` with a hundred-line stack trace (`Unhandled exception while serving PUT …`) for every
+  cancelled upload, as if the server had failed; `ApiExceptionHandler.handleMultipart` now recognises Tomcat's
+  `ClientAbortException`, answers `400` (read by nobody) and logs one `info` line. A `MultipartException` of a multipart
+  request with any other cause (a full disk, an antivirus) stays the `500` it was.
+
+### 3. Every `400`, and the two other bodies
+
+Over HTTP, each of these answers **`400` `application/problem+json`** and nothing else, and leaves the list, the photo and
+the disk as they were (`everyFileTheServerCannotUse_is400AsAProblem_…`):
+
+a file whose type and name say JPEG and whose bytes are **HEIC**; an **empty** file; **8001 px** on one side; **41
+megapixels**; a **JPEG cut in half**, or lacking only its last two bytes; a **PNG cut in half**; a JPEG signature and
+nothing else; an SVG; a GIF; a WebP; and (`aMissingFilePart_…`) a request with **no `file` part**, or a part under
+another name. An unknown `variant` on `GET` is a `400` too.
+
+- **A truncated JPEG used to be a `200`.** The JPEG decoder does not fail on a file that stops early: it returns what it
+  decoded and fills the rest grey, so a photo cut short by a lost connection was stored as a half-grey one. The decoder
+  says so through a warning (« Truncated File - Missing EOI marker »), and `ImageReencoder` now turns that one warning into
+  a `400` whose detail says the file is truncated. Every other warning (a stray byte before a marker is routine for real
+  cameras) is still accepted. The check is on the decoder's own wording, so `ImageReencoderTest` fails the day a JDK changes
+  it. A PNG cut short fails to decode on its own and already was a `400`.
+- **No non-`400` came out of the decoder.** A mutation run of 12 000 damaged JPEGs and PNGs (bytes flipped, files cut at
+  random) through `ImageReencoder` produced only `400`s and accepted images: no exception other than `InvalidInputException`
+  escaped, so nothing needed catching beyond what was already caught. This was an exploratory run, not a committed test.
+- **`413`**: `application/problem+json`, `status` 413, a `detail` that says the file is too large — **without naming the limit**
+  (the container does not report the one it enforced; the front has its own). The cap is on the **whole request**, the
+  multipart framing included: a file of exactly 8 MiB (8 388 608 bytes) is refused, one a kilobyte shorter is judged as a
+  file (a `400` if it is not an image). A body far beyond the limit (tens of megabytes) can have its connection closed by
+  the container before the `413` is read (`server.tomcat.max-swallow-size`, 12 MB, [media-storage.md](media-storage.md));
+  a browser reports that as a network error. This follows from the configuration and is not exercised by a test: the
+  front's own check of 8 MB is what keeps a member from ever sending such a file.
+- **`415`**: `application/problem+json`, `status` 415, a `detail` naming `multipart/form-data`, for a JSON body and for a
+  request with no body and no content type alike.
+
+### 4. A refused upload keeps the photo it was meant to replace
+
+A `PUT` refused with a `400`, a `413`, a `415`, a `429` or a `503` leaves **the photo, its `coverVersion`, the list's
+`updatedAt`, the rows, the files and the bytes served** exactly as they were. This holds because the only code that
+touches the list runs after every one of those gates and inside the one transaction that either replaces the photo or
+rolls back; the new files are written first and are deleted if anything fails. The tests take a snapshot of all of it
+before and after, for each status, with the real limiter and the real decode pool for the last two.
+
+### 5. The order of calls
+
+`POST /lists`, then an immediate `PUT /lists/{id}/cover` on the new list (`200`, a `coverVersion`), then `GET /lists`
+(shows that `coverVersion` at once); a later `PUT /lists/{id}` (a rename) answers and keeps the same `coverVersion` and the
+photo is still served; `DELETE /lists/{id}/cover` twice is `200` and `200` (the second changes nothing: `coverVersion`
+`null`, `updatedAt` as stored); once the list is deleted from elsewhere, `PUT`, `DELETE` and `GET` of its cover are all `404`
+and nothing of the photo is left (`theFlowOfTheDesign_…`).
+
+**One thing to know about `updatedAt`**, true of every write of the lists and not only of the photo: the answer of a `PUT` or a
+`DELETE` carries the timestamp the server just set, to the nanosecond (`…206783300Z`), while PostgreSQL stores microseconds, so a
+later `GET` spells the same instant `…206783Z`. Compare `updatedAt` as instants, never as strings across a write and a read.
+
+### 6. Sizes
+
+| | stored | shown | verdict |
+|---|---|---|---|
+| tile, thumbnail | 640 px on the **longest** edge | up to 270 CSS px square, 540 px at 2x, cropped to fill (`object-fit: cover`) | enough at 1x and for portrait or near-square photos. The crop works on the **short** edge: at 2x on the largest tile a 4:3 photo (480 px short edge) is enlarged 12 %, a 16:9 one (360 px) 50 %, which is soft. |
+| banner, full size | 2000 px on the longest edge | up to 1152 CSS px wide, 2304 px at 2x | **enough**: a landscape photo is enlarged 15 % at 2x on a desktop at full width, which is not visible in a photograph; the server never enlarges, so a smaller photo is kept as it is. |
+
+Left alone, as asked. If a crisp 2x tile on wide photos matters, the lever is `app.media.thumbnail-edge`: 800 would give a
+4:3 photo a 600 px short edge, and it applies to **new** uploads only (each row stores its own thumbnail key) and to the recipe
+cards that use the same thumbnail. 2000 px for the full size is the cap of every picture of the API; raising it is a decision
+about disk and decode memory, not a defect.
+
 ## For the front
 
 - The photo is fetched with **`fetch` and an `Authorization` header, then shown from a blob** (`URL.createObjectURL`):
@@ -349,6 +454,13 @@ reloads the list and gets the new version.
 10. **A blank `v` is no `v`.**
 11. **`Vary: Authorization` is not sent** (see the shared device above).
 
+Added by the audit that followed the merge ([what the upload form relies on](#what-the-upload-form-relies-on)):
+
+12. **`Retry-After` is rounded up**, in the header and in the sentence, and both retryable exceptions share one rounding.
+13. **A JPEG cut short is a `400`**, for `POST /media` as well (it is the shared pipeline): it used to be stored with the
+    missing part grey.
+14. **A client that hangs up mid-upload is a `400` logged at `info`**, not a `500` logged at `error` with a stack trace.
+
 ## Tests
 
 | What                                                                                                  | Where                                       |
@@ -363,5 +475,7 @@ reloads the list and gets the new version.
 | `GET /lists` out of N+1 with photos on some of the lists                                              | `RecipeListServiceQueryCountTest`           |
 | The `415` for a non-multipart request, on both routes, and `413` on a part over 8 MB (still answered by its own handler); the `304` of the public `GET /media/{id}` repeating its `Cache-Control` | `RecipeListCoverIntegrationTest`, `ApiExceptionHandlerTest`, `MediaUploadIntegrationTest` |
 | The preflight of the three routes                                                                     | `CorsIntegrationTest`                       |
+| The six assumptions of the front-end design: the real `429` and `503` and their `Retry-After` readable cross-origin, a hang-up mid-upload and after the body, every unusable file a `400`, a refusal leaving the photo untouched, the order of calls | `RecipeListCoverUploadIntegrationTest` |
+| The rounding of a wait, the longest and the shortest a `429` carries, the truncated JPEG, the edge of the per-side cap, the hang-up handler | `RetryableExceptionTest`, `UploadRateLimiterTest`, `ImageReencoderTest`, `ApiExceptionHandlerTest` |
 | YAML and code agree; every operation answers what its `security` promises                             | `OpenApiContractTest`, `OpenApiSecurityConformanceTest` |
 | The walkthrough, success and failures                                                                 | `src/test/requests/recipe-lists.http`, `media.http` |
