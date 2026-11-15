@@ -55,7 +55,9 @@ import java.util.stream.Collectors;
  * decision. {@link #upload} ({@code POST /media}) then inserts a public row, measuring every column from the
  * artefact of the steps above; a list's own photo is attached in the transaction of its list, so that its row is
  * born attached and never exists as an ordinary, publicly readable image (see {@code docs/recipe-list-cover.md}).
- * Whoever cannot finish must {@link #discard} the files, since no transaction covers the filesystem.
+ * Whoever cannot finish must {@link #discard} the files, since no transaction covers the filesystem; a caller whose
+ * transaction attaches them registers {@link #discardIfRolledBack} instead, so that the files go only if the
+ * transaction does.
  * <p>
  * The two file writes share one {@code try}: if either fails, both files are deleted, so the claim above — a
  * failure at any step stores nothing — holds for the thumbnail write as well as for the insert.
@@ -215,7 +217,8 @@ public class MediaService {
             @Override
             public void afterCompletion(int status) {
                 if (status == STATUS_ROLLED_BACK) {
-                    log.info("The transaction rolled back: deleting the two files written for it");
+                    log.warn("The transaction rolled back: deleting the files {} and {} written for it",
+                            image.storageKey(), image.thumbnailStorageKey());
                     discard(image);
                 }
             }

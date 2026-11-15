@@ -307,16 +307,25 @@ row exists, and no transaction covers the filesystem, so something has to decide
 |---|---|---|
 | **Rolled back** (anything thrown inside the attach, a failed flush, a list deleted meanwhile, a commit that failed and was rolled back) | **deleted** | the row was never committed, so nothing can point at them; the old photo is untouched, files included, because a rollback never runs the after-commit deletion. A failed `PUT` leaves nothing behind |
 | **Never began** (no connection for the transaction: the pool is exhausted) | **deleted** | nothing was written to the database |
-| **Committed**, whatever happens after (the deletion of the old files fails, the answer cannot be built) | **kept** | the list points at them: deleting them is a photo that answers `404` for ever |
-| **Outcome unknown** (the commit failed and the transaction manager cannot say whether the server committed it) | **kept** | the database may well hold the row. A pair of stray files costs disk and is never reachable; a deleted file under a committed row costs the photo |
+| **Committed**, whatever is thrown after it | **kept** | the list points at them: deleting them is a photo that answers `404` for ever |
+| **Outcome unknown**: the transaction manager reports `STATUS_UNKNOWN`, which Spring does in two cases only: a commit that fails with a `TransactionException`, and a rollback that itself fails (the connection died mid-attach) | **kept** | the database may well hold the row. A pair of stray files costs disk and is never reachable; a deleted file under a committed row costs the photo |
 
 The rule is one sentence: **the new files are deleted when, and only when, the transaction is known to have rolled back
 or never began.** That is the `afterCompletion` of the transaction (`STATUS_ROLLED_BACK`), registered by the attach
 itself, plus a `catch` that deletes only when the transaction never began. It used to be one `catch` of every exception
 around the whole call, which could not tell a rollback from a failure *after* the commit (the hook that deletes the old
-files throwing, a commit whose answer was lost) and deleted the files of a photo that was committed. The request in those
-last cases may answer a `500` while the photo is set: **the front re-reads the list after any failure of the `PUT`**, as
-after any cancel.
+files throwing) and deleted the files of a photo that was committed. The request in such a case may answer a `500` while
+the photo is set: **the front re-reads the list after any failure of the `PUT`**, as after any cancel.
+
+**A residual risk, written down rather than hidden.** « Rolled back » is what Spring *reports*, and Spring reports it in
+one case where the server may in fact have committed: a commit that fails with a `DataAccessException` (the connection
+drops while PostgreSQL commits and the acknowledgement is lost; the driver throws an I/O error, JPA turns it into a
+`DataAccessException`, and the transaction manager then rolls back what it can and says `ROLLED_BACK`). The two new files
+would then be deleted under a committed row, and the list would answer `404` on its photo until its owner replaces or
+removes it. The window is the instant of the `COMMIT` itself, and the request does answer an error, so the front re-reads
+the list and sees a photo that does not load. Closing it means checking, in a new transaction, that no `media` row has
+these keys before deleting; that was not done, as the mechanism asked for was the transaction's own status. Listed under
+« À valider ».
 
 The old files are deleted after the commit, and **a failure to delete them never fails the request**: the hook catches
 whatever the storage throws, logs one `error` line with the media id and the storage key, and goes on to the second file.
@@ -376,11 +385,17 @@ The lock on the `recipe_lists` row serialises every write to one list's photo. W
 
 ### What can still leave something behind
 
-**Never a row.** The residue is **files only**, and three things can cause it: a file whose deletion failed after commit
-(logged with its storage key, and with the media id when the storage threw, and nothing can find it later), a commit
-whose outcome is unknown (the new files are kept, see above), and a process killed between writing the files and
-committing the attach, which `POST /media` has always been exposed to for the same reason (the sweep enumerates rows, so
-a file with no row is invisible to it). All three are disk space, never a leak: no row means no route can serve it.
+**Never a row.** The residue is **files only**, and four things can cause it: a file whose deletion failed after commit
+(logged with its storage key, and with the media id when the storage threw, and nothing can find it later), a commit or
+a rollback whose outcome is unknown (`STATUS_UNKNOWN`: the new files are kept, see above), and a process killed between
+writing the files and committing the attach, which `POST /media` has always been exposed to for the same reason (the
+sweep enumerates rows, so a file with no row is invisible to it). All are disk space, never a leak: no row means no
+route can serve it.
+
+`POST /media` does not have the rule of this section: `MediaService.upload` commits the row in the repository's own
+transaction and deletes the files on any exception after it, so a commit whose acknowledgement is lost there would delete
+the files of a committed, public row. It is the behaviour it always had, `MediaMapper.toResponse` cannot throw, and it
+was not part of the review; it is noted here so that nobody takes the rule above for a property of the whole pipeline.
 
 A request that is reading the photo while it is replaced can find its file gone as the response streams. The front
 reloads the list and gets the new version.
@@ -485,7 +500,7 @@ another name. An unknown `variant` on `GET` is a `400` too.
 A `PUT` refused with a `400`, a `413`, a `415`, a `429` or a `503` leaves **the photo, its `coverVersion`, the list's
 `updatedAt`, the rows, the files and the bytes served** exactly as they were. This holds because the only code that
 touches the list runs after every one of those gates and inside the one transaction that either replaces the photo or
-rolls back; the new files are written first and are deleted if anything fails. The tests take a snapshot of all of it
+rolls back; the new files are written first and are deleted if the transaction rolls back or never begins. The tests take a snapshot of all of it
 before and after, for each status, with the real limiter and the real decode pool for the last two.
 
 ### 5. The order of calls

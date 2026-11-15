@@ -58,11 +58,23 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
 
     private final ExecutorService requests = Executors.newCachedThreadPool();
     private final List<Parked> parkedWrites = new ArrayList<>();
+    private final List<Future<?>> started = new ArrayList<>();
 
     /** Runs before the superclass teardown: nothing may be left holding a row lock when the lists are deleted. */
     @AfterEach
     void releaseWhateverIsStillParked() {
         parkedWrites.forEach(Parked::release);
+        // Let a request that was released finish before the lists and the accounts under it are deleted: a write still
+        // committing a photo would leave a row nothing reaches, and an account that cannot be deleted.
+        started.forEach(request -> {
+            try {
+                request.get(PATIENCE.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } catch (ExecutionException | TimeoutException ignoredAfterAFailedTest) {
+                // The test that started it has already failed or reported on it.
+            }
+        });
         requests.shutdownNow();
         reset(mediaService);
     }
@@ -123,7 +135,9 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
     }
 
     private <T> Future<T> start(Callable<T> request) {
-        return requests.submit(request);
+        Future<T> future = requests.submit(request);
+        started.add(future);
+        return future;
     }
 
     /**

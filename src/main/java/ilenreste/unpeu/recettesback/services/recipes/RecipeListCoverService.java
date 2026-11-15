@@ -68,8 +68,8 @@ public class RecipeListCoverService {
      * <strong>What becomes of the two new files depends on how the transaction ended, and only on that.</strong> They
      * are deleted when it rolled back ({@link MediaService#discardIfRolledBack}, registered first thing in the attach) or
      * never began (the {@code catch} below): either way no row points at them, and the old photo is left alone, so a
-     * failed request leaves nothing behind. They are <strong>kept</strong> when it committed, whatever fails after
-     * (the deletion of the old files, the answer), and when its outcome is unknown: the row may be there, and deleting
+     * failed request leaves nothing behind. They are <strong>kept</strong> when it committed, whatever is thrown after
+     * it, and when its outcome is unknown ({@code STATUS_UNKNOWN}): the row may be there, and deleting
      * the files of a committed photo leaves a list that answers 404 for ever. Hence no {@code catch} of every exception
      * around the whole call: it cannot tell a rollback from a failure after the commit.
      */
