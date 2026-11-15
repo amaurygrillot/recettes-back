@@ -21,6 +21,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Iterator;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Decodes an uploaded image and writes out a fresh one.
@@ -44,6 +45,15 @@ import java.util.Iterator;
 @Log4j2
 @Service
 public class ImageReencoder {
+
+    /**
+     * What the JPEG decoder says when the data ends before the end-of-image marker. It does <em>not</em> fail: it
+     * returns what it decoded and fills the rest of the picture grey, so without this a file cut short by a lost
+     * connection would be stored as a half-grey photo. It is the decoder's own native text (not localised), and
+     * {@code ImageReencoderTest} fails the day a JDK words it differently. Every other warning (extra bytes before a
+     * marker, an odd JFIF revision) is routine for real cameras and does not make a file unusable.
+     */
+    private static final String TRUNCATED_JPEG_WARNING = "Missing EOI marker";
 
     private final MediaProperties properties;
 
@@ -140,7 +150,19 @@ public class ImageReencoder {
         param.setSourceSubsampling(subsampling, subsampling, 0, 0);
         log.debug("Decoding a {}x{} image with subsampling {}", sourceWidth, sourceHeight, subsampling);
 
-        return reader.read(0, param);
+        AtomicBoolean truncated = new AtomicBoolean();
+        reader.addIIOReadWarningListener((source, warning) -> {
+            if (warning.contains(TRUNCATED_JPEG_WARNING)) {
+                truncated.set(true);
+            }
+        });
+        BufferedImage decoded = reader.read(0, param);
+        if (truncated.get()) {
+            log.warn("Refusing an upload whose {} data ends before the end of the image", reader.getFormatName());
+            throw new InvalidInputException("That file is truncated: it stops before the end of the image. "
+                    + "Try sending it again.");
+        }
+        return decoded;
     }
 
     /**
