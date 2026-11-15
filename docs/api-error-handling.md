@@ -357,7 +357,7 @@ distinctly instead of being filed with the programming bugs.
 Found by the audit of the photo of a list, which checked that every file the server cannot use is a `400`. The JPEG decoder
 does not fail on a file that stops early: it returns what it decoded and fills the rest of the picture grey, so the upload
 answered **200** and stored a half-grey photo. `ImageReencoder` now reads the decoder's « Truncated File - Missing EOI
-marker » warning and answers **400** ("That file is truncated"). Only that warning: the others (a stray byte before a marker)
+marker » warning and answers **400** ("That image is incomplete or unreadable.", with no advice: sending it again is wrong for a camera that never writes the end marker). Only that warning: the others (a stray byte before a marker)
 are routine for real cameras (a test proves it). A throwaway run of twelve thousand randomly damaged JPEGs and PNGs (fixed seed,
 not kept in the repository) also produced nothing but `400`s and accepted images, so nothing broader than the `IOException`
 the decoder step already catches looked necessary: a spot check, not a proof. A JPEG that lacks only its two end-marker bytes is

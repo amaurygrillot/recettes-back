@@ -435,12 +435,12 @@ another name. An unknown `variant` on `GET` is a `400` too.
   decoded and fills the rest grey, so a file cut short before it was sent (a partial file on the device, a front that
   sliced it) was stored as a half-grey photo. (A connection that drops *during* the upload is another matter: the request
   fails, see 2.) The decoder says so through a warning (« Truncated File - Missing EOI marker »), and `ImageReencoder` now
-  turns that one warning into a `400` whose detail says the file is truncated. Every other warning (a stray byte before a
+  turns that one warning into a `400` whose detail says the image is incomplete or unreadable. Every other warning (a stray byte before a
   marker is routine for real cameras) is still accepted, and a test proves it. The check is on the decoder's own wording,
   so `ImageReencoderTest` fails the day a JDK changes it. A PNG cut short fails to decode on its own and already was a `400`.
   **A possible false positive, accepted:** a JPEG whose scan is complete but which lacks only its two end-marker bytes (some
   old cameras and scanners write them) is refused too. Its `detail` is neutral on purpose (« That image is incomplete or
-  cannot be read »): it used to end with « try sending it again », which is the wrong advice for a camera that always
+  unreadable. »): it used to end with « try sending it again », which is the wrong advice for a camera that always
   writes its files that way, and no better for a front that cannot tell the two causes apart.
 - **No non-`400` came out of the decoder.** A throwaway mutation run (12 000 JPEGs and PNGs with bytes flipped and files cut
   at random, a fixed seed, not kept in the repository) through `ImageReencoder` produced only `400`s and accepted images:

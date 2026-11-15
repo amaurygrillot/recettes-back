@@ -223,9 +223,9 @@ Content-Type: image/jpeg
 --WebAppBoundary--
 
 > {%
-    client.test("Returns 400 saying the file is truncated", function () {
+    client.test("Returns 400 saying the image is incomplete or unreadable", function () {
         client.assert(response.status === 400, "Expected 400 but got " + response.status);
-        client.assert(response.body.detail.indexOf("truncated") >= 0, "Expected the truncation hint");
+        client.assert(response.body.detail.indexOf("incomplete or unreadable") >= 0, "Expected the neutral detail");
     });
 %}
 
