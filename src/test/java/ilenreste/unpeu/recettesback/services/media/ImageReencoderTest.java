@@ -8,12 +8,15 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.MemoryCacheImageInputStream;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -265,6 +268,37 @@ class ImageReencoderTest {
         byte[] padded = Arrays.copyOf(whole, whole.length + 64);
 
         assertThat(reencoder.reencode(padded, ImageFormat.JPEG).format()).isEqualTo(ImageFormat.JPEG);
+    }
+
+    /**
+     * The other warnings of the decoder are routine for real cameras and must not make a photo unusable: one stray byte
+     * before the end marker makes the decoder warn (« Corrupt JPEG data: 1 extraneous bytes before marker »), and the
+     * file is still accepted. The test first proves that the decoder does warn, so that it cannot pass by never
+     * having exercised the branch.
+     */
+    @Test
+    void stillAcceptsAJpegTheDecoderWarnsAboutForAnotherReason() throws IOException {
+        byte[] whole = TestImages.jpeg(800, 600);
+        // One zero byte in front of the first quantisation table marker (FF DB), where a marker is expected.
+        int marker = 0;
+        while (!(whole[marker] == (byte) 0xFF && whole[marker + 1] == (byte) 0xDB)) {
+            marker++;
+        }
+        byte[] strayByte = new byte[whole.length + 1];
+        System.arraycopy(whole, 0, strayByte, 0, marker);
+        System.arraycopy(whole, marker, strayByte, marker + 1, whole.length - marker);
+        List<String> warnings = new ArrayList<>();
+        try (MemoryCacheImageInputStream input = new MemoryCacheImageInputStream(new ByteArrayInputStream(strayByte))) {
+            ImageReader reader = ImageIO.getImageReaders(input).next();
+            reader.addIIOReadWarningListener((source, warning) -> warnings.add(warning));
+            reader.setInput(input, true, true);
+            reader.read(0);
+            reader.dispose();
+        }
+        assertThat(warnings).as("the decoder does warn about the stray byte").isNotEmpty()
+                .noneMatch(warning -> warning.contains("Missing EOI"));
+
+        assertThat(reencoder.reencode(strayByte, ImageFormat.JPEG).format()).isEqualTo(ImageFormat.JPEG);
     }
 
     /** The edge of the per-side cap: 8000 px is fine, 8001 is not (a real image, not a header claim). */

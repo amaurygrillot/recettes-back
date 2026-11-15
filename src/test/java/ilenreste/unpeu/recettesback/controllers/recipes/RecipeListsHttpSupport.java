@@ -103,7 +103,9 @@ abstract class RecipeListsHttpSupport {
     protected RecipeListsRepository listsRepository;
     /**
      * Spied, here, for the same reason as the repositories above (one shared context): the tests that need a 429 or a
-     * 503 over real HTTP make these two throw, instead of spending twenty uploads or saturating the decode pool.
+     * 503 with a chosen value over real HTTP make these two throw, instead of spending twenty uploads or saturating
+     * the decode pool. {@code RecipeListCoverUploadIntegrationTest} does spend and saturate for real, once each, to
+     * see the values the real limiter and pool produce; it also counts calls to them, which is why they are spies.
      */
     @MockitoSpyBean
     protected UploadRateLimiter rateLimiter;

@@ -20,6 +20,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.util.AopTestUtils;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -138,7 +139,9 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
     }
 
     private Semaphore decodePermits() {
-        return (Semaphore) ReflectionTestUtils.getField(mediaService, "processingPermits");
+        // Through the target, so that a proxy added around the service one day does not turn this into a null.
+        Object target = AopTestUtils.getUltimateTargetObject(mediaService);
+        return (Semaphore) ReflectionTestUtils.getField(target, "processingPermits");
     }
 
     private static void waitUntil(BooleanSupplier condition, Duration timeout) throws InterruptedException {
@@ -233,11 +236,12 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
             out.flush();
             Thread.sleep(300);
         }
-        Thread.sleep(700);
+        String hangUpLine = "The client hung up before it had sent the whole body of PUT " + coverPath(id);
+        waitUntil(() -> output.getAll().contains(hangUpLine), Duration.ofSeconds(10));
 
-        assertThat(output.getAll()).as("a hang-up is not logged as an unhandled failure")
+        assertThat(output.getAll()).as("a hang-up is not logged as a failure, by the handler or by the container")
                 .doesNotContain("Unhandled exception while serving PUT " + coverPath(id))
-                .contains("The client hung up before it had sent the whole body of PUT " + coverPath(id));
+                .doesNotContain("Servlet.service()");
         assertUnchanged(id, before);
         verify(rateLimiter, never()).requirePermit(anyString());
         verify(reencoder, never()).reencode(any(), any());
@@ -250,13 +254,14 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
     /**
      * The member cancels after the last byte left: the server cannot know and does not stop. The photo is attached,
      * the upload is counted once, and the decode permit it held is released. What the front must do is read the list
-     * again after any cancel that happened once the upload had reached 100 %.
+     * again after any cancel: the progress shown is not a safe signal of which of the two cases it was.
      */
     @Test
     void aClientThatHangsUpOnceTheBodyIsSent_stillGetsItsPhoto_countedOnce_andTheDecodePermitIsReleased()
             throws Exception {
         String id = createList(unique("Photo"), ownerToken);
         clearInvocations(rateLimiter);
+        Set<String> filesBefore = storedFiles();
         CountDownLatch decoding = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         doAnswer(decode -> {
@@ -275,13 +280,17 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
             assertThat(decoding.await(10, TimeUnit.SECONDS)).as("the server is decoding").isTrue();
             assertThat(decodePermits().availablePermits()).as("and holds a permit")
                     .isEqualTo(mediaProperties.maxConcurrentProcessing() - 1);
+        } finally {
+            // Whatever failed above, the request thread must not stay blocked in the spy while the teardown deletes
+            // the list and the accounts under it.
+            release.countDown();
         }
-        release.countDown();
         waitUntil(() -> versionOf(id) != null, Duration.ofSeconds(10));
 
         assertThat(versionOf(id)).as("the abandoned request was still carried out").isNotNull();
         assertThat(mediaRowsUploadedBy(owner.id())).isEqualTo(1);
-        assertThat(storedFiles()).hasSize(2);
+        assertThat(storedFiles()).as("two new files, compared with before so that a stray file cannot fail it")
+                .hasSize(filesBefore.size() + 2).containsAll(filesBefore);
         assertThat(decodePermits().availablePermits()).isEqualTo(mediaProperties.maxConcurrentProcessing());
         verify(rateLimiter, times(1)).requirePermit(owner.id());
     }

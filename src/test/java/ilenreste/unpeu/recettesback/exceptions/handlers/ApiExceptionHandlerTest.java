@@ -10,7 +10,6 @@ import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
-import org.apache.catalina.connector.ClientAbortException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -82,7 +81,7 @@ class ApiExceptionHandlerTest {
         request.setContentType("multipart/form-data; boundary=x");
         MultipartException hungUp = new MultipartException("Failed to parse multipart servlet request",
                 new IOException("Processing of multipart/form-data request failed",
-                        new ClientAbortException(new EOFException())));
+                        new EOFException()));
 
         ResponseEntity<ProblemDetail> response = handler.handleMultipart(hungUp, request);
 

@@ -217,7 +217,9 @@ the whole body (the member cancels an upload, a phone loses its signal), Tomcat 
 raises the same `MultipartException`, whose cause chain holds Tomcat's `ClientAbortException`. That used to fall to the
 catch-all: an `ERROR` line with a hundred-line stack trace, *Unhandled exception while serving PUT …*, for something the
 member did on purpose. It is now a `400` ("The upload was interrupted before it was complete.", which nobody reads: the
-connection is gone) and **one `info` line**. The test is on the type in the chain, not on the message. What the front must
+connection is gone) and **one `info` line**. The hang-up is recognised by Spring's own `DisconnectedClientHelper`, which walks
+the cause chain for the container's abort exceptions and for a reset or broken connection, so the handler names no
+container class. What the front must
 know about a cancel is in [recipe-list-cover.md](recipe-list-cover.md#2-closing-the-form-while-the-photo-is-uploading).
 
 The narrowing matters beyond tidiness, because two designs elsewhere lean on a real 500 showing up as a 500: the
@@ -356,8 +358,10 @@ Found by the audit of the photo of a list, which checked that every file the ser
 does not fail on a file that stops early: it returns what it decoded and fills the rest of the picture grey, so the upload
 answered **200** and stored a half-grey photo. `ImageReencoder` now reads the decoder's « Truncated File - Missing EOI
 marker » warning and answers **400** ("That file is truncated"). Only that warning: the others (a stray byte before a marker)
-are routine for real cameras. Twelve thousand randomly damaged JPEGs and PNGs were also run through the decoder, and none
-escaped as anything but a `400` or an accepted image, so nothing broader than the `IOException` it already catches is needed.
+are routine for real cameras (a test proves it). A throwaway run of twelve thousand randomly damaged JPEGs and PNGs (fixed seed,
+not kept in the repository) also produced nothing but `400`s and accepted images, so nothing broader than the `IOException`
+the decoder step already catches looked necessary: a spot check, not a proof. A JPEG that lacks only its two end-marker bytes is
+refused too, which is a possible false positive (some old cameras and scanners write such files).
 
 ## `instance` is the framework's job
 

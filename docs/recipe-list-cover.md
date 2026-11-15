@@ -68,7 +68,7 @@ photo is a new row with a new id, so every replacement changes it; nothing can c
 `PUT` answers the first of these that applies, and **each gate is cheaper and says less than the next**:
 
 1. **`401`** — the filter: no token, or a token that is expired, broken or from before a restart.
-2. **`413`** — the servlet container, before any code runs: the part is over 8 MB. It is answered even on someone
+2. **`413`** — the servlet container, before any code runs: the request is over 8 MiB (the framing counts). It is answered even on someone
    else's list, which reveals nothing: the size of *your own* upload says nothing about their list.
 3. **`404`** — the list's visibility, `RecipeListService`'s one rule for writes. A list that does not exist and a list that
    is not the caller's answer identically. **This gate is not counted against the rate limit**: a request about a list
@@ -102,7 +102,7 @@ three `409`s of the lists themselves.
 | the row exists but its file is gone (a database restored from a newer backup than the media directory) | 404 | `GET`            |
 | no `file` part, an empty file, a format that is not JPEG/PNG (**HEIC among them**), a file that cannot be decoded **or was cut short**, too many pixels | 400 | `PUT` |
 | an unknown `variant`                                                                               | 400    | `GET`            |
-| the part is over 8 MB                                                                              | 413    | `PUT`            |
+| the request is over 8 MiB, framing included (a file of 8 387 584 bytes or more is not safe)        | 413    | `PUT`            |
 | **the request is not `multipart/form-data`**                                                       | **415** | `PUT` (and `POST /media`) |
 | the account has used its uploads                                                                   | 429 + `Retry-After` | `PUT` |
 | the decode pool is saturated                                                                       | 503 + `Retry-After` | `PUT` |
@@ -345,18 +345,25 @@ What the server does depends on **whether the last byte had arrived**, and the f
 
 | The member cancels… | What happens | Counted against the allowance | The list |
 |---|---|---|---|
-| **before the whole body arrived** (progress under 100 %) | the container cannot finish reading the multipart body, so the request **never reaches the controller**: no row, no file, no decode permit taken, nothing deleted. Logged at `info`, one line, not as an error. | **No** | untouched |
+| **before the whole body arrived** | the container cannot finish reading the multipart body, so the request **never reaches the controller**: no row, no file, no decode permit taken, nothing deleted. Logged at `info`, one line, not as an error. | **No** | untouched |
 | **after the whole body arrived** (the server is decoding or attaching) | the server cannot know and does not stop: the photo is decoded, attached and the old one deleted, exactly as if the member had stayed. The answer is written to a closed connection and lost. The decode permit is released as always. | **Yes, once** | **changed** |
 
 - Both cases, for a reset and for an ordinary close of the connection, are tested (hanging up on a raw socket, because
   `fetch` cannot be made to do it halfway). The row, the files, the version, `updatedAt` and the bytes served are the
   same after the abort as before it; the permit count is back to full; a request that follows works.
-- **What the front does:** a cancel after the progress reached 100 % must **read the list again** (`GET /lists/{id}`)
-  before assuming anything, because the photo may have been set. A cancel before it needs nothing.
+- **What the front does: read the list again after ANY cancel** (`GET /lists/{id}`, one cheap call) and show what it
+  says. The progress shown is not a safe signal of which row of the table applies: upload progress counts the bytes handed to
+  the network, is throttled, and a cancel shown at 97 or 99 % can come after the server already has the whole body.
+- **The same goes for a client-side timeout.** A saturated decode pool makes the request wait up to 10 s for a permit
+  before the `503`, and the decode comes on top. A front timeout (`AbortSignal.timeout`, an XHR `timeout`) shorter than
+  about **30 s** is an abort after the body: the photo may be set while the screen says it failed. Do not time out sooner,
+  and after any timeout read the list again.
 - It used to be logged at `error` with a hundred-line stack trace (`Unhandled exception while serving PUT …`) for every
-  cancelled upload, as if the server had failed; `ApiExceptionHandler.handleMultipart` now recognises Tomcat's
-  `ClientAbortException`, answers `400` (read by nobody) and logs one `info` line. A `MultipartException` of a multipart
-  request with any other cause (a full disk, an antivirus) stays the `500` it was.
+  cancelled upload, as if the server had failed; `ApiExceptionHandler.handleMultipart` now recognises a hang-up (through
+  Spring's own `DisconnectedClientHelper`: the container's abort exceptions, a reset or a broken connection, found in the
+  cause chain), answers `400` (read by nobody) and logs one `info` line. A `MultipartException` of a multipart request with
+  any other cause (a full disk, an antivirus) stays the `500` it was. A slow client whose read times out is a `400` too,
+  where a `408` would be more exact; nobody reads it either.
 
 ### 3. Every `400`, and the two other bodies
 
@@ -369,21 +376,27 @@ nothing else; an SVG; a GIF; a WebP; and (`aMissingFilePart_…`) a request with
 another name. An unknown `variant` on `GET` is a `400` too.
 
 - **A truncated JPEG used to be a `200`.** The JPEG decoder does not fail on a file that stops early: it returns what it
-  decoded and fills the rest grey, so a photo cut short by a lost connection was stored as a half-grey one. The decoder
-  says so through a warning (« Truncated File - Missing EOI marker »), and `ImageReencoder` now turns that one warning into
-  a `400` whose detail says the file is truncated. Every other warning (a stray byte before a marker is routine for real
-  cameras) is still accepted. The check is on the decoder's own wording, so `ImageReencoderTest` fails the day a JDK changes
-  it. A PNG cut short fails to decode on its own and already was a `400`.
-- **No non-`400` came out of the decoder.** A mutation run of 12 000 damaged JPEGs and PNGs (bytes flipped, files cut at
-  random) through `ImageReencoder` produced only `400`s and accepted images: no exception other than `InvalidInputException`
-  escaped, so nothing needed catching beyond what was already caught. This was an exploratory run, not a committed test.
+  decoded and fills the rest grey, so a file cut short before it was sent (a partial file on the device, a front that
+  sliced it) was stored as a half-grey photo. (A connection that drops *during* the upload is another matter: the request
+  fails, see 2.) The decoder says so through a warning (« Truncated File - Missing EOI marker »), and `ImageReencoder` now
+  turns that one warning into a `400` whose detail says the file is truncated. Every other warning (a stray byte before a
+  marker is routine for real cameras) is still accepted, and a test proves it. The check is on the decoder's own wording,
+  so `ImageReencoderTest` fails the day a JDK changes it. A PNG cut short fails to decode on its own and already was a `400`.
+  **A possible false positive, accepted:** a JPEG whose scan is complete but which lacks only its two end-marker bytes (some
+  old cameras and scanners write them) is refused too, with « try sending it again ».
+- **No non-`400` came out of the decoder.** A throwaway mutation run (12 000 JPEGs and PNGs with bytes flipped and files cut
+  at random, a fixed seed, not kept in the repository) through `ImageReencoder` produced only `400`s and accepted images:
+  no exception other than `InvalidInputException` escaped, so nothing needed catching beyond what was already caught. Take it
+  as a spot check, not as a proof.
 - **`413`**: `application/problem+json`, `status` 413, a `detail` that says the file is too large — **without naming the limit**
   (the container does not report the one it enforced; the front has its own). The cap is on the **whole request**, the
-  multipart framing included: a file of exactly 8 MiB (8 388 608 bytes) is refused, one a kilobyte shorter is judged as a
-  file (a `400` if it is not an image). A body far beyond the limit (tens of megabytes) can have its connection closed by
-  the container before the `413` is read (`server.tomcat.max-swallow-size`, 12 MB, [media-storage.md](media-storage.md));
-  a browser reports that as a network error. This follows from the configuration and is not exercised by a test: the
-  front's own check of 8 MB is what keeps a member from ever sending such a file.
+  multipart framing included (a few hundred bytes with a browser): a file of exactly 8 MiB (8 388 608 bytes) is refused, one a
+  kilobyte shorter is judged as a file (a `400` if it is not an image). **The number for the front's own check: refuse a file
+  of 8 388 608 − 1024 = 8 387 584 bytes or more, or simply use 8 000 000.** A check of `size <= 8 * 1024 * 1024` lets through
+  a band of a few hundred bytes that gets a `413`. A body far beyond the limit (tens of megabytes) can have its connection
+  closed by the container before the `413` is read (`server.tomcat.max-swallow-size`, 12 MB,
+  [media-storage.md](media-storage.md)); a browser reports that as a network error. This follows from the configuration and is
+  not exercised by a test: the front's own check is what keeps a member from ever sending such a file.
 - **`415`**: `application/problem+json`, `status` 415, a `detail` naming `multipart/form-data`, for a JSON body and for a
   request with no body and no content type alike.
 
@@ -411,8 +424,8 @@ later `GET` spells the same instant `…206783Z`. Compare `updatedAt` as instant
 
 | | stored | shown | verdict |
 |---|---|---|---|
-| tile, thumbnail | 640 px on the **longest** edge | up to 270 CSS px square, 540 px at 2x, cropped to fill (`object-fit: cover`) | enough at 1x and for portrait or near-square photos. The crop works on the **short** edge: at 2x on the largest tile a 4:3 photo (480 px short edge) is enlarged 12 %, a 16:9 one (360 px) 50 %, which is soft. |
-| banner, full size | 2000 px on the longest edge | up to 1152 CSS px wide, 2304 px at 2x | **enough**: a landscape photo is enlarged 15 % at 2x on a desktop at full width, which is not visible in a photograph; the server never enlarges, so a smaller photo is kept as it is. |
+| tile, thumbnail | 640 px on the **longest** edge | up to 270 CSS px square, 540 px at 2x, cropped to fill (`object-fit: cover`) | enough at 1x, and at 2x for near-square photos. The crop works on the **short** edge, so only the aspect ratio matters, landscape or portrait alike: at 2x on the largest tile a 4:3 or 3:4 photo (480 px short edge) is enlarged 12 %, a 16:9 one (360 px) 50 %, which is soft. |
+| banner, full size | 2000 px on the longest edge | up to 1152 CSS px wide, 2304 px at 2x | **enough** for a landscape photo: it is enlarged 15 % at 2x on a desktop at full width, which is not visible in a photograph. A portrait photo is only 1500 px wide (3:4) and would be enlarged about 54 % at 2x at full width (and is cropped to a wide banner anyway). The server never enlarges, so a smaller photo is kept as it is. |
 
 Left alone, as asked. If a crisp 2x tile on wide photos matters, the lever is `app.media.thumbnail-edge`: 800 would give a
 4:3 photo a 600 px short edge, and it applies to **new** uploads only (each row stores its own thumbnail key) and to the recipe
@@ -432,7 +445,7 @@ about disk and decode memory, not a defect.
   the script: the browser then treats the request as uncacheable, bypasses its own cache and hands the script a bare `304`
   with no body. Without `v`, the browser revalidates by itself on every use; with the current `v`, it does not need to.
 - A `404` on a `v` means the list changed: reload it with `GET /lists/{id}` and use the new `coverVersion`.
-- A photo can be sent as `multipart/form-data` with one part named `file`, 8 MB at most. JPEG and PNG only: HEIC (an
+- A photo can be sent as `multipart/form-data` with one part named `file`, under 8 387 584 bytes (see 3 above: the limit is on the whole request). JPEG and PNG only: HEIC (an
   iPhone's default) and WebP are a `400` the front must explain, and converting to JPEG before sending is the answer.
 
 ## Decisions I had to make

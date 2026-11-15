@@ -48,8 +48,10 @@ public class ImageReencoder {
 
     /**
      * What the JPEG decoder says when the data ends before the end-of-image marker. It does <em>not</em> fail: it
-     * returns what it decoded and fills the rest of the picture grey, so without this a file cut short by a lost
-     * connection would be stored as a half-grey photo. It is the decoder's own native text (not localised), and
+     * returns what it decoded and fills the rest of the picture grey, so without this a file that was cut short before
+     * it was sent (a partial file on the device, a front that sliced it) would be stored as a half-grey photo. (A
+     * connection that drops during the upload is a different thing: the request itself fails.) It is the entry of the
+     * JDK's own resource bundle for the JPEG reader, which ships in English only, and
      * {@code ImageReencoderTest} fails the day a JDK words it differently. Every other warning (extra bytes before a
      * marker, an odd JFIF revision) is routine for real cameras and does not make a file unusable.
      */

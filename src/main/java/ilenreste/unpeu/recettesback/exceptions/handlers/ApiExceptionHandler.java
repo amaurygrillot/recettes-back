@@ -13,7 +13,6 @@ import ilenreste.unpeu.recettesback.exceptions.RetryableException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
-import org.apache.catalina.connector.ClientAbortException;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -27,6 +26,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.util.DisconnectedClientHelper;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
@@ -123,7 +123,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * quarantining the spooled part), so it stays the unexpected failure it was, with one exception: <strong>the
      * client hanging up</strong> before it had sent the whole body, which is what closing the upload form does. That
      * is not a failure of the server and is not logged as one (no {@code error}, no stack trace): the request is
-     * simply incomplete, a {@code 400} nobody will read. Its subclass {@link MaxUploadSizeExceededException} keeps the
+     * simply incomplete, a {@code 400} nobody will read. It is recognised by the framework's own
+     * {@link DisconnectedClientHelper}, which looks through the cause chain for the container's abort exceptions and
+     * for a reset or broken connection, whatever the container. Its subclass {@link MaxUploadSizeExceededException} keeps the
      * 413 of the hook above: the handler whose declared type is closest wins.
      */
     @ExceptionHandler(MultipartException.class)
@@ -133,7 +135,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             return problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
                     "The file must be sent as multipart/form-data, in a part named 'file'.");
         }
-        if (causeChain(exception).anyMatch(ClientAbortException.class::isInstance)) {
+        if (DisconnectedClientHelper.isClientDisconnectedException(exception)) {
             log.info("The client hung up before it had sent the whole body of {} {}",
                     request.getMethod(), request.getRequestURI());
             return problem(HttpStatus.BAD_REQUEST, "The upload was interrupted before it was complete.");
