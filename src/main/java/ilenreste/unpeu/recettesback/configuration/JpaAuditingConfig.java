@@ -6,6 +6,7 @@ import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 import org.springframework.data.auditing.DateTimeProvider;
 import org.springframework.data.domain.AuditorAware;
 import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
@@ -17,8 +18,12 @@ import java.util.Optional;
  * Wires Spring Data JPA auditing for {@link ilenreste.unpeu.recettesback.entities.AuditableEntity},
  * for {@code MediaEntity} and for {@code RecipeEntity}, which both opt in on
  * their own.
+ * <p>
+ * It imports {@link TimeConfig}, the clock it stamps from, so that a {@code @DataJpaTest} slice that imports this class
+ * (as the repository tests do) gets the clock with it, and nobody has to remember a second {@code @Import}.
  */
 @Configuration
+@Import(TimeConfig.class)
 @EnableJpaAuditing(dateTimeProviderRef = "auditingDateTimeProvider")
 public class JpaAuditingConfig {
 
