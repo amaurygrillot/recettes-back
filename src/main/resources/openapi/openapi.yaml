@@ -673,10 +673,17 @@ paths:
         counts as one upload, and admins are not limited. Cropping is the client's job (`object-fit: cover`).
 
 
-        The gates run in this order: `401`; `413` (the container, before any code runs); `404` (the list is missing or is
-        not the caller's, which is not counted against the rate limit); `429`; `400` (format and dimensions); `503`.
-        Two overlapping writes to the same list's photo are serialised: both answer `200`, the last to commit wins, and
-        every photo that is not the final one is deleted, row and files.
+        The gates run in this order, and the first that applies answers: `401`; `413` (the container, before any code
+        runs); `415` (not `multipart/form-data`) and `400` for a missing `file` part, which are answered while the
+        arguments are bound, so **before** the `404`; `404` (the list is missing or is not the caller's, which is not
+        counted against the rate limit); `429`; `400` for an empty file or a format that is not JPEG or PNG; `503` (the
+        decode pool is saturated); and last the `400` of the pixels (too many, undecodable, cut short), which the decoder
+        reads under the pool's permit, so a too-large image sent while the pool is saturated answers `503`, as on
+        `POST /media`. Two overlapping writes to the same list's photo are serialised: both answer `200`, the last to
+        commit wins, and every photo that is not the final one is deleted, row and files.
+
+
+        A `500`, a network error or a timeout can come after the photo was committed: read the list again.
 
 
         Unlike `POST /media` there is no `403`: the route needs a login and nothing more, like every list route.
