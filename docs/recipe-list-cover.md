@@ -268,6 +268,21 @@ the runtime, which is what makes it acceptable for a rule that guards the privac
 `findAll`, `existsById` and the other inherited reads are **not** in the rule: they were not asked for, and none of them
 returns one row for an id taken from a request. Add them the day one is used by a new path.
 
+**What the rule cannot see**, because the bytecode does not say it: a call through a variable typed as the generic
+`JpaRepository<MediaEntity, String>` instead of `MediaRepository` (nothing is typed that way), and **a method reference to
+an inherited method**, such as `mediaRepository::findAllById`. javac compiles that to a handle on the interface that
+*declares* the method (`ListCrudRepository`) and keeps the receiver's type only in the call that builds the lambda, so it
+looks exactly like the `categoriesRepository::findAllById` that `RecipeService` legitimately passes to a helper. That is
+the one gap, and it is a pattern this code base uses: a new use of `MediaRepository` is something a review has to read. The
+public lookups are declared on `MediaRepository` itself, so `mediaRepository::findAllPublicById` is a different method
+and is unaffected. Moving the repository off `JpaRepository` altogether (so that the three methods do not exist on it) would
+close the gap by construction, at the price of every test that deletes by id; it was not asked for and is not done.
+
+**It was proved both ways.** A test of its own imports a class that makes each forbidden call and checks that every one is
+reported by name, so the rule cannot pass by matching nothing. And, locally and never committed, `IngredientService` was
+made to read the icon with `findById` instead of `findPublicById`: the build failed on `IngredientService.resolveIcon:126`
+and passed again when the line was put back.
+
 ## Lifecycle
 
 ### Setting or replacing — `PUT /lists/{id}/cover`

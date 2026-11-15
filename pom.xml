@@ -32,6 +32,8 @@
         <!-- Newer than the versions the Spring Boot BOM manages; see docs/openapi.md#dependency-upgrades. -->
         <postgresql.version>42.7.14</postgresql.version>
         <lombok.version>1.18.48</lombok.version>
+        <!-- Not managed by the Spring Boot BOM; the latest stable. Test scope only: docs/recipe-list-cover.md#the-rule-is-a-test-not-only-a-javadoc. -->
+        <archunit.version>1.5.1</archunit.version>
     </properties>
     <dependencies>
         <dependency>
@@ -139,6 +141,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <version>${archunit.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
