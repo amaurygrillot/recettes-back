@@ -342,15 +342,7 @@ abstract class RecipeListsHttpSupport {
      * although with a lost acknowledgement the server may have committed) and did not pass for being another.
      */
     protected void cutTheConnectionBeforeTheCommit(AtomicInteger reported) {
-        int backend = entityManager.unwrap(Session.class).doReturningWork(connection -> {
-            // Read without flushing: a native query through the entity manager would flush what the spied step is
-            // about to write.
-            try (var statement = connection.createStatement();
-                 var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
-                rows.next();
-                return rows.getInt(1);
-            }
-        });
+        int backend = backendOfTheTransaction();
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void beforeCompletion() {
@@ -360,6 +352,22 @@ abstract class RecipeListsHttpSupport {
             @Override
             public void afterCompletion(int status) {
                 reported.set(status);
+            }
+        });
+    }
+
+    /**
+     * The PostgreSQL backend (its pid) that runs the transaction the calling thread is in: for a spied step of a write,
+     * which runs inside it, to say which backend it is holding locks in. Read through the transaction's own connection
+     * and without flushing, because a native query through the entity manager would flush what the spied step is about
+     * to write.
+     */
+    protected int backendOfTheTransaction() {
+        return entityManager.unwrap(Session.class).doReturningWork(connection -> {
+            try (var statement = connection.createStatement();
+                 var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
+                rows.next();
+                return rows.getInt(1);
             }
         });
     }

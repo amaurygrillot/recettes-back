@@ -672,7 +672,10 @@ Added by the review of that hardening (the commit-safety change):
     `getReference` without having to see their arguments.
 27. **The lock probe asks PostgreSQL who blocks whom.** It counts a backend waiting on a lock only if `pg_blocking_pids`
     names the backend of the parked transaction, whose pid the parked step records from inside its own transaction. Any
-    other application on the same development database can no longer satisfy it.
+    other application on the same development database can no longer satisfy it. Proved twice, locally and never
+    committed: with the lock taken out of `ownedListForUpdate` all six tests fail (« the second write finished while the
+    first held the list's row lock »), and a throwaway test that holds a real row lock in one connection and waits on it in
+    another saw the probe count that waiter for the holder's pid and for no other (a different backend, pid 1).
 28. **The `408` test gets a connector of its own** instead of lowering the shared one for a second. Not a new application
     context, so not a new connection pool.
 
