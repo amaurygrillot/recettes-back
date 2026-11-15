@@ -105,21 +105,24 @@ public class MediaService {
         this.processingPermits = new Semaphore(properties.maxConcurrentProcessing(), true);
     }
 
+    /**
+     * {@code POST /media}: the gates and the files of {@link #intake}, then the public row, inserted in a transaction of
+     * its own by {@link #attachInTransaction}, which also decides what becomes of the files if that does not complete.
+     * The files are deleted only if the commit was certainly never attempted; a commit that fails keeps them, because
+     * this row is public and a deleted file under a committed row is an image that answers {@code 404} while a recipe
+     * may already reference it.
+     */
     public MediaResponse upload(MultipartFile file) {
         StoredImage image = intake(file);
-        try {
-            MediaEntity saved = persist(image);
-            log.info("Stored media {} as {}x{} {}", saved.getId(),
-                    saved.getWidth(), saved.getHeight(), saved.getContentType());
-            return mediaMapper.toResponse(saved);
-        } catch (RuntimeException exception) {
-            // The files are on disk and no transaction covers them, so unwind by hand -
-            // otherwise every failed upload leaves orphans nothing will ever reference.
-            log.error("Rolling back the files written for a media upload that could not be completed",
-                    exception);
-            discard(image);
-            throw exception;
-        }
+        MediaEntity saved = attachInTransaction(image, "a media upload", () -> {
+            MediaEntity row = persist(image);
+            // Flushed inside the work, so that an insert the database refuses fails here, where the rollback is
+            // certain, and not at the commit, where it looks like a commit that failed.
+            mediaRepository.flush();
+            return row;
+        });
+        log.info("Stored media {} as {}x{} {}", saved.getId(), saved.getWidth(), saved.getHeight(), saved.getContentType());
+        return mediaMapper.toResponse(saved);
     }
 
     /**

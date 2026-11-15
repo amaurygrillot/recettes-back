@@ -20,6 +20,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.TransactionSystemException;
@@ -73,8 +74,13 @@ class MediaServiceTest {
     }
 
     private MediaService mediaService(MediaProperties mediaProperties, ImageReencoder reencoder) {
+        return mediaService(mediaProperties, reencoder, new MediaMapper());
+    }
+
+    private MediaService mediaService(MediaProperties mediaProperties, ImageReencoder reencoder,
+                                      MediaMapper mediaMapper) {
         return new MediaService(mediaRepository, storageService, reencoder, mediaProperties,
-                new MediaMapper(), currentUserService,
+                mediaMapper, currentUserService,
                 new UploadRateLimiter(mediaProperties, Clock.systemUTC()),
                 new TransactionTemplate(transactionManager));
     }
@@ -157,6 +163,78 @@ class MediaServiceTest {
         verify(storageService, org.mockito.Mockito.times(2)).delete(deleted.capture());
         assertThat(deleted.getAllValues()).hasSize(2)
                 .anySatisfy(key -> assertThat(key).endsWith("_thumb.jpg"));
+    }
+
+    // ------------------------------------------------------ POST /media: the same rule for the files of a public row
+
+    /**
+     * What {@code POST /media} used to do on <em>any</em> exception after its insert: delete the files. A commit that fails
+     * at the database says « rolled back » even when the server committed, and the row of an upload is public, so deleting
+     * its files leaves an image that answers {@code 404} while a recipe may already reference it. They are kept.
+     */
+    @Test
+    void aCommitThatFailsAfterTheRowWasInserted_keepsTheFilesOfTheUpload() {
+        when(mediaRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        transactionManager.failingToCommitWith(new DataAccessResourceFailureException("the connection dropped"));
+
+        assertThatThrownBy(() -> mediaService.upload(upload(TestImages.jpeg(300, 300))))
+                .isInstanceOf(DataAccessResourceFailureException.class);
+
+        verify(storageService, org.mockito.Mockito.times(2)).store(anyString(), any(byte[].class));
+        verify(storageService, never()).delete(anyString());
+    }
+
+    /** The row is committed, and then something throws (here the mapper, which cannot today): the files stay under it. */
+    @Test
+    void anExceptionAfterTheRowWasCommitted_keepsTheFilesOfTheUpload() {
+        MediaMapper failing = mock(MediaMapper.class);
+        when(failing.toResponse(any())).thenThrow(new IllegalStateException("the mapper failed"));
+        MediaService service = mediaService(properties, new ImageReencoder(properties), failing);
+        when(mediaRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThatThrownBy(() -> service.upload(upload(TestImages.jpeg(300, 300))))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("mapper");
+
+        assertThat(transactionManager.commits()).as("the row was committed").isEqualTo(1);
+        verify(storageService, never()).delete(anyString());
+    }
+
+    /**
+     * An insert the database refuses (a constraint) is still a rollback that is <em>certain</em>, so the files still go.
+     * That is only so if the row is flushed inside the work: a flush left to the commit would fail after the work had
+     * returned, and look like the commit that failed.
+     */
+    @Test
+    void aRowTheDatabaseRefusesToInsert_isFlushedInsideTheWork_soItIsACertainRollbackThatDeletesTheFiles() {
+        when(mediaRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        doThrow(new DataIntegrityViolationException("storage_key is not unique")).when(mediaRepository).flush();
+
+        assertThatThrownBy(() -> mediaService.upload(upload(TestImages.jpeg(300, 300))))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThat(transactionManager.rollbacks()).isEqualTo(1);
+        ArgumentCaptor<String> deleted = ArgumentCaptor.forClass(String.class);
+        verify(storageService, org.mockito.Mockito.times(2)).delete(deleted.capture());
+        assertThat(deleted.getAllValues()).anySatisfy(key -> assertThat(key).endsWith("_thumb.jpg"));
+    }
+
+    /** The files are written before any transaction exists and the row is inserted in one that is its own. */
+    @Test
+    void theRowIsInsertedInATransactionOfItsOwn_afterTheFilesAreWritten() {
+        when(mediaRepository.save(any())).thenAnswer(invocation -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive())
+                    .as("the insert runs in a transaction").isTrue();
+            return invocation.getArgument(0);
+        });
+        org.mockito.Mockito.doAnswer(invocation -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive())
+                    .as("the files are written while no transaction holds a connection").isFalse();
+            return null;
+        }).when(storageService).store(anyString(), any(byte[].class));
+
+        mediaService.upload(upload(TestImages.jpeg(300, 300)));
+
+        assertThat(transactionManager.commits()).isEqualTo(1);
     }
 
     /**

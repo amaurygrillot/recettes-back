@@ -3,7 +3,6 @@ package ilenreste.unpeu.recettesback.controllers.recipes;
 import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.support.TestImages;
-import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -787,21 +786,10 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
         String oldVersion = versionOf(id);
         Set<String> before = storedFiles();
         AtomicInteger reported = new AtomicInteger(-1);
-        // The last step of the work that is spied runs inside the transaction: it registers what cuts the connection.
+        // The last step of the work that is spied runs inside the transaction: it arranges for the connection to be cut.
         doAnswer(deletion -> {
             Object real = deletion.callRealMethod();
-            int backend = backendOfTheTransaction();
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void beforeCompletion() {
-                    terminateAndAwait(backend);
-                }
-
-                @Override
-                public void afterCompletion(int status) {
-                    reported.set(status);
-                }
-            });
+            cutTheConnectionBeforeTheCommit(reported);
             return real;
         }).when(mediaService).deleteAfterCommit(any());
         Set<String> strays = Set.of();
@@ -827,30 +815,41 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
         }
     }
 
-    /** The PostgreSQL backend that runs the transaction of the request, read from inside it and without flushing. */
-    private int backendOfTheTransaction() {
-        return entityManager.unwrap(Session.class).doReturningWork(connection -> {
-            try (var statement = connection.createStatement();
-                 var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
-                rows.next();
-                return rows.getInt(1);
-            }
-        });
-    }
+    /**
+     * The same commit that fails at the database, for {@code POST /media}, whose row is <strong>public</strong>: it used
+     * to delete the files on any exception after its insert, and a lost acknowledgement there leaves an image that
+     * answers {@code 404} while a recipe may already reference it. It follows the rule of the list photo, through the same
+     * method, so its files are kept too (here, as strays, because the server never committed).
+     */
+    @Test
+    void aCommitThatFailsAtTheDatabase_keepsTheFilesOfAnUpload_eventhoughSpringCallsItARollback(CapturedOutput output)
+            throws Exception {
+        Set<String> before = storedFiles();
+        AtomicInteger reported = new AtomicInteger(-1);
+        doAnswer(insert -> {
+            Object row = insert.callRealMethod();
+            cutTheConnectionBeforeTheCommit(reported);
+            return row;
+        }).when(mediaService).persist(any());
+        Set<String> strays = Set.of();
 
-    /** Ends that backend from another connection, and does not return until PostgreSQL says it is gone. */
-    private void terminateAndAwait(int backend) {
-        jdbc.queryForObject("SELECT pg_terminate_backend(?)", Boolean.class, backend);
-        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
-        while (jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE pid = ?", Integer.class, backend) > 0) {
-            if (System.nanoTime() > deadline) {
-                throw new AssertionError("Backend " + backend + " was still there 10 s after it was terminated");
-            }
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for backend " + backend + " to go", interrupted);
+        try {
+            ResponseEntity<String> response = sendFile(HttpMethod.POST, "/media", TestImages.jpeg(300, 200), ownerToken);
+            reset(mediaService);
+
+            assertThat(response.getStatusCode().is5xxServerError()).as(response.getBody()).isTrue();
+            assertThat(reported.get()).as("what Spring reports for a commit that failed at the database")
+                    .isEqualTo(TransactionSynchronization.STATUS_ROLLED_BACK);
+            assertThat(mediaRowsUploadedBy(owner.id())).as("the server never committed: no row").isZero();
+            strays = new HashSet<>(storedFiles());
+            strays.removeAll(before);
+            assertThat(strays).as("the two files of the upload were kept").hasSize(2);
+            assertThat(output.getAll()).as("and a warning says whose they are, by key").contains("a media upload")
+                    .contains(strays.iterator().next());
+        } finally {
+            reset(mediaService);
+            for (String stray : strays) {
+                Files.deleteIfExists(storageRoot().resolve(stray));
             }
         }
     }
