@@ -13,8 +13,12 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.temporal.TemporalAccessor;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -56,6 +60,20 @@ class JpaAuditingConfigTest {
         when(usersRepository.getReferenceById("user-1")).thenReturn(reference);
 
         assertThat(auditorAware().getCurrentAuditor()).contains(reference);
+    }
+
+    /**
+     * {@code createdAt} and {@code updatedAt} are stamped from the application's clock, not from the system's: that is the
+     * one place instants are truncated to what the column keeps, so a write's answer and the next read agree.
+     */
+    @Test
+    void stampsTheDatesFromTheApplicationsClock() {
+        Instant instant = Instant.parse("2026-11-15T10:00:00.123456Z");
+        Clock clock = Clock.fixed(instant, ZoneOffset.UTC);
+
+        Optional<TemporalAccessor> now = new JpaAuditingConfig().auditingDateTimeProvider(clock).getNow();
+
+        assertThat(now).contains(instant);
     }
 
     @Test

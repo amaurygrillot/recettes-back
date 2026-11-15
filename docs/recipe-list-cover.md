@@ -59,34 +59,50 @@ cover routes), changes in two ways:
 `RecipeSummaryResponse.coverMediaIds` — the cover pictures of a recipe card in `GET /recipes` — **keeps its name**: it
 is another field, and the front already uses it.
 
+**What is always sent.** `RecipeListResponse` declares `required` in the contract: `id`, `name`, `emoji`, `recipeCount`,
+`createdAt`, `updatedAt`, `coverVersion` and `recipeCoverMediaIds` are on every response that carries a list, so the types a
+client generates from `openapi.yaml` are not all optional. **`coverVersion` is required and nullable**: a list with no photo
+sends `"coverVersion": null`, never an absent key, and a generated type reads `coverVersion: string | null`. Only
+`containsRecipe` stays optional, because it is sent only with `GET /lists?containing=`. (`GET /lists` is not paged, and a
+list entry has no schema of its own, so there is no other list schema to change.)
+
 `coverVersion` is the id of the stored photo, and clients must treat it as an opaque string. It is read off the list row
 (the foreign key), so `GET /lists` pays nothing for it: no statement is added, however many lists there are. A new
 photo is a new row with a new id, so every replacement changes it; nothing can change the bytes behind an id.
 
 ### The order of the gates
 
-`PUT` answers the first of these that applies, and **each gate is cheaper and says less than the next**:
+`PUT` answers the first of these that applies. **The order is the one the code really has**, which is not quite the
+order of the table of statuses below, and the two differences are written here because they were once documented the
+other way round. Each gate is cheaper than the next and none of them says anything about a list that is not yours:
 
 1. **`401`** — the filter: no token, or a token that is expired, broken or from before a restart.
 2. **`413`** — the servlet container, before any code runs: the request is over 8 MiB (the framing counts). It is answered even on someone
    else's list, which reveals nothing: the size of *your own* upload says nothing about their list.
-3. **`404`** — the list's visibility, `RecipeListService`'s one rule for writes. A list that does not exist and a list that
+3. **`415`** — the request is not `multipart/form-data`. **Argument binding, which runs before the controller's body**, so
+   before the `404` below: the shape of *your* request says nothing about their list either.
+4. **`400`, no `file` part** (or a part under another name) — the same argument binding, therefore also **before the
+   `404`**. A request with no file part on a list that is not yours is a `400`, not a `404`.
+5. **`404`** — the list's visibility, `RecipeListService`'s one rule for writes. A list that does not exist and a list that
    is not the caller's answer identically. **This gate is not counted against the rate limit**: a request about a list
    that is not yours must not cost you an upload.
-4. **`429`** — the per-account upload limit of `POST /media` (20 per 10 minutes by default), **shared** with it: a list
+6. **`429`** — the per-account upload limit of `POST /media` (20 per 10 minutes by default), **shared** with it: a list
    photo counts as one upload. Administrators are exempt, exactly as on `POST /media`; the exemption is *not* a
-   visibility bypass, so an administrator still gets `404` for another member's list (gate 3 comes first).
-5. **`400`** — the format (magic bytes only: JPEG and PNG) and, for the same pipeline, the dimension caps (8000 px per
-   side, 40 megapixels, read from the header before any pixel is decoded).
-6. **`503`** with `Retry-After` — the decode pool is saturated.
+   visibility bypass, so an administrator still gets `404` for another member's list (gate 5 comes first).
+7. **`400`, the file** — an empty file, and a format that is not JPEG or PNG (magic bytes only). The format is judged
+   before the decode pool, from the first bytes.
+8. **`503`** with `Retry-After` — the decode pool is saturated.
+9. **`400`, the pixels** — the dimension caps (8000 px per side, 40 megapixels, read from the header before any pixel is
+   decoded), a file that cannot be decoded and a JPEG that was cut short. **These are read by the decoder, which runs
+   *under the pool's permit*, so gate 8 comes first**: a too-large image sent while the pool is saturated answers
+   `503`, not `400`, exactly as on `POST /media`.
 
-One nuance, kept on purpose: gate 5 is two checks that the shared pipeline makes at two moments. The format is judged
-before the pool, and the dimension caps are read by the decoder, which runs *under* the pool's permit. A too-large
-image sent while the pool is saturated therefore answers `503`, as it does on `POST /media`. Reordering them would mean
-splitting the decoder in two inside the shared pipeline, for a difference nobody can observe except through two
-simultaneous failures.
+The second difference is on purpose: reordering 8 and 9 would mean splitting the decoder in two inside the shared
+pipeline, for a difference nobody can observe except through two simultaneous failures. The first (3 and 4 before 5) is
+Spring's: it is not a choice this code made, and it reveals nothing, so it is documented and left as it is, matching
+`POST /media`. Both are asserted by `RecipeListCoverUploadIntegrationTest`.
 
-`DELETE` has gates 1 and 3 only. `GET` has 1 and 3, and then the `404`s of [caching](#caching-and-versioning) below.
+`DELETE` has gates 1 and 5 only. `GET` has 1 and 5, and then the `404`s of [caching](#caching-and-versioning) below.
 
 ### Every status
 
@@ -234,6 +250,39 @@ ingredient can be pointing at it.
 `MediaRepository.findOrphans` gets a fourth `NOT EXISTS` probe for the list's reference (indexed by the unique
 constraint). An attached photo is not an orphan; a photo no list points at is one, as any unreferenced row is.
 
+### The rule is a test, not only a javadoc
+
+The privacy of a list's photo rests on one convention: **no code path that starts from a request ever reads a `media`
+row by id without the public filter.** Until the audit that followed the merge it was written only in the javadoc of
+`MediaRepository`, which a new caller of `findById` has no reason to read. `MediaPrivacyArchitectureTest` now fails the
+build if any class other than `MediaService` and `RecipeListCoverService` calls `MediaRepository.findById`,
+`findAllById` or `getReferenceById`, or `MediaService.open` (the one method that serves a row without asking who is
+asking). Production code only: the tests of the repository read what they like.
+
+It is an [ArchUnit](https://www.archunit.org) rule, a **test-only dependency** (`com.tngtech.archunit:archunit`, 1.5.1,
+the latest stable). A source scan was the alternative: it needs no dependency, but it can only see the *text* `findById`,
+not whose `findById` it is, so it either flags every repository of the application or misses a call through an alias; the
+bytecode rule says « this method of this type » exactly. The dependency is a test-scope jar with no transitive weight on
+the runtime, which is what makes it acceptable for a rule that guards the privacy of a member's photo.
+
+`findAll`, `existsById` and the other inherited reads are **not** in the rule: they were not asked for, and none of them
+returns one row for an id taken from a request. Add them the day one is used by a new path.
+
+**What the rule cannot see**, because the bytecode does not say it: a call through a variable typed as the generic
+`JpaRepository<MediaEntity, String>` instead of `MediaRepository` (nothing is typed that way), and **a method reference to
+an inherited method**, such as `mediaRepository::findAllById`. javac compiles that to a handle on the interface that
+*declares* the method (`ListCrudRepository`) and keeps the receiver's type only in the call that builds the lambda, so it
+looks exactly like the `categoriesRepository::findAllById` that `RecipeService` legitimately passes to a helper. That is
+the one gap, and it is a pattern this code base uses: a new use of `MediaRepository` is something a review has to read. The
+public lookups are declared on `MediaRepository` itself, so `mediaRepository::findAllPublicById` is a different method
+and is unaffected. Moving the repository off `JpaRepository` altogether (so that the three methods do not exist on it) would
+close the gap by construction, at the price of every test that deletes by id; it was not asked for and is not done.
+
+**It was proved both ways.** A test of its own imports a class that makes each forbidden call and checks that every one is
+reported by name, so the rule cannot pass by matching nothing. And, locally and never committed, `IngredientService` was
+made to read the icon with `findById` instead of `findPublicById`: the build failed on `IngredientService.resolveIcon:126`
+and passed again when the line was put back.
+
 ## Lifecycle
 
 ### Setting or replacing — `PUT /lists/{id}/cover`
@@ -251,9 +300,37 @@ steps, and which of them is in a transaction:
    new files are removed.
 4. Both files of the old photo are deleted once the transaction has committed. The answer is the updated list.
 
-**If the attach fails for any reason**, the new photo's two files are deleted (its row was never committed: the failed
-transaction rolled it back) and the old photo is untouched, files included — a rollback never runs the
-after-commit deletion. A failed `PUT` leaves nothing behind.
+**What happens to the new files depends on how the transaction ended**, and only on that. The files are on disk before the
+row exists, and no transaction covers the filesystem, so something has to decide whether they are kept:
+
+| How the attach ended | The new files | Why |
+|---|---|---|
+| **Rolled back** (anything thrown inside the attach, a failed flush, a list deleted meanwhile, a commit that failed and was rolled back) | **deleted** | the row was never committed, so nothing can point at them; the old photo is untouched, files included, because a rollback never runs the after-commit deletion. A failed `PUT` leaves nothing behind |
+| **Never began** (no connection for the transaction: the pool is exhausted) | **deleted** | nothing was written to the database |
+| **Committed**, whatever is thrown after it | **kept** | the list points at them: deleting them is a photo that answers `404` for ever |
+| **Outcome unknown**: the transaction manager reports `STATUS_UNKNOWN`, which Spring does in two cases only: a commit that fails with a `TransactionException`, and a rollback that itself fails (the connection died mid-attach) | **kept** | the database may well hold the row. A pair of stray files costs disk and is never reachable; a deleted file under a committed row costs the photo |
+
+The rule is one sentence: **the new files are deleted when, and only when, the transaction is known to have rolled back
+or never began.** That is the `afterCompletion` of the transaction (`STATUS_ROLLED_BACK`), registered by the attach
+itself, plus a `catch` that deletes only when the transaction never began. It used to be one `catch` of every exception
+around the whole call, which could not tell a rollback from a failure *after* the commit (the hook that deletes the old
+files throwing) and deleted the files of a photo that was committed. The request in such a case may answer a `500` while
+the photo is set: **the front re-reads the list after any failure of the `PUT`**, as after any cancel.
+
+**A residual risk, written down rather than hidden.** « Rolled back » is what Spring *reports*, and Spring reports it in
+one case where the server may in fact have committed: a commit that fails with a `DataAccessException` (the connection
+drops while PostgreSQL commits and the acknowledgement is lost; the driver throws an I/O error, JPA turns it into a
+`DataAccessException`, and the transaction manager then rolls back what it can and says `ROLLED_BACK`). The two new files
+would then be deleted under a committed row, and the list would answer `404` on its photo until its owner replaces or
+removes it. The window is the instant of the `COMMIT` itself, and the request does answer an error, so the front re-reads
+the list and sees a photo that does not load. Closing it means checking, in a new transaction, that no `media` row has
+these keys before deleting; that was not done, as the mechanism asked for was the transaction's own status. Listed under
+« À valider ».
+
+The old files are deleted after the commit, and **a failure to delete them never fails the request**: the hook catches
+whatever the storage throws, logs one `error` line with the media id and the storage key, and goes on to the second file.
+That cannot happen with the filesystem storage (it swallows its own failures), and the day it can (an object store) it
+costs a stray file, not a `500` for a photo that was saved.
 
 Why the row is created in step 3 and not in step 2: until the list points at it, a `media` row looks like any other,
 public one. `POST /media` has to commit its row before anyone references it, because the caller then references it
@@ -278,8 +355,11 @@ Deleting a recipe does not touch any list's photo.
 ### Files are deleted after the transaction commits
 
 So that a rollback never leaves a row pointing at a deleted file. They are removed through
-`MediaStorageService.delete`, which already logs a file it cannot delete — with its storage key, at `error` — and does
-not fail the request. There is no second log line and no second delete path.
+`MediaStorageService.delete`, which logs a file it cannot delete — with its storage key, at `error`. The hook that calls
+it (`MediaService.deleteAfterCommit`, used by the replace, the removal and the deletion of the list alike, so all three
+behave the same) also catches anything a storage *throws* instead: it logs it at `error` with the media id and the
+exception's one-line description, no stack trace, and still tries the other file. A request that has committed is never
+failed by the tidying that follows it, and one file that cannot be removed never keeps the other from being.
 
 ### Why the lock comes after the ownership check
 
@@ -305,11 +385,17 @@ The lock on the `recipe_lists` row serialises every write to one list's photo. W
 
 ### What can still leave something behind
 
-**Never a row.** The residue is **files only**, and two things can cause it: a file whose deletion failed after commit
-(logged by `MediaStorageService.delete` with its storage key, and nothing can find it later), and a process killed
-between writing the files and committing the attach, which `POST /media` has always been exposed to for the same
-reason (the sweep enumerates rows, so a file with no row is invisible to it). Both are disk space, never a leak: no row
-means no route can serve it.
+**Never a row.** The residue is **files only**, and four things can cause it: a file whose deletion failed after commit
+(logged with its storage key, and with the media id when the storage threw, and nothing can find it later), a commit or
+a rollback whose outcome is unknown (`STATUS_UNKNOWN`: the new files are kept, see above), and a process killed between
+writing the files and committing the attach, which `POST /media` has always been exposed to for the same reason (the
+sweep enumerates rows, so a file with no row is invisible to it). All are disk space, never a leak: no row means no
+route can serve it.
+
+`POST /media` does not have the rule of this section: `MediaService.upload` commits the row in the repository's own
+transaction and deletes the files on any exception after it, so a commit whose acknowledgement is lost there would delete
+the files of a committed, public row. It is the behaviour it always had, `MediaMapper.toResponse` cannot throw, and it
+was not part of the review; it is noted here so that nobody takes the rule above for a property of the whole pipeline.
 
 A request that is reading the photo while it is replaced can find its file gone as the response streams. The front
 reloads the list and gets the new version.
@@ -362,8 +448,15 @@ What the server does depends on **whether the last byte had arrived**, and the f
   cancelled upload, as if the server had failed; `ApiExceptionHandler.handleMultipart` now recognises a hang-up (through
   Spring's own `DisconnectedClientHelper`: the container's abort exceptions, a reset or a broken connection, found in the
   cause chain), answers `400` (read by nobody) and logs one `info` line. A `MultipartException` of a multipart request with
-  any other cause (a full disk, an antivirus) stays the `500` it was. A slow client whose read times out is a `400` too,
-  where a `408` would be more exact; nobody reads it either.
+  any other cause (a full disk, an antivirus) stays the `500` it was.
+- **A client that goes quiet instead of hanging up** (a phone that lost its signal, a suspended tab) is cut off by the
+  server's read timeout (`server.tomcat.connection-timeout`, 60 s by default). This claim was written down as « a `400` logged at
+  `info`, like a hang-up » and had never been checked. Checked now, over real HTTP with the timeout lowered to a second for
+  the one test: **it is the container's `408 Request Timeout`**, with Spring Boot's JSON error body (`application/json`, not a
+  problem: Tomcat has already ended the request when the exception reaches the handler, so the status and the body are its
+  own, and nobody reads them), **and one `info` line from the handler, as for a hang-up**, no `error`, no stack trace. Nothing
+  is stored, counted or decoded, and no decode permit is taken. So the log was right and the status was not, and no code needed
+  to change: `408` is the status that matches what happened, which is what the status-code rules ask for.
 
 ### 3. Every `400`, and the two other bodies
 
@@ -379,11 +472,13 @@ another name. An unknown `variant` on `GET` is a `400` too.
   decoded and fills the rest grey, so a file cut short before it was sent (a partial file on the device, a front that
   sliced it) was stored as a half-grey photo. (A connection that drops *during* the upload is another matter: the request
   fails, see 2.) The decoder says so through a warning (« Truncated File - Missing EOI marker »), and `ImageReencoder` now
-  turns that one warning into a `400` whose detail says the file is truncated. Every other warning (a stray byte before a
+  turns that one warning into a `400` whose detail says the image is incomplete or unreadable. Every other warning (a stray byte before a
   marker is routine for real cameras) is still accepted, and a test proves it. The check is on the decoder's own wording,
   so `ImageReencoderTest` fails the day a JDK changes it. A PNG cut short fails to decode on its own and already was a `400`.
   **A possible false positive, accepted:** a JPEG whose scan is complete but which lacks only its two end-marker bytes (some
-  old cameras and scanners write them) is refused too, with « try sending it again ».
+  old cameras and scanners write them) is refused too. Its `detail` is neutral on purpose (« That image is incomplete or
+  unreadable. »): it used to end with « try sending it again », which is the wrong advice for a camera that always
+  writes its files that way, and no better for a front that cannot tell the two causes apart.
 - **No non-`400` came out of the decoder.** A throwaway mutation run (12 000 JPEGs and PNGs with bytes flipped and files cut
   at random, a fixed seed, not kept in the repository) through `ImageReencoder` produced only `400`s and accepted images:
   no exception other than `InvalidInputException` escaped, so nothing needed catching beyond what was already caught. Take it
@@ -405,7 +500,7 @@ another name. An unknown `variant` on `GET` is a `400` too.
 A `PUT` refused with a `400`, a `413`, a `415`, a `429` or a `503` leaves **the photo, its `coverVersion`, the list's
 `updatedAt`, the rows, the files and the bytes served** exactly as they were. This holds because the only code that
 touches the list runs after every one of those gates and inside the one transaction that either replaces the photo or
-rolls back; the new files are written first and are deleted if anything fails. The tests take a snapshot of all of it
+rolls back; the new files are written first and are deleted if the transaction rolls back or never begins. The tests take a snapshot of all of it
 before and after, for each status, with the real limiter and the real decode pool for the last two.
 
 ### 5. The order of calls
@@ -416,9 +511,22 @@ photo is still served; `DELETE /lists/{id}/cover` twice is `200` and `200` (the 
 `null`, `updatedAt` as stored); once the list is deleted from elsewhere, `PUT`, `DELETE` and `GET` of its cover are all `404`
 and nothing of the photo is left (`theFlowOfTheDesign_…`).
 
-**One thing to know about `updatedAt`**, true of every write of the lists and not only of the photo: the answer of a `PUT` or a
-`DELETE` carries the timestamp the server just set, to the nanosecond (`…206783300Z`), while PostgreSQL stores microseconds, so a
-later `GET` spells the same instant `…206783Z`. Compare `updatedAt` as instants, never as strings across a write and a read.
+**The precision of `createdAt` and `updatedAt`** is the same in a write's answer and in the next read: **microseconds**,
+for the lists and for every other entity of the API. It was not: the answer of a `PUT` or a `DELETE` carried the timestamp
+the server had just set, to the nanosecond (`…206783300Z`), while PostgreSQL stores microseconds, so the next `GET`
+spelled the same instant `…206783Z` (rounded, not truncated, so it could even be the next microsecond). A client that
+compared the strings, or a cache that compared the JSON, saw a change after every refetch. The fix is at the source, in
+**one place**: the application's `Clock` (`TimeConfig`) ticks in microseconds, and the auditing that stamps `createdAt` and
+`updatedAt` on every entity (`JpaAuditingConfig`) reads that same clock, so no instant the API answers has a finer
+fraction than the column that stores it. Nothing is truncated in a response or a mapper. The front can compare the strings
+again, though comparing instants is still right.
+
+**One more difference found on the way, and fixed with it:** the answer of `PUT /recipes/{id}` carried the *previous*
+`updatedAt`. Auditing stamps it when the update is flushed, which was at commit, after the answer had been built; the
+recipe update now flushes before it answers, as the lists already did (`saveAndFlush`). It is not about precision and was
+not in the list of eight, but a test that says « the answer of a write equals the next read, for a recipe » cannot pass
+without it. (`PasswordResetTokenService` and the JWT claims still call
+`Instant.now()`: neither is answered by the API.)
 
 ### 6. Sizes
 
@@ -445,6 +553,9 @@ about disk and decode memory, not a defect.
   the script: the browser then treats the request as uncacheable, bypasses its own cache and hands the script a bare `304`
   with no body. Without `v`, the browser revalidates by itself on every use; with the current `v`, it does not need to.
 - A `404` on a `v` means the list changed: reload it with `GET /lists/{id}` and use the new `coverVersion`.
+- **After any failure of the `PUT` that is not a `4xx` the front understands (a `500`, a network error, a timeout),
+  re-read the list.** A `500` can come after the photo was committed (the old files could not be tidied, the answer could
+  not be built), and the server keeps the committed photo's files in that case.
 - A photo can be sent as `multipart/form-data` with one part named `file`, under 8 387 584 bytes (see 3 above: the limit is on the whole request). JPEG and PNG only: HEIC (an
   iPhone's default) and WebP are a `400` the front must explain, and converting to JPEG before sending is the answer.
 
@@ -474,6 +585,30 @@ Added by the audit that followed the merge ([what the upload form relies on](#wh
     missing part grey.
 14. **A client that hangs up mid-upload is a `400` logged at `info`**, not a `500` logged at `error` with a stack trace.
 
+Added by the hardening that followed the review of both pull requests ([the outcome of a replace](#setting-or-replacing--put-listsidcover),
+[the guardrail](#the-rule-is-a-test-not-only-a-javadoc)):
+
+15. **The new files are deleted only when the transaction is known to have rolled back, or never began.** A commit whose
+    outcome is unknown keeps them: a stray pair of files is disk, a deleted file under a committed row is a lost photo.
+    (The conservative reading, since privacy and data win over tidiness.)
+16. **A failure to delete the old files after the commit is logged, never thrown**, for the replace, the removal and the
+    deletion of the list alike.
+17. **`createdAt` and `updatedAt` are truncated to microseconds at the source** (the `Clock` and the auditing that reads it),
+    for every entity, so that a write's answer and the next read spell the same instant. Truncation, not a response
+    mapper: a response that rounds is one more place to forget.
+18. **`RecipeListResponse` declares `required`** for every field the server always sends, `coverVersion` among them as
+    required and nullable. It is the first response schema of the API to do so; the others are left as they are.
+19. **The privacy convention is an ArchUnit rule**, the first test-only dependency of its kind.
+20. **The documented order of the gates is the real one** (the shape of the request, `415` and a missing `file` part, is
+    answered before the `404`; a saturated pool answers `503` before the `400` of a too-large image). The order itself is
+    not changed.
+21. **The `detail` of a cut-short JPEG is neutral**: it does not say what to do, because the right advice depends on a
+    cause the server cannot see.
+22. **A client that goes quiet mid-upload is answered `408` by the container and logged at `info`.** Not changed, and the
+    sentence that said `400` is corrected: it was verified over real HTTP, not assumed.
+23. **`PUT /recipes/{id}` flushes before it answers**, so that its answer carries the `updatedAt` that was stored. Not one
+    of the eight, found by the test that says « a write's answer equals the next read, for a recipe ».
+
 ## Tests
 
 | What                                                                                                  | Where                                       |
@@ -483,7 +618,13 @@ Added by the audit that followed the merge ([what the upload form relies on](#wh
 | `GET /media/{id}` answering `404` for a list photo, to its owner and to an administrator              | same                                        |
 | A list photo's id refused as a recipe cover, a step picture and an ingredient icon (create and update), `400`, the same answer as an unknown id | same, and `IngredientServiceTest`/`RecipeServiceTest` for the lookups |
 | The lifecycle against the real database and a real storage directory under `target/`: replace, remove, delete the list — each time the old row and both files are gone; a failed attach leaves nothing; a rollback leaves the old files | same |
-| Two concurrent writes to one list's photo: exactly one row and its two files remain                   | same                                        |
+| Overlapping writes, **proving the lock**: the first write is held inside its locked transaction, the second is shown to be *waiting* on the row lock (in `pg_stat_activity`), then the first is released. Two `PUT`s, a `PUT` against a `DELETE …/cover`, a `PUT` against `DELETE /lists/{id}` in both orders, two `DELETE /lists/{id}`: the final rows, files and served bytes. Each fails with the lock removed | same |
+| The outcome of a replace: a storage that throws after the commit (`200`, the new photo served, its files still on disk, both old deletions attempted, one `error` line with the media id); a rollback (new files gone, old photo untouched); a transaction that never began (new files gone); a commit whose outcome is lost (new files kept, photo served) | same, `MediaServiceTest` for the hooks |
+| The privacy convention: no class but `MediaService` and `RecipeListCoverService` reads a `media` row by id without the public filter | `MediaPrivacyArchitectureTest` (ArchUnit) |
+| `createdAt` and `updatedAt` of a write's answer equal those of the next read, for a list and for a recipe | `RecipeListsIntegrationTest`, `RecipesIntegrationTest`, `TimeConfigTest` |
+| Every field `RecipeListResponse` declares `required` is on every route that answers a list, `coverVersion` as an explicit `null` without a photo | `RecipeListsIntegrationTest` |
+| The order of the gates: a `415` and a missing `file` part before the `404`; a `503` before the `400` of a too-large image | `RecipeListCoverUploadIntegrationTest` |
+| A client that goes quiet mid-upload until the server's read timeout: `408`, one `info` line, nothing stored or counted | same (the timeout is lowered on the running server for that one test and put back) |
 | `findOrphans` does not return an attached photo and does return a detached one; `totalBytesUploadedBy` counts it | `MediaRepositoryTest` (`@DataJpaTest`) |
 | `GET /lists` out of N+1 with photos on some of the lists                                              | `RecipeListServiceQueryCountTest`           |
 | The `415` for a non-multipart request, on both routes, and `413` on a part over 8 MB (still answered by its own handler); the `304` of the public `GET /media/{id}` repeating its `Cache-Control` | `RecipeListCoverIntegrationTest`, `ApiExceptionHandlerTest`, `MediaUploadIntegrationTest` |

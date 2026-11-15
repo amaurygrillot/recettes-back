@@ -6,17 +6,37 @@ import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
+import org.springframework.data.auditing.DateTimeProvider;
 import org.springframework.data.domain.AuditorAware;
 import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
+
+import java.time.Clock;
+import java.util.Optional;
 
 /**
  * Wires Spring Data JPA auditing for {@link ilenreste.unpeu.recettesback.entities.AuditableEntity},
  * for {@code MediaEntity} and for {@code RecipeEntity}, which both opt in on
  * their own.
+ * <p>
+ * It imports {@link TimeConfig}, the clock it stamps from, so that a {@code @DataJpaTest} slice that imports this class
+ * (as the repository tests do) gets the clock with it, and nobody has to remember a second {@code @Import}.
  */
 @Configuration
-@EnableJpaAuditing
+@Import(TimeConfig.class)
+@EnableJpaAuditing(dateTimeProviderRef = "auditingDateTimeProvider")
 public class JpaAuditingConfig {
+
+    /**
+     * Where {@code createdAt} and {@code updatedAt} come from: the application's {@link Clock}, which ticks in
+     * microseconds ({@link TimeConfig}), instead of Spring Data's default of {@code LocalDateTime.now()}, which reads the
+     * system clock to the nanosecond. That is what makes the instant a write answers equal the one PostgreSQL stores and
+     * the next read gives back, for every audited entity, with nothing to remember in a service or a mapper.
+     */
+    @Bean
+    DateTimeProvider auditingDateTimeProvider(Clock clock) {
+        return () -> Optional.of(clock.instant());
+    }
 
     /**
      * Resolves the user to stamp onto {@code created_by_id} / {@code updated_by_id},

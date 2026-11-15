@@ -161,8 +161,9 @@ public class ImageReencoder {
         BufferedImage decoded = reader.read(0, param);
         if (truncated.get()) {
             log.warn("Refusing an upload whose {} data ends before the end of the image", reader.getFormatName());
-            throw new InvalidInputException("That file is truncated: it stops before the end of the image. "
-                    + "Try sending it again.");
+            // Neutral on purpose: it does not say what to do. Sending it again is the right advice for a file cut short
+            // on its way, and the wrong one for a camera that always writes its files without the end marker.
+            throw new InvalidInputException("That image is incomplete or unreadable.");
         }
         return decoded;
     }

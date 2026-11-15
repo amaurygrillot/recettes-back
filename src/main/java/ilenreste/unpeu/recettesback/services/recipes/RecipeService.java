@@ -234,7 +234,9 @@ public class RecipeService {
         request.ingredientGroups().ifPresent(groups -> replaceIngredientGroups(recipe, groups));
         request.steps().ifPresent(steps -> replaceSteps(recipe, steps));
 
-        RecipeEntity saved = recipesRepository.save(recipe);
+        // Flushed here, not at commit: auditing stamps updatedAt when the update is flushed, and the answer is built
+        // below, so without it the answer carries the previous updatedAt while the next read has the new one.
+        RecipeEntity saved = recipesRepository.saveAndFlush(recipe);
         log.info("Updated recipe {}", id);
         return toResponse(saved);
     }

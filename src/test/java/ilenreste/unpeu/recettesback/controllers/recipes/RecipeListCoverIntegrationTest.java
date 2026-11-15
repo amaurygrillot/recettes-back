@@ -5,32 +5,33 @@ import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.support.TestImages;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.TransactionSystemException;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import tools.jackson.databind.JsonNode;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.CountDownLatch;
-import java.util.function.Supplier;
 
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,6 +53,7 @@ import static org.mockito.Mockito.verify;
  * Two things are asserted again and again, because they are the point of the feature: that nobody but the owner ever
  * gets the bytes, and that a photo that is replaced, removed or whose list is deleted leaves neither a row nor a file.
  */
+@ExtendWith(OutputCaptureExtension.class)
 class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
 
     private final List<String> categoryIds = new ArrayList<>();
@@ -65,29 +67,6 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
     }
 
     // ------------------------------------------------------------------------------------------------- helpers
-
-    private static List<ResponseEntity<String>> inParallel(List<Supplier<ResponseEntity<String>>> calls) {
-        ExecutorService pool = Executors.newFixedThreadPool(calls.size());
-        CountDownLatch go = new CountDownLatch(1);
-        try {
-            List<Future<ResponseEntity<String>>> futures = calls.stream()
-                    .map(call -> pool.submit(() -> {
-                        go.await();
-                        return call.get();
-                    }))
-                    .toList();
-            go.countDown();
-            List<ResponseEntity<String>> responses = new ArrayList<>();
-            for (Future<ResponseEntity<String>> future : futures) {
-                responses.add(future.get());
-            }
-            return responses;
-        } catch (InterruptedException | ExecutionException exception) {
-            throw new IllegalStateException(exception);
-        } finally {
-            pool.shutdownNow();
-        }
-    }
 
     // --------------------------------------------------------------------------------- setting and the response
 
@@ -629,69 +608,163 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
         assertThat(mediaRowsUploadedBy(owner.id())).isZero();
     }
 
+    /**
+     * The old photo is still in place when the list is deleted from under the request, and nothing but the new files was
+     * the request's to remove: they go, and the old row and its files are left exactly as they were. (The test deletes
+     * the list by SQL, which is not what the service does, so it also tidies the old photo itself.)
+     */
     @Test
-    void twoConcurrentPuts_bothAnswer200_andExactlyOnePhotoAndItsTwoFilesRemain() {
+    void aListDeletedWhileItsPhotoIsBeingReplaced_is404_theNewFilesAreGone_andTheOldPhotoIsUntouched()
+            throws Exception {
         String id = listWithCover(ownerToken);
-        Set<String> before = storedFiles();
+        Map<String, Object> old = mediaRow(versionOf(id)).orElseThrow();
+        Set<String> files = storedFiles();
+        doAnswer(decode -> {
+            jdbc.update("DELETE FROM recipe_lists WHERE id = ?", id);
+            return decode.callRealMethod();
+        }).when(reencoder).reencode(any(), any());
 
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> putCover(id, ownerToken),
-                () -> putCover(id, ownerToken)));
+        try {
+            ResponseEntity<String> response = putCover(id, ownerToken);
 
-        assertThat(responses).extracting(ResponseEntity::getStatusCode).containsOnly(HttpStatus.OK);
-        Map<String, Object> current = mediaRow(versionOf(id)).orElseThrow();
-        assertThat(mediaRowsUploadedBy(owner.id())).as("exactly one photo row").isEqualTo(1);
-        Set<String> after = storedFiles();
-        assertThat(after).as("and exactly its two files, the others deleted")
-                .hasSize(before.size())
-                .contains((String) current.get("storage_key"), (String) current.get("thumbnail_storage_key"));
-    }
-
-    @Test
-    void aPutRacingARemoval_endsWithAtMostOnePhoto_andNoRowOrFileLeftBehind() {
-        String id = listWithCover(ownerToken);
-        Set<String> before = storedFiles();
-
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> putCover(id, ownerToken),
-                () -> delete(coverPath(id), ownerToken)));
-
-        assertThat(responses).extracting(ResponseEntity::getStatusCode).containsOnly(HttpStatus.OK);
-        String version = versionOf(id);
-        long expectedRows = version == null ? 0 : 1;
-        assertThat(mediaRowsUploadedBy(owner.id())).isEqualTo(expectedRows);
-        assertThat(storedFiles()).hasSize(before.size() - 2 + (int) (expectedRows * 2));
-        if (version != null) {
-            Map<String, Object> current = mediaRow(version).orElseThrow();
-            assertThat(storedFiles()).contains((String) current.get("storage_key"),
-                    (String) current.get("thumbnail_storage_key"));
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            assertThat(storedFiles()).as("the two new files were removed, and only them").isEqualTo(files);
+            assertThat(mediaRow((String) old.get("id"))).as("the old row").isPresent();
+            assertThat(fileExists((String) old.get("storage_key"))).isTrue();
+            assertThat(fileExists((String) old.get("thumbnail_storage_key"))).isTrue();
+        } finally {
+            jdbc.update("DELETE FROM media WHERE id = ?", old.get("id"));
+            Files.deleteIfExists(storageRoot().resolve((String) old.get("storage_key")));
+            Files.deleteIfExists(storageRoot().resolve((String) old.get("thumbnail_storage_key")));
         }
     }
 
+    /**
+     * The failure the old {@code catch} could not tell from a rollback: the transaction committed, and then the
+     * deletion of the OLD files threw (impossible with the filesystem, which swallows its own failures, and exactly what
+     * an object store does). The request has committed, so it is a success: the new photo is served and its two files are
+     * on disk. The old row is gone, both of its files were tried, and one {@code error} line says which row.
+     */
     @Test
-    void aPutRacingTheDeletionOfTheList_leavesNothing_whicheverWins() {
-        String id = createList(unique("Photo"), ownerToken);
-        Set<String> before = storedFiles();
-
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> putCover(id, ownerToken),
-                () -> delete("/lists/" + id, ownerToken)));
-
-        assertThat(responses.get(1).getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
-        assertThat(responses.get(0).getStatusCode()).isIn(HttpStatus.OK, HttpStatus.NOT_FOUND);
-        assertThat(get("/lists/" + id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(mediaRowsUploadedBy(owner.id())).isZero();
-        assertThat(storedFiles()).isEqualTo(before);
-    }
-
-    @Test
-    void twoOverlappingDeletesOfAList_answerOne204AndOne404() {
+    void aStorageThatThrowsWhenTheOldFilesAreDeleted_neverFailsThePutThatCommitted_andNeverDeletesTheNewPhoto(
+            CapturedOutput output) throws Exception {
         String id = listWithCover(ownerToken);
+        String oldVersion = versionOf(id);
+        Map<String, Object> old = mediaRow(oldVersion).orElseThrow();
+        doThrow(new IllegalStateException("the object store is down")).when(storageService).delete(anyString());
 
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> delete("/lists/" + id, ownerToken),
-                () -> delete("/lists/" + id, ownerToken)));
+        try {
+            ResponseEntity<String> response = putCover(id, ownerToken);
 
-        assertThat(responses).extracting(ResponseEntity::getStatusCode)
-                .containsExactlyInAnyOrder(HttpStatus.NO_CONTENT, HttpStatus.NOT_FOUND);
-        assertThat(mediaRowsUploadedBy(owner.id())).isZero();
+            assertThat(response.getStatusCode()).as("the commit succeeded: %s", response.getBody())
+                    .isEqualTo(HttpStatus.OK);
+            String newVersion = json(response).path("coverVersion").asString();
+            assertThat(newVersion).isNotBlank().isNotEqualTo(oldVersion);
+            assertThat(versionOf(id)).isEqualTo(newVersion);
+            Map<String, Object> current = mediaRow(newVersion).orElseThrow();
+            assertThat(fileExists((String) current.get("storage_key"))).as("the new photo's file").isTrue();
+            assertThat(fileExists((String) current.get("thumbnail_storage_key"))).as("and its thumbnail").isTrue();
+            assertThat(getBytes(coverPath(id) + "?v=" + newVersion, ownerToken).getStatusCode())
+                    .as("the new photo is served").isEqualTo(HttpStatus.OK);
+            assertThat(mediaRow(oldVersion)).as("the old row was deleted in the transaction").isEmpty();
+            verify(storageService).delete((String) old.get("storage_key"));
+            verify(storageService).delete((String) old.get("thumbnail_storage_key"));
+            assertThat(output.getAll()).as("one error line, with the media id of the old photo and no stack trace")
+                    .contains(oldVersion)
+                    .doesNotContain("at ilenreste.unpeu.recettesback.services.media.MediaService");
+        } finally {
+            reset(storageService);
+            // The deletion that failed left the old files behind, which is the point; a test must not.
+            Files.deleteIfExists(storageRoot().resolve((String) old.get("storage_key")));
+            Files.deleteIfExists(storageRoot().resolve((String) old.get("thumbnail_storage_key")));
+        }
     }
+
+    /** The same storage failure on the other two routes that delete a photo after commit. */
+    @Test
+    void aStorageThatThrowsWhenAPhotoIsRemovedOrItsListDeleted_neverFailsTheRequest() throws Exception {
+        String removed = listWithCover(ownerToken);
+        String deleted = listWithCover(ownerToken);
+        List<Map<String, Object>> photos = List.of(mediaRow(versionOf(removed)).orElseThrow(),
+                mediaRow(versionOf(deleted)).orElseThrow());
+        doThrow(new IllegalStateException("the object store is down")).when(storageService).delete(anyString());
+
+        try {
+            ResponseEntity<String> removal = delete(coverPath(removed), ownerToken);
+            ResponseEntity<String> deletion = delete("/lists/" + deleted, ownerToken);
+            reset(storageService);
+
+            assertThat(removal.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(json(removal).path("coverVersion").isNull()).isTrue();
+            assertThat(deletion.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+            assertThat(get("/lists/" + deleted, ownerToken).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            assertThat(mediaRowsUploadedBy(owner.id())).as("both rows are gone").isZero();
+        } finally {
+            for (Map<String, Object> photo : photos) {
+                Files.deleteIfExists(storageRoot().resolve((String) photo.get("storage_key")));
+                Files.deleteIfExists(storageRoot().resolve((String) photo.get("thumbnail_storage_key")));
+            }
+        }
+    }
+
+    /**
+     * No connection for the transaction (the pool is exhausted): nothing was written to the database, so the two files
+     * the request wrote have nothing to belong to and are deleted, and the old photo is untouched.
+     */
+    @Test
+    void aTransactionThatNeverBegins_deletesTheNewFiles_andLeavesTheOldPhotoInPlace() {
+        String id = listWithCover(ownerToken);
+        String version = versionOf(id);
+        Set<String> files = storedFiles();
+        doThrow(new CannotCreateTransactionException("no connection is available")).when(transactionTemplate)
+                .execute(any());
+
+        ResponseEntity<String> response = putCover(id, ownerToken);
+        reset(transactionTemplate);
+
+        assertThat(response.getStatusCode().is5xxServerError()).as(response.getBody()).isTrue();
+        assertThat(versionOf(id)).as("still the old photo").isEqualTo(version);
+        assertThat(storedFiles()).as("the two new files were removed").isEqualTo(files);
+        assertThat(mediaRowsUploadedBy(owner.id())).isEqualTo(1);
+    }
+
+    /**
+     * The commit went through and its acknowledgement was lost (the connection dropped, say): the caller sees an
+     * exception while the database holds the new row. Deleting the new files here would leave a photo that answers
+     * {@code 404} for ever, so they are kept. The old photo, whose deletion is scheduled after the commit that did
+     * happen, is gone.
+     */
+    @Test
+    void aCommitWhoseOutcomeIsLost_keepsTheNewFiles_becauseTheRowMayWellBeThere() {
+        String id = listWithCover(ownerToken);
+        String oldVersion = versionOf(id);
+        Map<String, Object> old = mediaRow(oldVersion).orElseThrow();
+        Set<String> before = storedFiles();
+        doAnswer(commit -> {
+            commit.callRealMethod();
+            throw new TransactionSystemException("the connection dropped as the commit was acknowledged");
+        }).when(transactionTemplate).execute(any());
+
+        ResponseEntity<String> response = putCover(id, ownerToken);
+        reset(transactionTemplate);
+
+        assertThat(response.getStatusCode().is5xxServerError()).as(response.getBody()).isTrue();
+        String newVersion = versionOf(id);
+        assertThat(newVersion).as("the photo is the new one").isNotNull().isNotEqualTo(oldVersion);
+        Map<String, Object> current = mediaRow(newVersion).orElseThrow();
+        assertThat(fileExists((String) current.get("storage_key"))).isTrue();
+        assertThat(fileExists((String) current.get("thumbnail_storage_key"))).isTrue();
+        assertThat(getBytes(coverPath(id) + "?v=" + newVersion, ownerToken).getStatusCode())
+                .isEqualTo(HttpStatus.OK);
+        assertThat(mediaRow(oldVersion)).isEmpty();
+        Set<String> expected = new HashSet<>(before);
+        expected.removeAll(Set.of((String) old.get("storage_key"), (String) old.get("thumbnail_storage_key")));
+        expected.addAll(Set.of((String) current.get("storage_key"), (String) current.get("thumbnail_storage_key")));
+        assertThat(storedFiles()).as("the old files went, the new ones stayed").isEqualTo(expected);
+    }
+
+    // The overlapping writes are in RecipeListCoverConcurrencyIntegrationTest, which holds one write inside the row lock
+    // to prove it.
 
     /**
      * The rename loads the list, a photo is attached from another connection before the rename writes, and the rename

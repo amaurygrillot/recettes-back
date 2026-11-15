@@ -385,11 +385,16 @@ table — and differs in **who may read it**: only the list's owner, and only th
   publicly readable image. It is never created by `POST /media`, and `PUT /lists/{id}/cover` never takes a media id.
 - **It is deleted, row and both files, whenever it is replaced, removed or its list is deleted.** That is safe only
   because the row is never shared with a recipe, a step or an ingredient — the two guarantees above are what make it so.
-  The files are deleted after the transaction commits, so a rollback never leaves a row pointing at a deleted file.
+  The files are deleted after the transaction commits, so a rollback never leaves a row pointing at a deleted file. The
+  hook that does it (`MediaService.deleteAfterCommit`) never fails the request that has committed: a storage that throws
+  is caught and logged with the media id, per file, so one file that cannot be removed does not keep the other from being.
+  And the *new* files of a replace are deleted only when the transaction is known to have rolled back or never began, not
+  on any exception: see [recipe-list-cover.md](recipe-list-cover.md#setting-or-replacing--put-listsidcover).
 - **Disk use.** `totalBytesUploadedBy` counts list photos: they use disk and carry an `uploaded_by_id`.
 - **List photos never leave an orphan *row*.** The only thing that can be left behind is a **file**: one whose deletion
-  failed after commit (logged with its storage key by `MediaStorageService.delete`, and nothing can find it later), or
-  files written by a request that was killed before its transaction committed — the same exposure `POST /media` has.
+  failed after commit (logged with its storage key by `MediaStorageService.delete`, or with the media id when the storage
+  threw, and nothing can find it later), the new files of a commit whose outcome was unknown, or files written by a
+  request that was killed before its transaction committed — the same exposure `POST /media` has.
 
 ## Configuration
 

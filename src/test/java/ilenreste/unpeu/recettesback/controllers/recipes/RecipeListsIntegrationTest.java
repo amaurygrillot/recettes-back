@@ -1,5 +1,6 @@
 package ilenreste.unpeu.recettesback.controllers.recipes;
 
+import ilenreste.unpeu.recettesback.contract.OpenApiContract;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeListEntity;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
 import ilenreste.unpeu.recettesback.services.recipes.RecipeListService;
@@ -14,7 +15,11 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import tools.jackson.databind.JsonNode;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -79,6 +84,78 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
         assertThat(json(read).path("id").asString()).isEqualTo(id);
         assertThat(json(read).path("name").asString()).isEqualTo("Desserts");
         assertThat(json(read).has("containsRecipe")).isFalse();
+    }
+
+    /**
+     * The contract says which fields of a list are always sent ({@code required} in {@code RecipeListResponse}), and the
+     * types a client generates from it are not all optional because of it. So it has to be true: on every route that
+     * answers a list, every one of them is in the JSON, and {@code coverVersion} is an explicit {@code null} while the
+     * list has no photo, never an absent key. Only {@code containsRecipe} is sent on one route alone.
+     */
+    @Test
+    void everyRouteThatAnswersAList_sendsEveryFieldTheContractRequires_coverVersionAsAnExplicitNull() {
+        List<String> required = new ArrayList<>();
+        OpenApiContract.load().path("components").path("schemas").path("RecipeListResponse").path("required")
+                .forEach(field -> required.add(field.asString()));
+        assertThat(required).as("what the contract promises").containsExactlyInAnyOrder("id", "name", "emoji",
+                "recipeCount", "createdAt", "updatedAt", "coverVersion", "recipeCoverMediaIds");
+        String recipeId = recipe(unique("Tarte"));
+
+        ResponseEntity<String> created = post("/lists", listJson(unique("Dimanche"), CAKE), ownerToken);
+        String id = json(created).path("id").asString();
+        addToList(id, recipeId, ownerToken);
+        Map<String, JsonNode> withoutAPhoto = new LinkedHashMap<>();
+        withoutAPhoto.put("POST /lists", json(created));
+        withoutAPhoto.put("GET /lists/{id}", json(get("/lists/" + id, ownerToken)));
+        withoutAPhoto.put("GET /lists", json(get("/lists", ownerToken)).get(0));
+        withoutAPhoto.put("GET /lists?containing=", json(get("/lists?containing=" + recipeId, ownerToken)).get(0));
+        withoutAPhoto.put("PUT /lists/{id}", json(put("/lists/" + id, listJson(unique("Renommee"), PASTA), ownerToken)));
+        withoutAPhoto.put("DELETE /lists/{id}/cover, no photo to remove", json(delete("/lists/" + id + "/cover", ownerToken)));
+
+        withoutAPhoto.forEach((route, list) -> {
+            required.forEach(field -> assertThat(list.has(field)).as("%s sends %s", route, field).isTrue());
+            assertThat(list.path("coverVersion").isNull()).as("%s: coverVersion is null, not absent", route).isTrue();
+        });
+        assertThat(withoutAPhoto.get("GET /lists?containing=").path("containsRecipe").asBoolean()).isTrue();
+        withoutAPhoto.remove("GET /lists?containing=");
+        withoutAPhoto.forEach((route, list) -> assertThat(list.has("containsRecipe")).as(route).isFalse());
+
+        ResponseEntity<String> withAPhoto = putCover(id, ownerToken);
+        required.forEach(field -> assertThat(json(withAPhoto).has(field)).as("PUT cover sends %s", field).isTrue());
+        assertThat(json(withAPhoto).path("coverVersion").asString()).isNotBlank();
+    }
+
+    /**
+     * A write's answer and the next read must spell {@code createdAt} and {@code updatedAt} the same. They did not: the
+     * answer carried the instant the server had just set, to the nanosecond, while PostgreSQL keeps microseconds, so the
+     * next read had a different (and, being rounded, sometimes later) string, and a client that compared the two saw a
+     * change after every refetch. The instants are truncated to microseconds where they are made.
+     */
+    @Test
+    void aWritesAnswerAndTheNextRead_spellCreatedAtAndUpdatedAtIdentically() throws InterruptedException {
+        ResponseEntity<String> created = post("/lists", listJson(unique("Dimanche"), CAKE), ownerToken);
+        String id = json(created).path("id").asString();
+        assertSameTimestamps("POST /lists", json(created), listOf(id, ownerToken));
+
+        Thread.sleep(10);
+        ResponseEntity<String> renamed = put("/lists/" + id, listJson(unique("Renommee"), PASTA), ownerToken);
+        assertSameTimestamps("PUT /lists/{id}", json(renamed), listOf(id, ownerToken));
+
+        Thread.sleep(10);
+        ResponseEntity<String> withAPhoto = putCover(id, ownerToken);
+        assertSameTimestamps("PUT /lists/{id}/cover", json(withAPhoto), listOf(id, ownerToken));
+
+        Thread.sleep(10);
+        ResponseEntity<String> withoutIt = delete("/lists/" + id + "/cover", ownerToken);
+        assertSameTimestamps("DELETE /lists/{id}/cover", json(withoutIt), listOf(id, ownerToken));
+        assertSameTimestamps("GET /lists", json(withoutIt), json(get("/lists", ownerToken)).get(0));
+    }
+
+    private static void assertSameTimestamps(String route, JsonNode answer, JsonNode read) {
+        assertThat(answer.path("createdAt").asString()).as("%s: createdAt", route)
+                .isEqualTo(read.path("createdAt").asString());
+        assertThat(answer.path("updatedAt").asString()).as("%s: updatedAt", route)
+                .isEqualTo(read.path("updatedAt").asString());
     }
 
     @Test

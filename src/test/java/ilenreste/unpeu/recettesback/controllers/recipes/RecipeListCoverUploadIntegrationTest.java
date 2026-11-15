@@ -4,8 +4,9 @@ import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
 import ilenreste.unpeu.recettesback.exceptions.RetryableException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.properties.CorsProperties;
-import ilenreste.unpeu.recettesback.services.media.MediaService;
 import ilenreste.unpeu.recettesback.support.TestImages;
+import org.apache.coyote.AbstractProtocol;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -13,6 +14,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.boot.tomcat.TomcatWebServer;
+import org.springframework.boot.web.server.WebServer;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
+import org.springframework.context.ApplicationContext;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -69,9 +74,9 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
     private static final long EIGHT_MIB = 8L * 1024 * 1024;
 
     @Autowired
-    private MediaService mediaService;
-    @Autowired
     private CorsProperties corsProperties;
+    @Autowired
+    private ApplicationContext applicationContext;
 
     // ------------------------------------------------------------------------------------------------- helpers
 
@@ -252,6 +257,63 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
     }
 
     /**
+     * The other way a body stops arriving: the client does not hang up, it just goes quiet (a phone that lost its signal
+     * halfway, a tab that was suspended) until the server's own read timeout gives up on it. Real HTTP, real timeout: the
+     * server's connection timeout is lowered for the duration of the test, on the running server and for the connection
+     * this test opens, and put back (no application context of its own, which would be a connection pool of its own).
+     * <p>
+     * What it answers is the <strong>container's</strong> {@code 408 Request Timeout}, with Spring Boot's JSON error body
+     * rather than a problem: Tomcat has already decided the request is over when the exception reaches the handler, so
+     * the status is its own and nobody reads it, the client having gone. What matters is that the handler still recognises
+     * it as the client's doing and logs one {@code info} line, not an {@code ERROR} with a stack trace, and that nothing
+     * is stored, counted or decoded. (The document used to say {@code 400}: it was never checked.)
+     */
+    @Test
+    void aClientThatGoesQuietMidUpload_untilTheServersReadTimesOut_is408_isLoggedAsAHangUp_andIsNotAnError(
+            CapturedOutput output)
+            throws Exception {
+        String id = listWithCover(ownerToken);
+        Snapshot before = snapshot(id);
+        clearInvocations(rateLimiter, reencoder);
+        byte[] body = multipartBody(TestImages.jpeg(1600, 1200));
+        AbstractProtocol<?> protocol = tomcatProtocol();
+        int configured = protocol.getConnectionTimeout();
+        String answer;
+
+        protocol.setConnectionTimeout(1_000);
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout((int) Duration.ofSeconds(20).toMillis());
+            OutputStream out = socket.getOutputStream();
+            out.write(requestHead(id, body.length));
+            out.write(body, 0, body.length / 2);
+            out.flush();
+            // Nothing more is sent: the server waits for its read timeout and then answers.
+            answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+        } finally {
+            protocol.setConnectionTimeout(configured);
+        }
+
+        assertThat(answer).as("the container's own answer to a client that went quiet").startsWith("HTTP/1.1 408");
+        String hangUpLine = "The client hung up before it had sent the whole body of PUT " + coverPath(id);
+        assertThat(Arrays.stream(output.getAll().split("\\R")).filter(line -> line.contains(hangUpLine)).toList())
+                .as("exactly one line says so, at info").singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" INFO ");
+        assertThat(output.getAll()).as("and none of the server's own failure")
+                .doesNotContain("Unhandled exception while serving PUT " + coverPath(id))
+                .doesNotContain("Servlet.service()");
+        assertUnchanged(id, before);
+        verify(rateLimiter, never()).requirePermit(anyString());
+        verify(reencoder, never()).reencode(any(), any());
+        assertThat(decodePermits().availablePermits()).isEqualTo(mediaProperties.maxConcurrentProcessing());
+    }
+
+    /** The running server's HTTP connector, for the one test that has to make its read timeout short. */
+    private AbstractProtocol<?> tomcatProtocol() {
+        WebServer server = ((WebServerApplicationContext) applicationContext).getWebServer();
+        return (AbstractProtocol<?>) ((TomcatWebServer) server).getTomcat().getConnector().getProtocolHandler();
+    }
+
+    /**
      * The member cancels after the last byte left: the server cannot know and does not stop. The photo is attached,
      * the upload is counted once, and the decode permit it held is released. What the front must do is read the list
      * again after any cancel: the progress shown is not a safe signal of which of the two cases it was.
@@ -348,15 +410,15 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         assertUnchanged(id, before);
     }
 
-    @Test
-    void aMissingFilePart_andAPartWithAnotherName_are400AsAProblem() {
-        String id = listWithCover(ownerToken);
-        Snapshot before = snapshot(id);
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-        headers.set(HttpHeaders.AUTHORIZATION, ownerToken);
+    /** A multipart request whose {@code file} is plain text, not a file part. */
+    private ResponseEntity<String> uploadATextFieldNamedFile(String listId) {
         MultiValueMap<String, Object> notAFile = new LinkedMultiValueMap<>();
         notAFile.add("file", "just text, not a file part");
+        return uploadParts(listId, notAFile);
+    }
+
+    /** A multipart request with a real file part, under the wrong name. */
+    private ResponseEntity<String> uploadAFileNamedPhoto(String listId) {
         MultiValueMap<String, Object> otherName = new LinkedMultiValueMap<>();
         otherName.add("photo", new ByteArrayResource(TestImages.jpeg(100, 100)) {
             @Override
@@ -364,14 +426,81 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
                 return "photo.jpg";
             }
         });
+        return uploadParts(listId, otherName);
+    }
 
-        ResponseEntity<String> text = restTemplate.exchange(coverPath(id), HttpMethod.PUT,
-                new HttpEntity<>(notAFile, headers), String.class);
-        ResponseEntity<String> renamed = restTemplate.exchange(coverPath(id), HttpMethod.PUT,
-                new HttpEntity<>(otherName, headers), String.class);
+    private ResponseEntity<String> uploadParts(String listId, MultiValueMap<String, Object> parts) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.set(HttpHeaders.AUTHORIZATION, ownerToken);
+        return restTemplate.exchange(coverPath(listId), HttpMethod.PUT, new HttpEntity<>(parts, headers),
+                String.class);
+    }
 
-        assertAProblem(text, HttpStatus.BAD_REQUEST);
-        assertAProblem(renamed, HttpStatus.BAD_REQUEST);
+    @Test
+    void aMissingFilePart_andAPartWithAnotherName_are400AsAProblem() {
+        String id = listWithCover(ownerToken);
+        Snapshot before = snapshot(id);
+
+        assertAProblem(uploadATextFieldNamedFile(id), HttpStatus.BAD_REQUEST);
+        assertAProblem(uploadAFileNamedPhoto(id), HttpStatus.BAD_REQUEST);
+        assertUnchanged(id, before);
+    }
+
+    // ---------------------------------------------------------------------- the order the gates really have
+
+    /**
+     * The shape of the request is judged while the arguments are bound, before the controller's body runs, so it is
+     * judged <strong>before</strong> the list: on a list that is not the caller's, a request that is not multipart is a
+     * {@code 415} and one with no {@code file} part is a {@code 400}, and only a well-formed request reaches the
+     * {@code 404}. It reveals nothing about the list: it is about the caller's own request. The file is judged after
+     * the list, and the rate limit is not asked anything until then.
+     */
+    @Test
+    void theShapeOfTheRequestIsJudgedBeforeTheList_andTheFileAfterIt() {
+        String someoneElses = createList(unique("Pas la mienne"), strangerToken);
+        clearInvocations(rateLimiter, reencoder);
+
+        assertAProblem(restTemplate.exchange(coverPath(someoneElses), HttpMethod.PUT,
+                body("{\"file\":\"x\"}", ownerToken), String.class), HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+        assertAProblem(uploadATextFieldNamedFile(someoneElses), HttpStatus.BAD_REQUEST);
+        assertAProblem(uploadAFileNamedPhoto(someoneElses), HttpStatus.BAD_REQUEST);
+
+        assertAProblem(uploadJpeg(someoneElses, new HttpHeaders()), HttpStatus.NOT_FOUND);
+        assertAProblem(upload(someoneElses, "GIF89a\u0001\0\u0001\0\0\0\0;".getBytes(StandardCharsets.ISO_8859_1),
+                "photo.jpg", MediaType.IMAGE_JPEG, new HttpHeaders()), HttpStatus.NOT_FOUND);
+        verify(rateLimiter, never()).requirePermit(anyString());
+        verify(reencoder, never()).reencode(any(), any());
+    }
+
+    /**
+     * A file that is not an image is judged from its first bytes, before the decode pool; a picture with too many
+     * pixels is judged by the decoder, which runs under the pool's permit. With the pool full the first is a
+     * {@code 400} at once and the second a {@code 503}, which is what {@code POST /media} does as well.
+     */
+    @Test
+    void aSaturatedDecodePool_answers503BeforeThe400OfAPictureWithTooManyPixels_butAfterThatOfAFileThatIsNoImage() {
+        String id = listWithCover(ownerToken);
+        Snapshot before = snapshot(id);
+        Semaphore permits = decodePermits();
+        int held = permits.drainPermits();
+
+        ResponseEntity<String> noImage;
+        ResponseEntity<String> tooManyPixels;
+        try {
+            noImage = upload(id, "<svg xmlns=\"http://www.w3.org/2000/svg\"/>".getBytes(StandardCharsets.UTF_8),
+                    "photo.jpg", MediaType.IMAGE_JPEG, new HttpHeaders());
+            tooManyPixels = upload(id, TestImages.png(8001, 10, false), "wide.png", MediaType.IMAGE_PNG,
+                    new HttpHeaders());
+        } finally {
+            permits.release(held);
+        }
+
+        assertAProblem(noImage, HttpStatus.BAD_REQUEST);
+        assertAProblem(tooManyPixels, HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(upload(id, TestImages.png(8001, 10, false), "wide.png", MediaType.IMAGE_PNG, new HttpHeaders())
+                .getStatusCode()).as("with the pool free again, the same picture is the 400 it always was")
+                .isEqualTo(HttpStatus.BAD_REQUEST);
         assertUnchanged(id, before);
     }
 

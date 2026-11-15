@@ -23,6 +23,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -39,6 +41,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureTestRestTemplate
 class RecipesIntegrationTest {
+
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -311,6 +315,34 @@ class RecipesIntegrationTest {
     /** Adapts the shared {@code idOf(String)} to this suite, which asserts on whole responses. */
     private String idOf(ResponseEntity<String> response) {
         return ilenreste.unpeu.recettesback.support.HttpTestSupport.idOf(response.getBody());
+    }
+
+    /**
+     * What the lists' suite asserts for a list, for the entity every other audited row is stamped like: the answer of a
+     * write and the next read spell {@code createdAt} and {@code updatedAt} the same. The answer used to carry the instant
+     * the server had just set, to the nanosecond, and the read the microseconds PostgreSQL keeps.
+     */
+    @Test
+    void aWritesAnswerAndTheNextRead_spellCreatedAtAndUpdatedAtIdentically() throws InterruptedException {
+        ResponseEntity<String> created = post("/recipes", minimalRecipeJson(unique("Tarte")), authorToken,
+                HttpStatus.CREATED);
+        String id = idOf(created);
+        createdRecipeIds.add(id);
+        assertSameTimestamps("POST /recipes", created, restTemplate.getForEntity("/recipes/" + id, String.class));
+
+        Thread.sleep(10);
+        ResponseEntity<String> updated = put("/recipes/" + id, "{\"title\": \"Un autre titre\"}", authorToken);
+        assertThat(updated.getStatusCode()).as(updated.getBody()).isEqualTo(HttpStatus.OK);
+        assertSameTimestamps("PUT /recipes/{id}", updated, restTemplate.getForEntity("/recipes/" + id, String.class));
+    }
+
+    private static void assertSameTimestamps(String route, ResponseEntity<String> answer, ResponseEntity<String> read) {
+        JsonNode written = JSON.readTree(answer.getBody());
+        JsonNode stored = JSON.readTree(read.getBody());
+        assertThat(written.path("createdAt").asString()).as("%s: createdAt", route).isNotBlank()
+                .isEqualTo(stored.path("createdAt").asString());
+        assertThat(written.path("updatedAt").asString()).as("%s: updatedAt", route).isNotBlank()
+                .isEqualTo(stored.path("updatedAt").asString());
     }
 
     @Test

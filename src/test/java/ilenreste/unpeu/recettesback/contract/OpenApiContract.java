@@ -15,7 +15,7 @@ import java.util.TreeSet;
  * The committed {@code openapi.yaml}, read from the classpath exactly as
  * {@code OpenApiConfig} reads it, and the list of operations it declares.
  */
-final class OpenApiContract {
+public final class OpenApiContract {
 
     private static final Set<String> HTTP_METHODS = Set.of("get", "put", "post", "delete", "patch", "head", "options");
 
@@ -40,7 +40,8 @@ final class OpenApiContract {
         }
     }
 
-    static JsonNode load() {
+    /** The whole contract; public so that a test of the wire format can read what the YAML promises. */
+    public static JsonNode load() {
         YamlMapFactoryBean yaml = new YamlMapFactoryBean();
         yaml.setResources(new ClassPathResource("openapi/openapi.yaml"));
         Map<String, Object> contract = yaml.getObject();

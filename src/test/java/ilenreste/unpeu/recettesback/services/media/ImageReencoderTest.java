@@ -245,7 +245,9 @@ class ImageReencoderTest {
 
         assertThatThrownBy(() -> reencoder.reencode(cut, ImageFormat.JPEG))
                 .isInstanceOf(InvalidInputException.class)
-                .hasMessageContaining("truncated");
+                .hasMessageContaining("incomplete or unreadable")
+                .hasMessageNotContaining("again")
+                .hasMessageNotContaining("Try");
     }
 
     @Test
@@ -255,7 +257,9 @@ class ImageReencoderTest {
 
         assertThatThrownBy(() -> reencoder.reencode(withoutEnd, ImageFormat.JPEG))
                 .isInstanceOf(InvalidInputException.class)
-                .hasMessageContaining("truncated");
+                .hasMessageContaining("incomplete or unreadable")
+                .hasMessageNotContaining("again")
+                .hasMessageNotContaining("Try");
     }
 
     /**

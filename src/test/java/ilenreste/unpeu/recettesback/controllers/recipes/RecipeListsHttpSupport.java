@@ -3,6 +3,8 @@ package ilenreste.unpeu.recettesback.controllers.recipes;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeCoverPictureEntity;
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.services.media.ImageReencoder;
+import ilenreste.unpeu.recettesback.services.media.MediaService;
+import ilenreste.unpeu.recettesback.services.media.MediaStorageService;
 import ilenreste.unpeu.recettesback.services.media.UploadRateLimiter;
 import ilenreste.unpeu.recettesback.support.TestImages;
 import org.springframework.core.io.ByteArrayResource;
@@ -36,6 +38,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -111,6 +114,23 @@ abstract class RecipeListsHttpSupport {
     protected UploadRateLimiter rateLimiter;
     @MockitoSpyBean
     protected ImageReencoder reencoder;
+    /**
+     * Spied, here, for the same reason: the tests of the outcome of a replace make the storage throw after the commit,
+     * and make the transaction of the attach fail before it begins and after it commits, which a real database cannot
+     * be asked to do on cue.
+     */
+    @MockitoSpyBean
+    protected MediaStorageService storageService;
+    @MockitoSpyBean
+    protected TransactionTemplate transactionTemplate;
+    /**
+     * Spied, here, for the concurrency tests: {@code persist} and {@code deleteAfterCommit} are two steps of a write that
+     * run <em>under the list's row lock</em>, and are where a test parks the first write to prove that the second one
+     * waits for it. A class, unlike the repositories above, which are interfaces behind a proxy and cannot call their real
+     * method from an answer.
+     */
+    @MockitoSpyBean
+    protected MediaService mediaService;
     @Autowired
     protected MediaProperties mediaProperties;
     @Autowired
@@ -234,7 +254,12 @@ abstract class RecipeListsHttpSupport {
 
     /** {@code PUT /lists/{id}/cover} with a small JPEG. */
     protected ResponseEntity<String> putCover(String listId, String token) {
-        return sendFile(HttpMethod.PUT, "/lists/" + listId + "/cover", TestImages.jpeg(300, 200), token);
+        return putCover(listId, token, TestImages.jpeg(300, 200));
+    }
+
+    /** {@code PUT /lists/{id}/cover} with the given image, for a test that must tell two photos apart. */
+    protected ResponseEntity<String> putCover(String listId, String token, byte[] image) {
+        return sendFile(HttpMethod.PUT, coverPath(listId), image, token);
     }
 
     protected static String coverPath(String listId) {

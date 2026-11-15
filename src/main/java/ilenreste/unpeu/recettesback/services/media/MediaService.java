@@ -55,7 +55,9 @@ import java.util.stream.Collectors;
  * decision. {@link #upload} ({@code POST /media}) then inserts a public row, measuring every column from the
  * artefact of the steps above; a list's own photo is attached in the transaction of its list, so that its row is
  * born attached and never exists as an ordinary, publicly readable image (see {@code docs/recipe-list-cover.md}).
- * Whoever cannot finish must {@link #discard} the files, since no transaction covers the filesystem.
+ * Whoever cannot finish must {@link #discard} the files, since no transaction covers the filesystem; a caller whose
+ * transaction attaches them registers {@link #discardIfRolledBack} instead, so that the files go only if the
+ * transaction does.
  * <p>
  * The two file writes share one {@code try}: if either fails, both files are deleted, so the claim above — a
  * failure at any step stores nothing — holds for the thumbnail write as well as for the insert.
@@ -190,18 +192,45 @@ public class MediaService {
 
     /**
      * Deletes the files of an {@link #intake} whose row will never exist. Best effort, like every delete of the
-     * storage: a file that cannot be deleted is logged by {@link MediaStorageService#delete} with its key.
+     * storage: a file that cannot be deleted is logged, and never stops the other from being tried or fails the
+     * caller, who is already unwinding something.
      */
     public void discard(StoredImage image) {
-        storageService.delete(image.storageKey());
-        storageService.delete(image.thumbnailStorageKey());
+        deleteQuietly(image.storageKey(), "an upload that was never attached");
+        deleteQuietly(image.thumbnailStorageKey(), "an upload that was never attached");
+    }
+
+    /**
+     * Deletes the files of an {@link #intake} <strong>only if the surrounding transaction ends rolled back</strong>:
+     * the row that would have referenced them was never committed, so nothing can. A commit, and a commit whose outcome
+     * is unknown, keep them, because the row may well be there and a deleted file under a committed row is a photo that
+     * answers {@code 404} for ever, where a stray pair of files is only disk.
+     * <p>
+     * For the caller whose transaction attaches the files: it registers this first thing in the transaction, so that the
+     * decision belongs to how the transaction <em>ended</em> and not to which exception happened to reach a
+     * {@code catch}.
+     *
+     * @throws IllegalStateException if no transaction is active, which is a bug in the caller
+     */
+    public void discardIfRolledBack(StoredImage image) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status == STATUS_ROLLED_BACK) {
+                    log.warn("The transaction rolled back: deleting the files {} and {} written for it",
+                            image.storageKey(), image.thumbnailStorageKey());
+                    discard(image);
+                }
+            }
+        });
     }
 
     /**
      * Deletes the row now, and both files <strong>once the surrounding transaction has committed</strong>, so that a
      * rollback never leaves a row pointing at a deleted file. A file that cannot be deleted is logged by
-     * {@link MediaStorageService#delete} with its key and does not fail the request: there is no second log line and
-     * no second delete path.
+     * {@link MediaStorageService#delete} with its key. A storage that <em>throws</em> instead is caught and logged here,
+     * with the media id: the hook runs after the commit, so nothing it does may fail a request that has committed, and a
+     * failure on the first file must not keep the second from being tried.
      * <p>
      * Only for a row nothing else references, which is true of a list's own photo and of nothing else: nothing accepts
      * its id as a recipe's picture or an ingredient's icon.
@@ -211,16 +240,29 @@ public class MediaService {
     public void deleteAfterCommit(MediaEntity media) {
         // The keys are read first, while the row is still there; and the hook is registered before anything is
         // deleted, so that a caller with no transaction fails here and deletes nothing.
+        String mediaId = "media " + media.getId();
         String storageKey = media.getStorageKey();
         String thumbnailKey = media.getThumbnailStorageKey();
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                storageService.delete(storageKey);
-                storageService.delete(thumbnailKey);
+                deleteQuietly(storageKey, mediaId);
+                deleteQuietly(thumbnailKey, mediaId);
             }
         });
         mediaRepository.delete(media);
+    }
+
+    /**
+     * One file, and never an exception: for the callers whose decision is already taken (a commit that happened, a
+     * rollback that is being undone). One line, no stack trace: the key and the owner are what someone cleaning up needs.
+     */
+    private void deleteQuietly(String storageKey, String owner) {
+        try {
+            storageService.delete(storageKey);
+        } catch (RuntimeException failure) {
+            log.error("Could not delete the file {} of {}: {}", storageKey, owner, failure.toString());
+        }
     }
 
     /**

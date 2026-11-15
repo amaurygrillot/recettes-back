@@ -115,6 +115,7 @@ The upgrade was a precondition: the generator's Boot 4 / Jackson 3 support (`use
 | JaCoCo | 0.8.15 | already the latest |
 | maven-antrun-plugin | 3.2.0 | only runs the `strip-generated-media-type-conditions` step |
 | swagger-annotations-jakarta | 2.2.55 | pinned: Spring AI's model module drags in 2.2.38, which Maven would otherwise pick over the 2.2.55 springdoc's swagger-core is built against |
+| ArchUnit (`com.tngtech.archunit:archunit`) | 1.5.1 | **test scope only**, the latest stable. One rule, `MediaPrivacyArchitectureTest`: no class but `MediaService` and `RecipeListCoverService` may read a `media` row by id without the public filter ([recipe-list-cover.md](recipe-list-cover.md#the-rule-is-a-test-not-only-a-javadoc)). Not part of the Boot 4.1 upgrade; it is listed here because this is where the build's versions are kept |
 
 **Jackson.** The application was already entirely on Jackson 3 (`tools.jackson.*`); the only `com.fasterxml.jackson`
 imports are `@JsonProperty` and `@JsonIgnore`, and `jackson-annotations` keeps that package name in Jackson 3, so
@@ -131,7 +132,13 @@ is still built on it and uses it only to write the OpenAPI document. No code of 
    `x-codegen-request-body-name: request`, or the generated parameter is named after its class.
 2. **A new request or response type?** Write the record in `models/<domain>/...` as before, add its schema to
    `components/schemas` with **the same name as the record**, and add one `<schemaMapping>` line for it in `pom.xml`. A
-   schema an operation references and the pom does not map fails the build, which is the reminder.
+   schema an operation references and the pom does not map fails the build, which is the reminder. **A response schema
+   says what it always sends**: list those fields under `required`, and mark the same record components
+   `@Schema(requiredMode = Schema.RequiredMode.REQUIRED)` (`OpenApiContractTest` compares the two). Without it every
+   property is optional, and so is every field of the types a client generates. A field that is always sent but can be
+   `null` is both `required` and `nullable: true`, and the server sends the key with a `null`, never leaves it out. Only
+   `RecipeListResponse` does this so far; the other responses are left as they were until someone generates a client
+   from them.
 3. **Build** (`./mvnw compile`). The `*Api` interface is regenerated; the controller that does not yet implement the new
    method no longer compiles.
 4. **Implement the generated method** in the controller (`@Override`, no routing annotations: they come from the

@@ -15,10 +15,14 @@ import ilenreste.unpeu.recettesback.repositories.media.MediaRepository;
 import ilenreste.unpeu.recettesback.services.users.CurrentUserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -30,12 +34,15 @@ import java.util.HexFormat;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -356,6 +363,75 @@ class MediaServiceTest {
         }
     }
 
+    /**
+     * The hook runs after the commit, so a storage that throws must not turn a request that has committed into a
+     * failure, and the first file that cannot be removed must not keep the second from being tried.
+     */
+    @Test
+    void deleteAfterCommitSwallowsAStorageThatThrows_andStillTriesTheOtherFile() {
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            doThrow(new IllegalStateException("the object store is down")).when(storageService)
+                    .delete("ab/cd/file.jpg");
+            mediaService.deleteAfterCommit(storedMedia());
+
+            assertThatCode(() -> TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(TransactionSynchronization::afterCommit)).doesNotThrowAnyException();
+
+            verify(storageService).delete("ab/cd/file.jpg");
+            verify(storageService).delete("ab/cd/file_thumb.jpg");
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    /**
+     * The files an intake wrote are the new photo's, and are deleted <strong>only</strong> if the transaction that was to
+     * attach them is known to have rolled back. A commit, and a commit whose outcome is unknown, keep them: the row may
+     * well be there, and a stray pair of files costs disk where a deleted file under a committed row costs the photo.
+     */
+    @ParameterizedTest(name = "{0}: files deleted = {2}")
+    @MethodSource("completionStatuses")
+    void discardIfRolledBackDeletesTheNewFilesOnlyOnARollback(String name, int status, boolean deleted) {
+        StoredImage image = new StoredImage("ab/cd/new.jpg", "ab/cd/new_thumb.jpg", ImageFormat.JPEG, 10, 10, 1, "sum");
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            mediaService.discardIfRolledBack(image);
+            verify(storageService, never()).delete(anyString());
+
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(synchronization -> synchronization.afterCompletion(status));
+
+            if (deleted) {
+                verify(storageService).delete("ab/cd/new.jpg");
+                verify(storageService).delete("ab/cd/new_thumb.jpg");
+            } else {
+                verify(storageService, never()).delete(anyString());
+            }
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void discardIfRolledBackWithNoTransactionFailsLoudly_andDeletesNothing() {
+        StoredImage image = new StoredImage("ab/cd/new.jpg", "ab/cd/new_thumb.jpg", ImageFormat.JPEG, 10, 10, 1, "sum");
+
+        assertThatThrownBy(() -> mediaService.discardIfRolledBack(image)).isInstanceOf(IllegalStateException.class);
+
+        verify(storageService, never()).delete(anyString());
+    }
+
+    @Test
+    void discardKeepsGoingWhenTheFirstFileCannotBeDeleted() {
+        StoredImage image = new StoredImage("ab/cd/new.jpg", "ab/cd/new_thumb.jpg", ImageFormat.JPEG, 10, 10, 1, "sum");
+        doThrow(new IllegalStateException("the object store is down")).when(storageService).delete("ab/cd/new.jpg");
+
+        assertThatCode(() -> mediaService.discard(image)).doesNotThrowAnyException();
+
+        verify(storageService).delete("ab/cd/new_thumb.jpg");
+    }
+
     @Test
     void deleteAfterCommitWithNoTransactionFailsLoudly_andDeletesNothing() {
         assertThatThrownBy(() -> mediaService.deleteAfterCommit(storedMedia()))
@@ -373,6 +449,13 @@ class MediaServiceTest {
 
         assertThat(opened.entityTag()).endsWith("-thumbnail\"");
         verifyNoInteractions(mediaRepository);
+    }
+
+    private static Stream<Arguments> completionStatuses() {
+        return Stream.of(
+                Arguments.of("committed", TransactionSynchronization.STATUS_COMMITTED, false),
+                Arguments.of("rolled back", TransactionSynchronization.STATUS_ROLLED_BACK, true),
+                Arguments.of("unknown", TransactionSynchronization.STATUS_UNKNOWN, false));
     }
 
     private MediaEntity storedMedia() {
