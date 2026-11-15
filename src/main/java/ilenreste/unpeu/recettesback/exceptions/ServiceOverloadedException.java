@@ -12,17 +12,12 @@ import java.time.Duration;
  * simultaneous uploads into a queue rather than an {@code OutOfMemoryError} that
  * takes the whole application down.
  */
-public class ServiceOverloadedException extends RuntimeException {
+public class ServiceOverloadedException extends RetryableException {
 
-    private final Duration retryAfter;
-
+    /**
+     * @param retryAfter how long the client should wait, rendered into {@code Retry-After}
+     */
     public ServiceOverloadedException(String message, Duration retryAfter) {
-        super(message);
-        this.retryAfter = retryAfter;
-    }
-
-    /** How long the client should wait, rendered into {@code Retry-After}. */
-    public Duration retryAfter() {
-        return retryAfter;
+        super(message, retryAfter);
     }
 }
