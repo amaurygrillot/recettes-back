@@ -4,8 +4,8 @@ package ilenreste.unpeu.recettesback.services.media;
  * What the upload pipeline leaves on disk: two files written under generated keys, and everything a {@code media}
  * row will record about them. It is <strong>not</strong> a row, and nothing refers to it yet: whoever called
  * {@link MediaService#intake} decides what the files become — {@code POST /media} makes a public row, a list's
- * photo is attached in the transaction of its list — and must {@link MediaService#discard discard} the files if it
- * cannot.
+ * photo is attached in the transaction of its list — and does it through {@link MediaService#attachInTransaction},
+ * which also decides whether the files are kept or deleted if the attach does not complete.
  * <p>
  * Every field describes the file that was stored, never the file that was uploaded; see {@code MediaEntity}.
  *

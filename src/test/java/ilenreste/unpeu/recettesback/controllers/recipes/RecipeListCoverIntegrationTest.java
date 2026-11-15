@@ -3,6 +3,7 @@ package ilenreste.unpeu.recettesback.controllers.recipes;
 import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.support.TestImages;
+import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -16,6 +17,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -32,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -729,13 +732,16 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
     }
 
     /**
-     * The commit went through and its acknowledgement was lost (the connection dropped, say): the caller sees an
-     * exception while the database holds the new row. Deleting the new files here would leave a photo that answers
-     * {@code 404} for ever, so they are kept. The old photo, whose deletion is scheduled after the commit that did
-     * happen, is gone.
+     * The transaction committed and <em>then</em> the caller saw an exception (here, the {@code TransactionTemplate}
+     * throws once the real {@code execute} has returned): the database holds the new row. Deleting the new files here
+     * would leave a photo that answers {@code 404} for ever, so they are kept. The old photo, whose deletion is
+     * scheduled after the commit that did happen, is gone.
+     * <p>
+     * This is an exception after a commit that <strong>completed</strong>, which is all it proves. A commit that fails
+     * at the database is the next test.
      */
     @Test
-    void aCommitWhoseOutcomeIsLost_keepsTheNewFiles_becauseTheRowMayWellBeThere() {
+    void anExceptionThrownAfterACommitThatCompleted_keepsTheNewFiles_becauseTheRowIsThere() {
         String id = listWithCover(ownerToken);
         String oldVersion = versionOf(id);
         Map<String, Object> old = mediaRow(oldVersion).orElseThrow();
@@ -761,6 +767,92 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
         expected.removeAll(Set.of((String) old.get("storage_key"), (String) old.get("thumbnail_storage_key")));
         expected.addAll(Set.of((String) current.get("storage_key"), (String) current.get("thumbnail_storage_key")));
         assertThat(storedFiles()).as("the old files went, the new ones stayed").isEqualTo(expected);
+    }
+
+    /**
+     * The commit itself fails at the database, after the work has returned: the PostgreSQL backend of the transaction is
+     * terminated just before the {@code COMMIT} is sent, which is what a connection that drops at that instant looks like
+     * from this side. Spring reports such a transaction as <em>rolled back</em> (it asserts it here, so that this test
+     * cannot pass for being a different case), although with a real lost acknowledgement the server may have committed:
+     * from the client the two cannot be told apart. Deleting the new files on that report is how a committed photo ends
+     * up answering {@code 404}, so they are kept.
+     * <p>
+     * Here the server did <em>not</em> commit (the backend is gone before it reads the {@code COMMIT}), so the old photo
+     * is still the list's and the two new files are strays, which is the price of the rule and is cleaned up below.
+     */
+    @Test
+    void aCommitThatFailsAtTheDatabaseAfterTheWorkReturned_keepsTheNewFiles_eventhoughSpringCallsItARollback(
+            CapturedOutput output) throws Exception {
+        String id = listWithCover(ownerToken);
+        String oldVersion = versionOf(id);
+        Set<String> before = storedFiles();
+        AtomicInteger reported = new AtomicInteger(-1);
+        // The last step of the work that is spied runs inside the transaction: it registers what cuts the connection.
+        doAnswer(deletion -> {
+            Object real = deletion.callRealMethod();
+            int backend = backendOfTheTransaction();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void beforeCompletion() {
+                    terminateAndAwait(backend);
+                }
+
+                @Override
+                public void afterCompletion(int status) {
+                    reported.set(status);
+                }
+            });
+            return real;
+        }).when(mediaService).deleteAfterCommit(any());
+        Set<String> strays = Set.of();
+
+        try {
+            ResponseEntity<String> response = putCover(id, ownerToken);
+            reset(mediaService);
+
+            assertThat(response.getStatusCode().is5xxServerError()).as(response.getBody()).isTrue();
+            assertThat(reported.get()).as("what Spring reports for a commit that failed at the database")
+                    .isEqualTo(TransactionSynchronization.STATUS_ROLLED_BACK);
+            assertThat(versionOf(id)).as("the server never committed: still the old photo").isEqualTo(oldVersion);
+            strays = new HashSet<>(storedFiles());
+            strays.removeAll(before);
+            assertThat(strays).as("the two new files were kept").hasSize(2);
+            assertThat(output.getAll()).as("and a warning says whose they are, by list and by key")
+                    .contains("recipe list " + id).contains(strays.iterator().next());
+        } finally {
+            reset(mediaService);
+            for (String stray : strays) {
+                Files.deleteIfExists(storageRoot().resolve(stray));
+            }
+        }
+    }
+
+    /** The PostgreSQL backend that runs the transaction of the request, read from inside it and without flushing. */
+    private int backendOfTheTransaction() {
+        return entityManager.unwrap(Session.class).doReturningWork(connection -> {
+            try (var statement = connection.createStatement();
+                 var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
+                rows.next();
+                return rows.getInt(1);
+            }
+        });
+    }
+
+    /** Ends that backend from another connection, and does not return until PostgreSQL says it is gone. */
+    private void terminateAndAwait(int backend) {
+        jdbc.queryForObject("SELECT pg_terminate_backend(?)", Boolean.class, backend);
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE pid = ?", Integer.class, backend) > 0) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("Backend " + backend + " was still there 10 s after it was terminated");
+            }
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting for backend " + backend + " to go", interrupted);
+            }
+        }
     }
 
     // The overlapping writes are in RecipeListCoverConcurrencyIntegrationTest, which holds one write inside the row lock
