@@ -118,6 +118,57 @@ class UploadRateLimiterTest {
                 .isEqualTo(Duration.ofMinutes(6));
     }
 
+    /**
+     * The longest wait a refusal can carry is the whole window: the allowance was spent in one instant, so the oldest
+     * upload leaves the window only when the window has passed. With the default 10 minutes that is 600 s, the upper
+     * bound the front can rely on for a countdown.
+     */
+    @Test
+    void theLongestWaitIsTheWholeWindow_whenTheAllowanceWasSpentInOneInstant() {
+        for (int upload = 0; upload < LIMIT; upload++) {
+            limiter.requirePermit("user-1");
+        }
+
+        assertThatThrownBy(() -> limiter.requirePermit("user-1"))
+                .isInstanceOfSatisfying(RateLimitExceededException.class, refusal -> {
+                    assertThat(refusal.retryAfter()).isEqualTo(WINDOW);
+                    assertThat(refusal.retryAfterSeconds()).isEqualTo(600);
+                });
+    }
+
+    /**
+     * The sentence in {@code detail} says the same number as the {@code Retry-After} header, rounded the same way:
+     * 599.6 s is 600, never 599, which a client obeying the text would come back too early for.
+     */
+    @Test
+    void aFractionalWaitIsRoundedUp_inTheHeaderAndInTheSentence() {
+        for (int upload = 0; upload < LIMIT; upload++) {
+            limiter.requirePermit("user-1");
+        }
+        clock.advanceBy(Duration.ofMillis(400));
+
+        assertThatThrownBy(() -> limiter.requirePermit("user-1"))
+                .isInstanceOfSatisfying(RateLimitExceededException.class, refusal -> {
+                    assertThat(refusal.retryAfter()).isEqualTo(Duration.ofMillis(599_600));
+                    assertThat(refusal.retryAfterSeconds()).isEqualTo(600);
+                    assertThat(refusal.getMessage()).contains("Try again in 600 seconds");
+                });
+    }
+
+    @Test
+    void theShortestWaitIsOneSecond_whenTheOldestUploadIsAboutToLeaveTheWindow() {
+        for (int upload = 0; upload < LIMIT; upload++) {
+            limiter.requirePermit("user-1");
+        }
+        clock.advanceBy(WINDOW.minusMillis(50));
+
+        assertThatThrownBy(() -> limiter.requirePermit("user-1"))
+                .isInstanceOfSatisfying(RateLimitExceededException.class, refusal -> {
+                    assertThat(refusal.retryAfter()).isEqualTo(Duration.ofMillis(50));
+                    assertThat(refusal.retryAfterSeconds()).isEqualTo(1);
+                });
+    }
+
     @Test
     void doesNotCountARefusedUpload_soRetryingDoesNotPushTheWindowOut() {
         for (int upload = 0; upload < LIMIT; upload++) {

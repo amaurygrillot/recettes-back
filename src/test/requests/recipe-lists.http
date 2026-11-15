@@ -973,6 +973,29 @@ Content-Type: image/jpeg
     });
 %}
 
+### 50b. Upload a JPEG that was cut short -> 400 Bad Request
+### A placeholder next to this file: take any photo and cut its last third off (a transfer that dropped). The decoder
+### would have filled the rest of the picture grey and stored it; it is refused instead, with a detail that says so.
+### Closing the upload form while the file is still on its way is not an answer at all: the request is abandoned, nothing
+### is stored and nothing is counted (docs/recipe-list-cover.md, "What the upload form relies on").
+PUT {{baseUrl}}/lists/{{photoListId}}/cover
+Authorization: Bearer {{memberToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="cut-short.jpg"
+Content-Type: image/jpeg
+
+< ./cut-short.jpg
+--WebAppBoundary--
+
+> {%
+    client.test("Returns 400 saying the file is truncated", function () {
+        client.assert(response.status === 400, "Expected 400 but got " + response.status);
+        client.assert(response.body.detail.indexOf("truncated") >= 0, "Expected the truncation hint");
+    });
+%}
+
 ### 51. Upload a HEIC photo -> 400 Bad Request, whose detail explains it
 ### An iPhone shoots HEIC by default. The front has to explain this, or convert to JPEG before sending.
 PUT {{baseUrl}}/lists/{{photoListId}}/cover
@@ -994,7 +1017,9 @@ Content-Type: image/heic
 %}
 
 ### 52. Upload a file over 8 MB -> 413 Content Too Large
-### Answered by the servlet container before any code runs, so even on somebody else's list.
+### Answered by the servlet container before any code runs, so even on somebody else's list. The cap is on the whole
+### request, multipart framing included: 8 MiB (8 388 608 bytes) exactly is refused, a kilobyte less gets through to the
+### checks of the file itself.
 PUT {{baseUrl}}/lists/{{photoListId}}/cover
 Authorization: Bearer {{memberToken}}
 Content-Type: multipart/form-data; boundary=WebAppBoundary
@@ -1029,12 +1054,14 @@ Content-Type: application/json
 ### 54. Exhaust this account's upload allowance -> 429 Too Many Requests with Retry-After
 ### Not scripted as one request: the allowance is shared with POST /media (20 per 10 minutes by default, admins
 ### exempt), so run request 44 more than app.media.upload-limit times inside the window - or see media.http request
-### 14, which does it with POST /media. The answer carries Retry-After; a request about somebody else's list is a 404
-### BEFORE the allowance is looked at, so it never costs an upload.
+### 14, which does it with POST /media. The answer carries Retry-After, in WHOLE SECONDS ROUNDED UP, from 1 to 600 with
+### the defaults (the wait until the oldest upload of the window ages out: nearly 600 right after a burst of 20), and
+### the detail says the same number. A request about somebody else's list is a 404 BEFORE the allowance is looked at,
+### so it never costs an upload.
 
 ### 55. Saturate the decode pool -> 503 Service Unavailable with Retry-After
 ### Not scriptable by hand either: it needs more simultaneous uploads than app.media.max-concurrent-processing.
-### Same answer as POST /media (media.http request 13).
+### Same answer as POST /media (media.http request 13). Retry-After is always the processing timeout, 10 seconds by default.
 
 ### 56. Remove the photo -> 200 OK, the updated list with coverVersion null
 ### The photo's row and both files are deleted once this commits, and the tile goes back to the mosaic.

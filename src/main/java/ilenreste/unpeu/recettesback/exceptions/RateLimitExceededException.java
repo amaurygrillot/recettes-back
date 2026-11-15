@@ -17,17 +17,12 @@ import java.time.Duration;
  * Neither is a 500 and neither is a 400: nothing failed and the payload is
  * valid.
  */
-public class RateLimitExceededException extends RuntimeException {
+public class RateLimitExceededException extends RetryableException {
 
-    private final Duration retryAfter;
-
+    /**
+     * @param retryAfter how long until the caller's oldest counted request leaves the window
+     */
     public RateLimitExceededException(String message, Duration retryAfter) {
-        super(message);
-        this.retryAfter = retryAfter;
-    }
-
-    /** How long until the caller's oldest counted request leaves the window. */
-    public Duration retryAfter() {
-        return retryAfter;
+        super(message, retryAfter);
     }
 }

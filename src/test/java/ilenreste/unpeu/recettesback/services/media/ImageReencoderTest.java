@@ -8,12 +8,16 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.MemoryCacheImageInputStream;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -226,6 +230,86 @@ class ImageReencoderTest {
         assertThat(result.format()).isEqualTo(ImageFormat.JPEG);
         assertThat(result.full()[0]).isEqualTo((byte) 0xFF);
         assertThat(result.full()[1]).isEqualTo((byte) 0xD8);
+    }
+
+    /**
+     * The JPEG decoder does not fail on a file that stops early: it returns what it decoded and fills the rest of the
+     * picture grey, so without a check a photo cut short by a lost connection is stored as a half-grey one. The
+     * check is on the decoder's own warning, so this is also what fails the day a JDK words that warning differently.
+     */
+    @ParameterizedTest(name = "cut at {0} %")
+    @CsvSource({"10", "50", "99"})
+    void rejectsAJpegCutShort_insteadOfStoringAHalfGreyPhoto(int percent) {
+        byte[] whole = TestImages.jpeg(800, 600);
+        byte[] cut = Arrays.copyOf(whole, whole.length * percent / 100);
+
+        assertThatThrownBy(() -> reencoder.reencode(cut, ImageFormat.JPEG))
+                .isInstanceOf(InvalidInputException.class)
+                .hasMessageContaining("truncated");
+    }
+
+    @Test
+    void rejectsAJpegThatLacksOnlyItsEndMarker() {
+        byte[] whole = TestImages.jpeg(800, 600);
+        byte[] withoutEnd = Arrays.copyOf(whole, whole.length - 2);
+
+        assertThatThrownBy(() -> reencoder.reencode(withoutEnd, ImageFormat.JPEG))
+                .isInstanceOf(InvalidInputException.class)
+                .hasMessageContaining("truncated");
+    }
+
+    /**
+     * Only truncation is refused. A complete JPEG followed by padding, and one the decoder warns about for another
+     * reason (a stray byte before a marker is routine for real cameras), are still photos.
+     */
+    @Test
+    void stillAcceptsACompleteJpegWithTrailingPadding() {
+        byte[] whole = TestImages.jpeg(800, 600);
+        byte[] padded = Arrays.copyOf(whole, whole.length + 64);
+
+        assertThat(reencoder.reencode(padded, ImageFormat.JPEG).format()).isEqualTo(ImageFormat.JPEG);
+    }
+
+    /**
+     * The other warnings of the decoder are routine for real cameras and must not make a photo unusable: one stray byte
+     * before the end marker makes the decoder warn (« Corrupt JPEG data: 1 extraneous bytes before marker »), and the
+     * file is still accepted. The test first proves that the decoder does warn, so that it cannot pass by never
+     * having exercised the branch.
+     */
+    @Test
+    void stillAcceptsAJpegTheDecoderWarnsAboutForAnotherReason() throws IOException {
+        byte[] whole = TestImages.jpeg(800, 600);
+        // One zero byte in front of the first quantisation table marker (FF DB), where a marker is expected.
+        int marker = 0;
+        while (!(whole[marker] == (byte) 0xFF && whole[marker + 1] == (byte) 0xDB)) {
+            marker++;
+        }
+        byte[] strayByte = new byte[whole.length + 1];
+        System.arraycopy(whole, 0, strayByte, 0, marker);
+        System.arraycopy(whole, marker, strayByte, marker + 1, whole.length - marker);
+        List<String> warnings = new ArrayList<>();
+        try (MemoryCacheImageInputStream input = new MemoryCacheImageInputStream(new ByteArrayInputStream(strayByte))) {
+            ImageReader reader = ImageIO.getImageReaders(input).next();
+            reader.addIIOReadWarningListener((source, warning) -> warnings.add(warning));
+            reader.setInput(input, true, true);
+            reader.read(0);
+            reader.dispose();
+        }
+        assertThat(warnings).as("the decoder does warn about the stray byte").isNotEmpty()
+                .noneMatch(warning -> warning.contains("Missing EOI"));
+
+        assertThat(reencoder.reencode(strayByte, ImageFormat.JPEG).format()).isEqualTo(ImageFormat.JPEG);
+    }
+
+    /** The edge of the per-side cap: 8000 px is fine, 8001 is not (a real image, not a header claim). */
+    @Test
+    void acceptsAnImageAtThePerSideCap_andRejectsOnePixelOverIt() {
+        assertThat(reencoder.reencode(TestImages.png(8000, 10, false), ImageFormat.PNG).width())
+                .isEqualTo(MAX_STORED_EDGE);
+        assertThatThrownBy(() -> reencoder.reencode(TestImages.png(8001, 10, false), ImageFormat.PNG))
+                .isInstanceOf(InvalidInputException.class)
+                .hasMessageContaining("8001x10")
+                .hasMessageContaining("maximum is 8000");
     }
 
     /**

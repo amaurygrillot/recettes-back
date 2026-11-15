@@ -1,6 +1,7 @@
 package ilenreste.unpeu.recettesback.services.media;
 
 import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
+import ilenreste.unpeu.recettesback.exceptions.RetryableException;
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Component;
@@ -118,7 +119,7 @@ public class UploadRateLimiter {
                     "You have uploaded %d files in the last %d minutes, which is the limit. Try again in %d seconds."
                             .formatted(properties.uploadLimit(),
                                     properties.uploadLimitWindow().toMinutes(),
-                                    Math.max(1, retryAfter[0].toSeconds())),
+                                    RetryableException.wholeSeconds(retryAfter[0])),
                     retryAfter[0]);
         }
         log.debug("Upload permitted for user {}", userId);

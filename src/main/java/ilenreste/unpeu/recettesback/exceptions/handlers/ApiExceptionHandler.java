@@ -9,6 +9,7 @@ import ilenreste.unpeu.recettesback.exceptions.RecipeListConflict;
 import ilenreste.unpeu.recettesback.exceptions.RecipeListConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceConflictException;
 import ilenreste.unpeu.recettesback.exceptions.ResourceNotFoundException;
+import ilenreste.unpeu.recettesback.exceptions.RetryableException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.log4j.Log4j2;
@@ -25,6 +26,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.util.DisconnectedClientHelper;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
@@ -32,7 +34,6 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 
 import java.io.UncheckedIOException;
 import java.sql.SQLException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -117,20 +118,29 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * A file sent the wrong way: the request is not {@code multipart/form-data}, so Spring has no part to give the
      * controller — a 415, and not the 500 it fell to when nothing mapped it.
      * <p>
-     * Only that case. A {@link MultipartException} on a request that <em>is</em> multipart is a body that could not be
-     * parsed or a temporary file that could not be written, which can be the server's own failure (a full disk, an
-     * antivirus quarantining the spooled part), so it stays the unexpected failure it was. Its subclass
-     * {@link MaxUploadSizeExceededException} keeps the 413 of the hook above: the handler whose declared type is
-     * closest wins.
+     * A {@link MultipartException} on a request that <em>is</em> multipart is a body that could not be parsed or a
+     * temporary file that could not be written, which can be the server's own failure (a full disk, an antivirus
+     * quarantining the spooled part), so it stays the unexpected failure it was, with one exception: <strong>the
+     * client hanging up</strong> before it had sent the whole body, which is what closing the upload form does. That
+     * is not a failure of the server and is not logged as one (no {@code error}, no stack trace): the request is
+     * simply incomplete, a {@code 400} nobody will read. It is recognised by the framework's own
+     * {@link DisconnectedClientHelper}, which looks through the cause chain for the container's abort exceptions and
+     * for a reset or broken connection, whatever the container. Its subclass {@link MaxUploadSizeExceededException} keeps the
+     * 413 of the hook above: the handler whose declared type is closest wins.
      */
     @ExceptionHandler(MultipartException.class)
     ResponseEntity<ProblemDetail> handleMultipart(MultipartException exception, HttpServletRequest request) {
-        if (StringUtils.startsWithIgnoreCase(request.getContentType(), "multipart/")) {
-            return handleUnexpected(exception, request);
+        if (!StringUtils.startsWithIgnoreCase(request.getContentType(), "multipart/")) {
+            log.debug("Rejecting a file upload that is not multipart/form-data: {}", exception.getMessage());
+            return problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "The file must be sent as multipart/form-data, in a part named 'file'.");
         }
-        log.debug("Rejecting a file upload that is not multipart/form-data: {}", exception.getMessage());
-        return problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
-                "The file must be sent as multipart/form-data, in a part named 'file'.");
+        if (DisconnectedClientHelper.isClientDisconnectedException(exception)) {
+            log.info("The client hung up before it had sent the whole body of {} {}",
+                    request.getMethod(), request.getRequestURI());
+            return problem(HttpStatus.BAD_REQUEST, "The upload was interrupted before it was complete.");
+        }
+        return handleUnexpected(exception, request);
     }
 
     /**
@@ -140,7 +150,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ServiceOverloadedException.class)
     ResponseEntity<ProblemDetail> handleOverloaded(ServiceOverloadedException exception) {
         log.warn("Refusing a request at capacity: {}", exception.getMessage());
-        return retryable(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage(), exception.retryAfter());
+        return retryable(HttpStatus.SERVICE_UNAVAILABLE, exception);
     }
 
     /**
@@ -151,7 +161,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(RateLimitExceededException.class)
     ResponseEntity<ProblemDetail> handleRateLimited(RateLimitExceededException exception) {
         log.warn("Refusing a request over its rate limit: {}", exception.getMessage());
-        return retryable(HttpStatus.TOO_MANY_REQUESTS, exception.getMessage(), exception.retryAfter());
+        return retryable(HttpStatus.TOO_MANY_REQUESTS, exception);
     }
 
     @ExceptionHandler(ResourceConflictException.class)
@@ -304,16 +314,15 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     /**
      * A problem response that also tells the caller when to come back.
      * <p>
-     * {@code Retry-After} is floored at one second: the header is whole seconds,
-     * and a sub-second wait would render as {@code 0}, which a client reads as
-     * "immediately" and turns into a hot retry loop against the thing that just
-     * asked it to slow down.
+     * {@code Retry-After} is whole seconds, rounded <em>up</em> and never below one:
+     * see {@link RetryableException#wholeSeconds}. A client that obeys the header
+     * must not come back early to be refused again, and must never read {@code 0}
+     * as "immediately".
      */
-    private ResponseEntity<ProblemDetail> retryable(HttpStatusCode status, String detail,
-                                                    Duration retryAfter) {
+    private ResponseEntity<ProblemDetail> retryable(HttpStatusCode status, RetryableException exception) {
         return ResponseEntity.status(status)
-                .header(HttpHeaders.RETRY_AFTER, String.valueOf(Math.max(1, retryAfter.toSeconds())))
-                .body(ProblemDetail.forStatusAndDetail(status, detail));
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(exception.retryAfterSeconds()))
+                .body(ProblemDetail.forStatusAndDetail(status, exception.getMessage()));
     }
 
     /**

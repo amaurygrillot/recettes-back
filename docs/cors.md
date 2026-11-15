@@ -33,6 +33,10 @@ above is enough for that:
   authentication, as for every other route.
 - Reading the body as a blob needs no exposed header. `Content-Type` and `Cache-Control` are CORS-safelisted response
   headers anyway.
+- **`Retry-After` is readable**: a `429` or a `503` of the upload route carries it, and it is exposed, so the countdown of
+  the upload form can take its number from the header. `RecipeListCoverUploadIntegrationTest` sends a real `Origin` to the
+  real limiter and the real decode pool and asserts the header, `Access-Control-Allow-Origin` and
+  `Access-Control-Expose-Headers`.
 - **`ETag` and `Content-Disposition` are not exposed**, so the script cannot read them, and it does not need to: the
   browser's HTTP cache revalidates by itself. The front must leave it to do so — it must never set `If-None-Match` (or
   another conditional header) itself, because the browser then treats the request as uncacheable and hands the script the

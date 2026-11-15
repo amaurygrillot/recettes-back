@@ -195,6 +195,10 @@ the list's):
    stored-edge cap is ever kept, so there is no reason to allocate it. Without this the dimension cap in step 3 still
    permits a 40 MP raster *per concurrent upload*, which is the DoS the caps were supposed to prevent.
 
+   **A file that stops early is refused.** The JPEG decoder returns what it decoded and fills the rest grey instead of
+   failing, so the decode step watches for its « Truncated File - Missing EOI marker » warning and answers `400`: see
+   [api-error-handling.md](api-error-handling.md#the-opposite-mistake-a-truncated-jpeg-answered-200).
+
    The downscale halves repeatedly before the final bicubic step. A single large bicubic step aliases badly past
    about 2x, which is very visible at 640 px.
 5. **Write under a generated key.** `<uuid>` plus the extension our encoder produced, sharded as
@@ -230,8 +234,10 @@ sentence are deliberate:
 
 - **429, not 503.** The request is fine and the server is fine; *this caller* has had their share. 503 is the existing
   answer to a saturated decode pool and means something different — a client told "the server is busy" when it is being
-  throttled goes looking in the wrong place. Both carry `Retry-After`, floored at one second, because the header is
-  whole seconds and a client reads `0` as "retry now".
+  throttled goes looking in the wrong place. Both carry `Retry-After`, in whole seconds, **rounded up** and floored at one,
+  because the header is whole seconds, a client reads `0` as "retry now", and a client told `59` for a wait of 59.4 s comes
+  back early. With the defaults a `429` carries 1 to 600 (the whole window right after a burst) and a `503` always 10: see
+  [recipe-list-cover.md](recipe-list-cover.md#1-retry-after-whole-seconds-rounded-up-and-what-values-it-can-carry).
 - **Per account, not per IP.** The endpoint is authenticated, so there is a real identity to count against — and
   `CurrentUserService` returning nothing here is a `403`, not an unlimited anonymous allowance.
 - **A rolling window, not a counter that resets.** A fixed ten-minute window lets a caller spend the whole allowance at

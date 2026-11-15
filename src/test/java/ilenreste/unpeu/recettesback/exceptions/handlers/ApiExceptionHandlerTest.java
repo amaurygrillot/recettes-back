@@ -21,6 +21,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.multipart.MultipartException;
 
+import java.io.EOFException;
+import java.io.IOException;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.List;
@@ -66,6 +68,38 @@ class ApiExceptionHandlerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         assertThat(response.getBody().getDetail()).isEqualTo(ApiExceptionHandler.GENERIC_500_DETAIL);
+    }
+
+    /**
+     * Closing the upload form hangs up on a body that was still arriving. That is the client's doing and not a
+     * failure of the server, so it is a 400 and not the 500 (and the error log with a stack trace) of every other
+     * multipart request that failed.
+     */
+    @Test
+    void aClientThatHungUpMidUpload_is400_notA500() {
+        MockHttpServletRequest request = new MockHttpServletRequest("PUT", "/lists/1/cover");
+        request.setContentType("multipart/form-data; boundary=x");
+        MultipartException hungUp = new MultipartException("Failed to parse multipart servlet request",
+                new IOException("Processing of multipart/form-data request failed",
+                        new EOFException()));
+
+        ResponseEntity<ProblemDetail> response = handler.handleMultipart(hungUp, request);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().getDetail()).contains("interrupted");
+    }
+
+    /** The same failure with a server-side cause (a full disk) is still a 500: only a hang-up is the client's. */
+    @Test
+    void aMultipartFailureOfTheServersOwn_staysA500_evenWithAnIoCause() {
+        MockHttpServletRequest request = new MockHttpServletRequest("PUT", "/lists/1/cover");
+        request.setContentType("multipart/form-data; boundary=x");
+        MultipartException diskFull = new MultipartException("Failed to parse multipart servlet request",
+                new IOException("No space left on device"));
+
+        ResponseEntity<ProblemDetail> response = handler.handleMultipart(diskFull, request);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
     }
 
     /** An untyped problem has no {@code type} (null here) or {@code about:blank}: the same thing on the wire. */
@@ -151,6 +185,18 @@ class ApiExceptionHandlerTest {
                 new RateLimitExceededException("Too many uploads.", Duration.ofMillis(120)));
 
         assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("1");
+    }
+
+    @Test
+    void retryAfterIsRoundedUp_soAClientThatObeysItNeverComesBackEarly() {
+        // 59.4 s truncated to 59 would send a client back 0.4 s too soon, to be refused a second time.
+        ResponseEntity<ProblemDetail> limited = handler.handleRateLimited(
+                new RateLimitExceededException("Too many uploads.", Duration.ofMillis(59_400)));
+        ResponseEntity<ProblemDetail> overloaded = handler.handleOverloaded(
+                new ServiceOverloadedException("The server is busy.", Duration.ofMillis(10_001)));
+
+        assertThat(limited.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("60");
+        assertThat(overloaded.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("11");
     }
 
     @Test
