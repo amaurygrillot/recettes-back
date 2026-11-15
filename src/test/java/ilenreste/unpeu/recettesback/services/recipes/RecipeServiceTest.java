@@ -411,7 +411,7 @@ class RecipeServiceTest {
     void letsTheAuthorEditTheirOwnRecipe() {
         RecipeEntity existing = recipe("r-1", "u-1", "Tarte");
         when(recipesRepository.findById("r-1")).thenReturn(Optional.of(existing));
-        when(recipesRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(recipesRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
 
         recipeService.update("r-1", titleOnly("Tarte aux pommes"));
@@ -435,14 +435,14 @@ class RecipeServiceTest {
                 .hasMessage("Only the author of this recipe, or an administrator, may modify it.");
 
         assertThat(existing.getTitle()).isEqualTo("Tarte");
-        verify(recipesRepository, never()).save(any());
+        verify(recipesRepository, never()).saveAndFlush(any());
     }
 
     @Test
     void letsAnAdminEditSomeoneElsesRecipe() {
         RecipeEntity existing = recipe("r-1", "u-1", "Tarte");
         when(recipesRepository.findById("r-1")).thenReturn(Optional.of(existing));
-        when(recipesRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(recipesRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(currentUserService.currentUserId()).thenReturn(Optional.of("an-admin"));
         when(currentUserService.isAdmin()).thenReturn(true);
 
@@ -614,7 +614,7 @@ class RecipeServiceTest {
         introduction.setText("Une tarte de famille.");
         existing.setIntroduction(introduction);
         when(recipesRepository.findById("r-1")).thenReturn(Optional.of(existing));
-        when(recipesRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(recipesRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
 
         recipeService.update("r-1", new UpdateRecipeRequest(Optional.empty(),
@@ -634,7 +634,7 @@ class RecipeServiceTest {
         introduction.setText("Une tarte de famille.");
         existing.setIntroduction(introduction);
         when(recipesRepository.findById("r-1")).thenReturn(Optional.of(existing));
-        when(recipesRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(recipesRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(currentUserService.currentUserId()).thenReturn(Optional.of("u-1"));
 
         recipeService.update("r-1", titleOnly("Tarte aux pommes"));

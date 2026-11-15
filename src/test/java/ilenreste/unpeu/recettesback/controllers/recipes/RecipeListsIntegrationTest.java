@@ -81,6 +81,39 @@ class RecipeListsIntegrationTest extends RecipeListsHttpSupport {
         assertThat(json(read).has("containsRecipe")).isFalse();
     }
 
+    /**
+     * A write's answer and the next read must spell {@code createdAt} and {@code updatedAt} the same. They did not: the
+     * answer carried the instant the server had just set, to the nanosecond, while PostgreSQL keeps microseconds, so the
+     * next read had a different (and, being rounded, sometimes later) string, and a client that compared the two saw a
+     * change after every refetch. The instants are truncated to microseconds where they are made.
+     */
+    @Test
+    void aWritesAnswerAndTheNextRead_spellCreatedAtAndUpdatedAtIdentically() throws InterruptedException {
+        ResponseEntity<String> created = post("/lists", listJson(unique("Dimanche"), CAKE), ownerToken);
+        String id = json(created).path("id").asString();
+        assertSameTimestamps("POST /lists", json(created), listOf(id, ownerToken));
+
+        Thread.sleep(10);
+        ResponseEntity<String> renamed = put("/lists/" + id, listJson(unique("Renommee"), PASTA), ownerToken);
+        assertSameTimestamps("PUT /lists/{id}", json(renamed), listOf(id, ownerToken));
+
+        Thread.sleep(10);
+        ResponseEntity<String> withAPhoto = putCover(id, ownerToken);
+        assertSameTimestamps("PUT /lists/{id}/cover", json(withAPhoto), listOf(id, ownerToken));
+
+        Thread.sleep(10);
+        ResponseEntity<String> withoutIt = delete("/lists/" + id + "/cover", ownerToken);
+        assertSameTimestamps("DELETE /lists/{id}/cover", json(withoutIt), listOf(id, ownerToken));
+        assertSameTimestamps("GET /lists", json(withoutIt), json(get("/lists", ownerToken)).get(0));
+    }
+
+    private static void assertSameTimestamps(String route, JsonNode answer, JsonNode read) {
+        assertThat(answer.path("createdAt").asString()).as("%s: createdAt", route)
+                .isEqualTo(read.path("createdAt").asString());
+        assertThat(answer.path("updatedAt").asString()).as("%s: updatedAt", route)
+                .isEqualTo(read.path("updatedAt").asString());
+    }
+
     @Test
     void renamingAList_is200_andChangesTheNameTheEmojiAndUpdatedAtButNotCreatedAt() throws InterruptedException {
         String id = createList("Desserts", ownerToken);

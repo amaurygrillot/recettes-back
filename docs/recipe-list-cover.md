@@ -482,7 +482,13 @@ compared the strings, or a cache that compared the JSON, saw a change after ever
 **one place**: the application's `Clock` (`TimeConfig`) ticks in microseconds, and the auditing that stamps `createdAt` and
 `updatedAt` on every entity (`JpaAuditingConfig`) reads that same clock, so no instant the API answers has a finer
 fraction than the column that stores it. Nothing is truncated in a response or a mapper. The front can compare the strings
-again, though comparing instants is still right. (`PasswordResetTokenService` and the JWT claims still call
+again, though comparing instants is still right.
+
+**One more difference found on the way, and fixed with it:** the answer of `PUT /recipes/{id}` carried the *previous*
+`updatedAt`. Auditing stamps it when the update is flushed, which was at commit, after the answer had been built; the
+recipe update now flushes before it answers, as the lists already did (`saveAndFlush`). It is not about precision and was
+not in the list of eight, but a test that says « the answer of a write equals the next read, for a recipe » cannot pass
+without it. (`PasswordResetTokenService` and the JWT claims still call
 `Instant.now()`: neither is answered by the API.)
 
 ### 6. Sizes
