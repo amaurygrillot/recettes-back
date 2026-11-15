@@ -345,15 +345,15 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         assertUnchanged(id, before);
     }
 
-    @Test
-    void aMissingFilePart_andAPartWithAnotherName_are400AsAProblem() {
-        String id = listWithCover(ownerToken);
-        Snapshot before = snapshot(id);
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-        headers.set(HttpHeaders.AUTHORIZATION, ownerToken);
+    /** A multipart request whose {@code file} is plain text, not a file part. */
+    private ResponseEntity<String> uploadATextFieldNamedFile(String listId) {
         MultiValueMap<String, Object> notAFile = new LinkedMultiValueMap<>();
         notAFile.add("file", "just text, not a file part");
+        return uploadParts(listId, notAFile);
+    }
+
+    /** A multipart request with a real file part, under the wrong name. */
+    private ResponseEntity<String> uploadAFileNamedPhoto(String listId) {
         MultiValueMap<String, Object> otherName = new LinkedMultiValueMap<>();
         otherName.add("photo", new ByteArrayResource(TestImages.jpeg(100, 100)) {
             @Override
@@ -361,14 +361,81 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
                 return "photo.jpg";
             }
         });
+        return uploadParts(listId, otherName);
+    }
 
-        ResponseEntity<String> text = restTemplate.exchange(coverPath(id), HttpMethod.PUT,
-                new HttpEntity<>(notAFile, headers), String.class);
-        ResponseEntity<String> renamed = restTemplate.exchange(coverPath(id), HttpMethod.PUT,
-                new HttpEntity<>(otherName, headers), String.class);
+    private ResponseEntity<String> uploadParts(String listId, MultiValueMap<String, Object> parts) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.set(HttpHeaders.AUTHORIZATION, ownerToken);
+        return restTemplate.exchange(coverPath(listId), HttpMethod.PUT, new HttpEntity<>(parts, headers),
+                String.class);
+    }
 
-        assertAProblem(text, HttpStatus.BAD_REQUEST);
-        assertAProblem(renamed, HttpStatus.BAD_REQUEST);
+    @Test
+    void aMissingFilePart_andAPartWithAnotherName_are400AsAProblem() {
+        String id = listWithCover(ownerToken);
+        Snapshot before = snapshot(id);
+
+        assertAProblem(uploadATextFieldNamedFile(id), HttpStatus.BAD_REQUEST);
+        assertAProblem(uploadAFileNamedPhoto(id), HttpStatus.BAD_REQUEST);
+        assertUnchanged(id, before);
+    }
+
+    // ---------------------------------------------------------------------- the order the gates really have
+
+    /**
+     * The shape of the request is judged while the arguments are bound, before the controller's body runs, so it is
+     * judged <strong>before</strong> the list: on a list that is not the caller's, a request that is not multipart is a
+     * {@code 415} and one with no {@code file} part is a {@code 400}, and only a well-formed request reaches the
+     * {@code 404}. It reveals nothing about the list: it is about the caller's own request. The file is judged after
+     * the list, and the rate limit is not asked anything until then.
+     */
+    @Test
+    void theShapeOfTheRequestIsJudgedBeforeTheList_andTheFileAfterIt() {
+        String someoneElses = createList(unique("Pas la mienne"), strangerToken);
+        clearInvocations(rateLimiter, reencoder);
+
+        assertAProblem(restTemplate.exchange(coverPath(someoneElses), HttpMethod.PUT,
+                body("{\"file\":\"x\"}", ownerToken), String.class), HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+        assertAProblem(uploadATextFieldNamedFile(someoneElses), HttpStatus.BAD_REQUEST);
+        assertAProblem(uploadAFileNamedPhoto(someoneElses), HttpStatus.BAD_REQUEST);
+
+        assertAProblem(uploadJpeg(someoneElses, new HttpHeaders()), HttpStatus.NOT_FOUND);
+        assertAProblem(upload(someoneElses, "GIF89a\u0001\0\u0001\0\0\0\0;".getBytes(StandardCharsets.ISO_8859_1),
+                "photo.jpg", MediaType.IMAGE_JPEG, new HttpHeaders()), HttpStatus.NOT_FOUND);
+        verify(rateLimiter, never()).requirePermit(anyString());
+        verify(reencoder, never()).reencode(any(), any());
+    }
+
+    /**
+     * A file that is not an image is judged from its first bytes, before the decode pool; a picture with too many
+     * pixels is judged by the decoder, which runs under the pool's permit. With the pool full the first is a
+     * {@code 400} at once and the second a {@code 503}, which is what {@code POST /media} does as well.
+     */
+    @Test
+    void aSaturatedDecodePool_answers503BeforeThe400OfAPictureWithTooManyPixels_butAfterThatOfAFileThatIsNoImage() {
+        String id = listWithCover(ownerToken);
+        Snapshot before = snapshot(id);
+        Semaphore permits = decodePermits();
+        int held = permits.drainPermits();
+
+        ResponseEntity<String> noImage;
+        ResponseEntity<String> tooManyPixels;
+        try {
+            noImage = upload(id, "<svg xmlns=\"http://www.w3.org/2000/svg\"/>".getBytes(StandardCharsets.UTF_8),
+                    "photo.jpg", MediaType.IMAGE_JPEG, new HttpHeaders());
+            tooManyPixels = upload(id, TestImages.png(8001, 10, false), "wide.png", MediaType.IMAGE_PNG,
+                    new HttpHeaders());
+        } finally {
+            permits.release(held);
+        }
+
+        assertAProblem(noImage, HttpStatus.BAD_REQUEST);
+        assertAProblem(tooManyPixels, HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(upload(id, TestImages.png(8001, 10, false), "wide.png", MediaType.IMAGE_PNG, new HttpHeaders())
+                .getStatusCode()).as("with the pool free again, the same picture is the 400 it always was")
+                .isEqualTo(HttpStatus.BAD_REQUEST);
         assertUnchanged(id, before);
     }
 
