@@ -433,8 +433,15 @@ What the server does depends on **whether the last byte had arrived**, and the f
   cancelled upload, as if the server had failed; `ApiExceptionHandler.handleMultipart` now recognises a hang-up (through
   Spring's own `DisconnectedClientHelper`: the container's abort exceptions, a reset or a broken connection, found in the
   cause chain), answers `400` (read by nobody) and logs one `info` line. A `MultipartException` of a multipart request with
-  any other cause (a full disk, an antivirus) stays the `500` it was. A slow client whose read times out is a `400` too,
-  where a `408` would be more exact; nobody reads it either.
+  any other cause (a full disk, an antivirus) stays the `500` it was.
+- **A client that goes quiet instead of hanging up** (a phone that lost its signal, a suspended tab) is cut off by the
+  server's read timeout (`server.tomcat.connection-timeout`, 60 s by default). This claim was written down as « a `400` logged at
+  `info`, like a hang-up » and had never been checked. Checked now, over real HTTP with the timeout lowered to a second for
+  the one test: **it is the container's `408 Request Timeout`**, with Spring Boot's JSON error body (`application/json`, not a
+  problem: Tomcat has already ended the request when the exception reaches the handler, so the status and the body are its
+  own, and nobody reads them), **and one `info` line from the handler, as for a hang-up**, no `error`, no stack trace. Nothing
+  is stored, counted or decoded, and no decode permit is taken. So the log was right and the status was not, and no code needed
+  to change: `408` is the status that matches what happened, which is what the status-code rules ask for.
 
 ### 3. Every `400`, and the two other bodies
 
@@ -582,6 +589,10 @@ Added by the hardening that followed the review of both pull requests ([the outc
     not changed.
 21. **The `detail` of a cut-short JPEG is neutral**: it does not say what to do, because the right advice depends on a
     cause the server cannot see.
+22. **A client that goes quiet mid-upload is answered `408` by the container and logged at `info`.** Not changed, and the
+    sentence that said `400` is corrected: it was verified over real HTTP, not assumed.
+23. **`PUT /recipes/{id}` flushes before it answers**, so that its answer carries the `updatedAt` that was stored. Not one
+    of the eight, found by the test that says « a write's answer equals the next read, for a recipe ».
 
 ## Tests
 
@@ -598,6 +609,7 @@ Added by the hardening that followed the review of both pull requests ([the outc
 | `createdAt` and `updatedAt` of a write's answer equal those of the next read, for a list and for a recipe | `RecipeListsIntegrationTest`, `RecipesIntegrationTest`, `TimeConfigTest` |
 | Every field `RecipeListResponse` declares `required` is on every route that answers a list, `coverVersion` as an explicit `null` without a photo | `RecipeListsIntegrationTest` |
 | The order of the gates: a `415` and a missing `file` part before the `404`; a `503` before the `400` of a too-large image | `RecipeListCoverUploadIntegrationTest` |
+| A client that goes quiet mid-upload until the server's read timeout: `408`, one `info` line, nothing stored or counted | same (the timeout is lowered on the running server for that one test and put back) |
 | `findOrphans` does not return an attached photo and does return a detached one; `totalBytesUploadedBy` counts it | `MediaRepositoryTest` (`@DataJpaTest`) |
 | `GET /lists` out of N+1 with photos on some of the lists                                              | `RecipeListServiceQueryCountTest`           |
 | The `415` for a non-multipart request, on both routes, and `413` on a part over 8 MB (still answered by its own handler); the `304` of the public `GET /media/{id}` repeating its `Cache-Control` | `RecipeListCoverIntegrationTest`, `ApiExceptionHandlerTest`, `MediaUploadIntegrationTest` |

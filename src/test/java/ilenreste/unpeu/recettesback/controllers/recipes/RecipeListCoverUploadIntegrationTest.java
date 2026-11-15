@@ -5,6 +5,8 @@ import ilenreste.unpeu.recettesback.exceptions.RetryableException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.properties.CorsProperties;
 import ilenreste.unpeu.recettesback.support.TestImages;
+import org.apache.coyote.AbstractProtocol;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -12,6 +14,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.boot.tomcat.TomcatWebServer;
+import org.springframework.boot.web.server.WebServer;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
+import org.springframework.context.ApplicationContext;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -69,6 +75,8 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
 
     @Autowired
     private CorsProperties corsProperties;
+    @Autowired
+    private ApplicationContext applicationContext;
 
     // ------------------------------------------------------------------------------------------------- helpers
 
@@ -246,6 +254,63 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         assertThat(putCover(id, ownerToken).getStatusCode()).as("the server is none the worse for it")
                 .isEqualTo(HttpStatus.OK);
         verify(rateLimiter, times(1)).requirePermit(owner.id());
+    }
+
+    /**
+     * The other way a body stops arriving: the client does not hang up, it just goes quiet (a phone that lost its signal
+     * halfway, a tab that was suspended) until the server's own read timeout gives up on it. Real HTTP, real timeout: the
+     * server's connection timeout is lowered for the duration of the test, on the running server and for the connection
+     * this test opens, and put back (no application context of its own, which would be a connection pool of its own).
+     * <p>
+     * What it answers is the <strong>container's</strong> {@code 408 Request Timeout}, with Spring Boot's JSON error body
+     * rather than a problem: Tomcat has already decided the request is over when the exception reaches the handler, so
+     * the status is its own and nobody reads it, the client having gone. What matters is that the handler still recognises
+     * it as the client's doing and logs one {@code info} line, not an {@code ERROR} with a stack trace, and that nothing
+     * is stored, counted or decoded. (The document used to say {@code 400}: it was never checked.)
+     */
+    @Test
+    void aClientThatGoesQuietMidUpload_untilTheServersReadTimesOut_is408_isLoggedAsAHangUp_andIsNotAnError(
+            CapturedOutput output)
+            throws Exception {
+        String id = listWithCover(ownerToken);
+        Snapshot before = snapshot(id);
+        clearInvocations(rateLimiter, reencoder);
+        byte[] body = multipartBody(TestImages.jpeg(1600, 1200));
+        AbstractProtocol<?> protocol = tomcatProtocol();
+        int configured = protocol.getConnectionTimeout();
+        String answer;
+
+        protocol.setConnectionTimeout(1_000);
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout((int) Duration.ofSeconds(20).toMillis());
+            OutputStream out = socket.getOutputStream();
+            out.write(requestHead(id, body.length));
+            out.write(body, 0, body.length / 2);
+            out.flush();
+            // Nothing more is sent: the server waits for its read timeout and then answers.
+            answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+        } finally {
+            protocol.setConnectionTimeout(configured);
+        }
+
+        assertThat(answer).as("the container's own answer to a client that went quiet").startsWith("HTTP/1.1 408");
+        String hangUpLine = "The client hung up before it had sent the whole body of PUT " + coverPath(id);
+        assertThat(Arrays.stream(output.getAll().split("\\R")).filter(line -> line.contains(hangUpLine)).toList())
+                .as("exactly one line says so, at info").singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" INFO ");
+        assertThat(output.getAll()).as("and none of the server's own failure")
+                .doesNotContain("Unhandled exception while serving PUT " + coverPath(id))
+                .doesNotContain("Servlet.service()");
+        assertUnchanged(id, before);
+        verify(rateLimiter, never()).requirePermit(anyString());
+        verify(reencoder, never()).reencode(any(), any());
+        assertThat(decodePermits().availablePermits()).isEqualTo(mediaProperties.maxConcurrentProcessing());
+    }
+
+    /** The running server's HTTP connector, for the one test that has to make its read timeout short. */
+    private AbstractProtocol<?> tomcatProtocol() {
+        WebServer server = ((WebServerApplicationContext) applicationContext).getWebServer();
+        return (AbstractProtocol<?>) ((TomcatWebServer) server).getTomcat().getConnector().getProtocolHandler();
     }
 
     /**
