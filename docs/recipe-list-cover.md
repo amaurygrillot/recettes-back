@@ -301,10 +301,14 @@ sees and allows. Moving the repository off `JpaRepository` altogether (so that t
 would close the first two gaps by construction, at the price of every test that deletes by id; it was not asked for and is
 not done.
 
-**It was proved both ways.** A test of its own imports a class that makes each forbidden call and checks that every one is
-reported by name, so the rule cannot pass by matching nothing. And, locally and never committed, `IngredientService` was
-made to read the icon with `findById` instead of `findPublicById`: the build failed on `IngredientService.resolveIcon:126`
-and passed again when the line was put back.
+**It was proved both ways.** Tests of their own import a class that makes every forbidden access (fifteen on the
+repository, among them `existsById`, each `findAll` overload, `count`, `getById`, `getOne`, a reference to a method the
+repository declares; plus `open` and the three ways of asking an `EntityManager`) and check that each is reported by
+name, so a rule cannot pass by matching nothing; and a second class that does what the code base really does (the two
+public lookups, called and referenced) must pass all three, so a rule cannot pass the first by matching everything. And,
+locally and never committed, `IngredientService.resolveIcon` was given an `existsById` call before its lookup: the build
+failed on `IngredientService.resolveIcon:126` (« calls method `MediaRepository.existsById` »), and passed again when the
+line was put back.
 
 ## Lifecycle
 
