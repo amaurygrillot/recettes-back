@@ -16,6 +16,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /**
  * The photo of a recipe list: set or replace it, remove it, read it. The rules, and the reasons for them, are in
  * docs/recipe-list-cover.md.
@@ -61,22 +63,37 @@ public class RecipeListCoverService {
      * <p>
      * The gates, in order: the list's ownership (404, not counted against the rate limit), then the shared pipeline
      * ({@link MediaService#intake}: the rate limit 429, the format and dimensions 400, the decode pool 503), then
-     * the attach. If the attach fails for any reason, the two new files are deleted and the old photo is left
-     * alone: a failed request leaves nothing behind. A list deleted in the meantime is a 404.
+     * the attach. A list deleted in the meantime is a 404.
+     * <p>
+     * <strong>What becomes of the two new files depends on how the transaction ended, and only on that.</strong> They
+     * are deleted when it rolled back ({@link MediaService#discardIfRolledBack}, registered first thing in the attach) or
+     * never began (the {@code catch} below): either way no row points at them, and the old photo is left alone, so a
+     * failed request leaves nothing behind. They are <strong>kept</strong> when it committed, whatever fails after
+     * (the deletion of the old files, the answer), and when its outcome is unknown: the row may be there, and deleting
+     * the files of a committed photo leaves a list that answers 404 for ever. Hence no {@code catch} of every exception
+     * around the whole call: it cannot tell a rollback from a failure after the commit.
      */
     public RecipeListResponse replace(String listId, MultipartFile file) {
         lists.requireOwned(listId);
         StoredImage image = mediaService.intake(file);
+        AtomicBoolean transactionBegan = new AtomicBoolean();
         try {
-            return transactions.execute(status -> attach(listId, image));
+            return transactions.execute(status -> {
+                transactionBegan.set(true);
+                return attach(listId, image);
+            });
         } catch (RuntimeException failure) {
-            // The row was never committed: the transaction rolled it back. Only the files are left to remove.
-            mediaService.discard(image);
+            if (!transactionBegan.get()) {
+                log.warn("The transaction to attach a photo to recipe list {} could not begin: deleting its files", listId);
+                mediaService.discard(image);
+            }
             throw failure;
         }
     }
 
     private RecipeListResponse attach(String listId, StoredImage image) {
+        // First, so that a failure of anything below, the lock included, is still a rollback that removes the files.
+        mediaService.discardIfRolledBack(image);
         RecipeListEntity list = lists.ownedListForUpdate(listId);
         MediaEntity previous = list.getCover();
         list.setCover(mediaService.persist(image));

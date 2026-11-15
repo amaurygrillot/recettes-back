@@ -3,6 +3,7 @@ package ilenreste.unpeu.recettesback.controllers.recipes;
 import ilenreste.unpeu.recettesback.entities.recipes.RecipeCoverPictureEntity;
 import ilenreste.unpeu.recettesback.properties.MediaProperties;
 import ilenreste.unpeu.recettesback.services.media.ImageReencoder;
+import ilenreste.unpeu.recettesback.services.media.MediaStorageService;
 import ilenreste.unpeu.recettesback.services.media.UploadRateLimiter;
 import ilenreste.unpeu.recettesback.support.TestImages;
 import org.springframework.core.io.ByteArrayResource;
@@ -36,6 +37,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -111,6 +113,15 @@ abstract class RecipeListsHttpSupport {
     protected UploadRateLimiter rateLimiter;
     @MockitoSpyBean
     protected ImageReencoder reencoder;
+    /**
+     * Spied, here, for the same reason: the tests of the outcome of a replace make the storage throw after the commit,
+     * and make the transaction of the attach fail before it begins and after it commits, which a real database cannot
+     * be asked to do on cue.
+     */
+    @MockitoSpyBean
+    protected MediaStorageService storageService;
+    @MockitoSpyBean
+    protected TransactionTemplate transactionTemplate;
     @Autowired
     protected MediaProperties mediaProperties;
     @Autowired
