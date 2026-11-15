@@ -254,10 +254,28 @@ constraint). An attached photo is not an orphan; a photo no list points at is on
 
 The privacy of a list's photo rests on one convention: **no code path that starts from a request ever reads a `media`
 row by id without the public filter.** Until the audit that followed the merge it was written only in the javadoc of
-`MediaRepository`, which a new caller of `findById` has no reason to read. `MediaPrivacyArchitectureTest` now fails the
-build if any class other than `MediaService` and `RecipeListCoverService` calls `MediaRepository.findById`,
-`findAllById` or `getReferenceById`, or `MediaService.open` (the one method that serves a row without asking who is
-asking). Production code only: the tests of the repository read what they like.
+`MediaRepository`, which a new caller of `findById` has no reason to read. `MediaPrivacyArchitectureTest` fails the build
+if any class other than `MediaService` and `RecipeListCoverService`:
+
+- calls **any method of `MediaRepository` but the two public lookups**, `findPublicById` and `findAllPublicById`;
+- calls `MediaService.open` (the one method that serves a row without asking who is asking);
+- refers to the class object `MediaEntity.class`, which is what `EntityManager.find`, `getReference` and a typed
+  `createQuery` need in order to read a row of any id.
+
+Production code only: the tests of the repository read what they like.
+
+**It is an allow-list, and it used to be a deny-list of four methods.** The first version named the three inherited reads
+that were thought of (`findById`, `findAllById`, `getReferenceById`), and the review of it found what a deny-list always
+misses: `existsById` (the most plausible leak: a validator that accepts a list photo's id as a recipe picture because the
+row « exists »), `findAll` in every overload and `count`, the deprecated `getById` and `getOne`, and any query method added
+to `MediaRepository` tomorrow. An allow-list closes all of them by construction, because the rule is « these two, and
+nothing else » rather than « not these four ». The list is the **real one**: the only calls to `MediaRepository` outside the
+two services are `IngredientService.resolveIcon` (`findPublicById`) and `RecipeService.resolveMedia`
+(`mediaRepository::findAllPublicById`, a method reference, which ArchUnit reads as a call). `save` and `delete` are called
+by `MediaService` alone, and `totalBytesUploadedBy` and `findOrphans` by nobody yet (the quota and the sweep are deferred),
+so none of the four is on the list: the day a class that is not one of the two services needs one, the build says so and
+the person adding it decides, in one line of the test, that it cannot return a list photo's row. Both are safe by
+construction (the first returns a number, the second excludes a list's photo), which is a short conversation.
 
 It is an [ArchUnit](https://www.archunit.org) rule, a **test-only dependency** (`com.tngtech.archunit:archunit`, 1.5.1,
 the latest stable). A source scan was the alternative: it needs no dependency, but it can only see the *text* `findById`,
@@ -265,18 +283,23 @@ not whose `findById` it is, so it either flags every repository of the applicati
 bytecode rule says « this method of this type » exactly. The dependency is a test-scope jar with no transitive weight on
 the runtime, which is what makes it acceptable for a rule that guards the privacy of a member's photo.
 
-`findAll`, `existsById` and the other inherited reads are **not** in the rule: they were not asked for, and none of them
-returns one row for an id taken from a request. Add them the day one is used by a new path.
+**`EntityManager` is covered by the class object, not by the call.** The bytecode of `entityManager.find(MediaEntity.class,
+id)` says « `EntityManager.find` » and nothing about which entity, and ArchUnit does not see constant arguments, so a rule
+on the call would have to forbid every `find` of the application. What it does see is that a class refers to the class
+object `MediaEntity.class`, which every such call needs. Nothing in production code refers to it today, so the rule costs
+nothing, and it is stricter than asked for: a typed `createQuery("…", MediaEntity.class)` and `Session.get` are caught too.
 
 **What the rule cannot see**, because the bytecode does not say it: a call through a variable typed as the generic
-`JpaRepository<MediaEntity, String>` instead of `MediaRepository` (nothing is typed that way), and **a method reference to
-an inherited method**, such as `mediaRepository::findAllById`. javac compiles that to a handle on the interface that
-*declares* the method (`ListCrudRepository`) and keeps the receiver's type only in the call that builds the lambda, so it
-looks exactly like the `categoriesRepository::findAllById` that `RecipeService` legitimately passes to a helper. That is
-the one gap, and it is a pattern this code base uses: a new use of `MediaRepository` is something a review has to read. The
-public lookups are declared on `MediaRepository` itself, so `mediaRepository::findAllPublicById` is a different method
-and is unaffected. Moving the repository off `JpaRepository` altogether (so that the three methods do not exist on it) would
-close the gap by construction, at the price of every test that deletes by id; it was not asked for and is not done.
+`JpaRepository<MediaEntity, String>` instead of `MediaRepository` (nothing is typed that way), **a method reference to an
+inherited method**, such as `mediaRepository::findAllById`, and a `@Query` on *another* repository that selects
+`MediaEntity` from a JPQL string. javac compiles the method reference to a handle on the interface that *declares* the
+method (`ListCrudRepository`) and keeps the receiver's type only in the call that builds the lambda, so it looks exactly
+like the `categoriesRepository::findAllById` that `RecipeService` legitimately passes to a helper. That is a pattern this
+code base uses: a new use of `MediaRepository` is something a review has to read. The public lookups are declared on
+`MediaRepository` itself, so `mediaRepository::findAllPublicById` is a different method and is the one reference the rule
+sees and allows. Moving the repository off `JpaRepository` altogether (so that the inherited methods do not exist on it)
+would close the first two gaps by construction, at the price of every test that deletes by id; it was not asked for and is
+not done.
 
 **It was proved both ways.** A test of its own imports a class that makes each forbidden call and checks that every one is
 reported by name, so the rule cannot pass by matching nothing. And, locally and never committed, `IngredientService` was
@@ -300,32 +323,45 @@ steps, and which of them is in a transaction:
    new files are removed.
 4. Both files of the old photo are deleted once the transaction has committed. The answer is the updated list.
 
-**What happens to the new files depends on how the transaction ended**, and only on that. The files are on disk before the
-row exists, and no transaction covers the filesystem, so something has to decide whether they are kept:
+**What happens to the new files depends on whether the commit was ever attempted**, and on nothing else. The files are on
+disk before the row exists, and no transaction covers the filesystem, so something has to decide whether they are kept.
+« Did the transaction roll back? » is **not** that question, because Spring reports *rolled back* in one case where the
+database may in fact have committed (below). The question is whether the work had **returned** when the transaction ended:
+if it threw, the commit was never attempted and the rollback is certain; if it returned, whatever failed afterwards failed
+*at commit time*, and nobody on this side of the connection can tell whether the row is there.
 
 | How the attach ended | The new files | Why |
 |---|---|---|
-| **Rolled back** (anything thrown inside the attach, a failed flush, a list deleted meanwhile, a commit that failed and was rolled back) | **deleted** | the row was never committed, so nothing can point at them; the old photo is untouched, files included, because a rollback never runs the after-commit deletion. A failed `PUT` leaves nothing behind |
+| **The work threw** (anything thrown inside the attach: the lock, a failed flush, a list deleted meanwhile) and the transaction rolled back | **deleted** | the commit was never attempted, so the row was never committed and nothing can point at them. The old photo is untouched, files included, because a rollback never runs the after-commit deletion. A failed `PUT` leaves nothing behind |
 | **Never began** (no connection for the transaction: the pool is exhausted) | **deleted** | nothing was written to the database |
 | **Committed**, whatever is thrown after it | **kept** | the list points at them: deleting them is a photo that answers `404` for ever |
-| **Outcome unknown**: the transaction manager reports `STATUS_UNKNOWN`, which Spring does in two cases only: a commit that fails with a `TransactionException`, and a rollback that itself fails (the connection died mid-attach) | **kept** | the database may well hold the row. A pair of stray files costs disk and is never reachable; a deleted file under a committed row costs the photo |
+| **Reported rolled back after the work had returned**: the **commit itself** failed. Spring says `STATUS_ROLLED_BACK` for a commit that fails with a `DataAccessException` (the connection drops while PostgreSQL commits and the acknowledgement is lost: the driver throws an I/O error, JPA turns it into a `DataAccessException`, and the transaction manager rolls back what it can and says « rolled back »), and for a transaction found rollback-only at commit | **kept**, with a `warn` that names the list and both storage keys | the database may well hold the row, and the report says it does not. A pair of stray files costs disk and is never reachable; a deleted file under a committed row costs the photo |
+| **Outcome unknown**: the transaction manager reports `STATUS_UNKNOWN`, which Spring does in two cases only: a commit that fails with a `TransactionException`, and a rollback that itself fails (the connection died mid-attach) | **kept**, with the same `warn` | the same reasoning |
 
-The rule is one sentence: **the new files are deleted when, and only when, the transaction is known to have rolled back
-or never began.** That is the `afterCompletion` of the transaction (`STATUS_ROLLED_BACK`), registered by the attach
-itself, plus a `catch` that deletes only when the transaction never began. It used to be one `catch` of every exception
-around the whole call, which could not tell a rollback from a failure *after* the commit (the hook that deletes the old
-files throwing) and deleted the files of a photo that was committed. The request in such a case may answer a `500` while
-the photo is set: **the front re-reads the list after any failure of the `PUT`**, as after any cancel.
+The rule is one sentence: **the new files are deleted when, and only when, the commit was certainly never attempted: the
+transaction never began, or the work threw and the transaction rolled back.** It is `MediaService.attachInTransaction`,
+which opens the transaction, registers the `afterCompletion` hook first thing inside it, sets a flag once the work has
+returned (the hook deletes only on `STATUS_ROLLED_BACK` **with the flag unset**), and has a `catch` that deletes only when
+the transaction never began. `POST /media` goes through the same method ([below](#what-can-still-leave-something-behind)),
+which is what keeps the two from disagreeing. The rule used to be « deleted when the transaction rolled back », and before
+that one `catch` of every exception around the whole call, which could not tell a rollback from a failure *after* the
+commit (the hook that deletes the old files throwing) and deleted the files of a photo that was committed. The request in a
+kept case may answer a `500` while the photo is set: **the front re-reads the list after any failure of the `PUT`**, as
+after any cancel.
 
-**A residual risk, written down rather than hidden.** « Rolled back » is what Spring *reports*, and Spring reports it in
-one case where the server may in fact have committed: a commit that fails with a `DataAccessException` (the connection
-drops while PostgreSQL commits and the acknowledgement is lost; the driver throws an I/O error, JPA turns it into a
-`DataAccessException`, and the transaction manager then rolls back what it can and says `ROLLED_BACK`). The two new files
-would then be deleted under a committed row, and the list would answer `404` on its photo until its owner replaces or
-removes it. The window is the instant of the `COMMIT` itself, and the request does answer an error, so the front re-reads
-the list and sees a photo that does not load. Closing it means checking, in a new transaction, that no `media` row has
-these keys before deleting; that was not done, as the mechanism asked for was the transaction's own status. Listed under
-« À valider ».
+**What the rule costs, written down rather than hidden.** A rollback that is certain but happens after the work returned
+(a flush that fails at commit, a transaction marked rollback-only) looks exactly like the lost-acknowledgement case, so it
+keeps its two files too: a stray pair of files that nothing references and no route can reach. The work flushes before it
+returns (`listsRepository.flush()` in the attach, for the list; the insert of the row, for `POST /media`) precisely so that
+the ordinary failures, a constraint or a lost lock, happen *inside* it and stay certain. What is left is rare and is disk
+only: the `warn` carries the list and both keys, so someone cleaning up can tell, by looking up the key, whether a row
+exists. Listed under « À valider ».
+
+**Considered, and not chosen: checking the database before deleting.** Asking, in a new transaction, whether a `media` row
+has these keys would settle every case, including the ones above. It needs a working database at the very moment the
+commit has just failed (the connection that dropped is not the one that asks, but it is the same server), and an answer
+given while the first commit is still in flight on a half-dead connection can be wrong. The flag costs no connection and
+no judgement call, which is why it is the rule.
 
 The old files are deleted after the commit, and **a failure to delete them never fails the request**: the hook catches
 whatever the storage throws, logs one `error` line with the media id and the storage key, and goes on to the second file.
@@ -386,16 +422,19 @@ The lock on the `recipe_lists` row serialises every write to one list's photo. W
 ### What can still leave something behind
 
 **Never a row.** The residue is **files only**, and four things can cause it: a file whose deletion failed after commit
-(logged with its storage key, and with the media id when the storage threw, and nothing can find it later), a commit or
-a rollback whose outcome is unknown (`STATUS_UNKNOWN`: the new files are kept, see above), and a process killed between
-writing the files and committing the attach, which `POST /media` has always been exposed to for the same reason (the
-sweep enumerates rows, so a file with no row is invisible to it). All are disk space, never a leak: no row means no
-route can serve it.
+(logged with its storage key, and with the media id when the storage threw, and nothing can find it later), a commit that
+failed after the work returned, or a commit or a rollback whose outcome is unknown (the new files are kept in both, with a
+`warn`: see above), and a process killed between writing the files and committing the attach, which `POST /media` has
+always been exposed to for the same reason (the sweep enumerates rows, so a file with no row is invisible to it). All are
+disk space, never a leak: no row means no route can serve it.
 
-`POST /media` does not have the rule of this section: `MediaService.upload` commits the row in the repository's own
-transaction and deletes the files on any exception after it, so a commit whose acknowledgement is lost there would delete
-the files of a committed, public row. It is the behaviour it always had, `MediaMapper.toResponse` cannot throw, and it
-was not part of the review; it is noted here so that nobody takes the rule above for a property of the whole pipeline.
+**`POST /media` follows the same rule, through the same method.** `MediaService.upload` used to commit the row in the
+repository's own transaction and delete the files on *any* exception after it, so a commit whose acknowledgement was lost
+there deleted the files of a committed, **public** row: an image that answers `404` while a recipe may already reference
+it. It now inserts the row in a transaction of its own, through `MediaService.attachInTransaction`, with the row flushed
+inside the work: an insert that fails is a certain rollback and deletes the files as before, and a commit that fails keeps
+them with a `warn`. A failure of the mapper after the commit (it cannot throw today) keeps them too, which is the right
+answer for a row that is there.
 
 A request that is reading the photo while it is replaced can find its file gone as the response streams. The front
 reloads the list and gets the new version.
@@ -451,8 +490,10 @@ What the server does depends on **whether the last byte had arrived**, and the f
   any other cause (a full disk, an antivirus) stays the `500` it was.
 - **A client that goes quiet instead of hanging up** (a phone that lost its signal, a suspended tab) is cut off by the
   server's read timeout (`server.tomcat.connection-timeout`, 60 s by default). This claim was written down as « a `400` logged at
-  `info`, like a hang-up » and had never been checked. Checked now, over real HTTP with the timeout lowered to a second for
-  the one test: **it is the container's `408 Request Timeout`**, with Spring Boot's JSON error body (`application/json`, not a
+  `info`, like a hang-up » and had never been checked. Checked now, over real HTTP against a second HTTP connector of the
+  running server whose read timeout is one second (the shared connector's setting is never touched, so no other test, and no
+  pooled connection of the shared client, can be affected by it; the connector is added for the one test and removed after
+  it, and it is not a second application context): **it is the container's `408 Request Timeout`**, with Spring Boot's JSON error body (`application/json`, not a
   problem: Tomcat has already ended the request when the exception reaches the handler, so the status and the body are its
   own, and nobody reads them), **and one `info` line from the handler, as for a hang-up**, no `error`, no stack trace. Nothing
   is stored, counted or decoded, and no decode permit is taken. So the log was right and the status was not, and no code needed
@@ -588,9 +629,12 @@ Added by the audit that followed the merge ([what the upload form relies on](#wh
 Added by the hardening that followed the review of both pull requests ([the outcome of a replace](#setting-or-replacing--put-listsidcover),
 [the guardrail](#the-rule-is-a-test-not-only-a-javadoc)):
 
-15. **The new files are deleted only when the transaction is known to have rolled back, or never began.** A commit whose
-    outcome is unknown keeps them: a stray pair of files is disk, a deleted file under a committed row is a lost photo.
-    (The conservative reading, since privacy and data win over tidiness.)
+15. **The new files are deleted only when the commit was certainly never attempted**: the transaction never began, or the
+    work threw and the transaction rolled back. A transaction that reports « rolled back » *after* the work returned (the
+    commit itself failed) keeps them, and so does a commit whose outcome is unknown: a stray pair of files is disk, a
+    deleted file under a committed row is a lost photo. (The conservative reading, since privacy and data win over
+    tidiness.) It used to be « deleted whenever the transaction rolled back », which Spring also says of a commit that
+    failed at the database; see [the outcome of a replace](#setting-or-replacing--put-listsidcover).
 16. **A failure to delete the old files after the commit is logged, never thrown**, for the replace, the removal and the
     deletion of the list alike.
 17. **`createdAt` and `updatedAt` are truncated to microseconds at the source** (the `Clock` and the auditing that reads it),
@@ -609,6 +653,25 @@ Added by the hardening that followed the review of both pull requests ([the outc
 23. **`PUT /recipes/{id}` flushes before it answers**, so that its answer carries the `updatedAt` that was stored. Not one
     of the eight, found by the test that says « a write's answer equals the next read, for a recipe ».
 
+Added by the review of that hardening (the commit-safety change):
+
+24. **`POST /media` follows rule 15 too**, through the one method both use (`MediaService.attachInTransaction`), instead of
+    a copy of it. The row is inserted in a transaction of its own and flushed inside the work, so a failed insert is
+    still a certain rollback that deletes the files, and a commit that fails keeps them.
+25. **The warning on a kept pair of files names the owner (« recipe list <id> » or « a media upload ») and both storage
+    keys, not the media id.** The hook runs around the work that creates the row, so it does not know the id; `storage_key`
+    is unique, and it is also what someone cleaning up needs in order to find the files. The row, if it is there, is found
+    by it.
+26. **The guardrail is an allow-list of two methods, not five.** Only `findPublicById` and `findAllPublicById` are called
+    outside the two services; `save`, `delete` and `totalBytesUploadedBy` are not, so they are not allowed there. The
+    class object `MediaEntity.class` is forbidden outside the two services, which covers `EntityManager.find` and
+    `getReference` without having to see their arguments.
+27. **The lock probe asks PostgreSQL who blocks whom.** It counts a backend waiting on a lock only if `pg_blocking_pids`
+    names the backend of the parked transaction, whose pid the parked step records from inside its own transaction. Any
+    other application on the same development database can no longer satisfy it.
+28. **The `408` test gets a connector of its own** instead of lowering the shared one for a second. Not a new application
+    context, so not a new connection pool.
+
 ## Tests
 
 | What                                                                                                  | Where                                       |
@@ -618,13 +681,14 @@ Added by the hardening that followed the review of both pull requests ([the outc
 | `GET /media/{id}` answering `404` for a list photo, to its owner and to an administrator              | same                                        |
 | A list photo's id refused as a recipe cover, a step picture and an ingredient icon (create and update), `400`, the same answer as an unknown id | same, and `IngredientServiceTest`/`RecipeServiceTest` for the lookups |
 | The lifecycle against the real database and a real storage directory under `target/`: replace, remove, delete the list — each time the old row and both files are gone; a failed attach leaves nothing; a rollback leaves the old files | same |
-| Overlapping writes, **proving the lock**: the first write is held inside its locked transaction, the second is shown to be *waiting* on the row lock (in `pg_stat_activity`), then the first is released. Two `PUT`s, a `PUT` against a `DELETE …/cover`, a `PUT` against `DELETE /lists/{id}` in both orders, two `DELETE /lists/{id}`: the final rows, files and served bytes. Each fails with the lock removed | same |
-| The outcome of a replace: a storage that throws after the commit (`200`, the new photo served, its files still on disk, both old deletions attempted, one `error` line with the media id); a rollback (new files gone, old photo untouched); a transaction that never began (new files gone); a commit whose outcome is lost (new files kept, photo served) | same, `MediaServiceTest` for the hooks |
-| The privacy convention: no class but `MediaService` and `RecipeListCoverService` reads a `media` row by id without the public filter | `MediaPrivacyArchitectureTest` (ArchUnit) |
+| Overlapping writes, **proving the lock**: the first write is held inside its locked transaction (which records its own backend pid), the second is shown to be *blocked by that backend* (`pg_blocking_pids` in `pg_stat_activity`, so another application on the same database cannot satisfy it), then the first is released. Two `PUT`s, a `PUT` against a `DELETE …/cover`, a `PUT` against `DELETE /lists/{id}` in both orders, two `DELETE /lists/{id}`: the final rows, files and served bytes. Each fails with the lock removed | same |
+| The outcome of a replace: a storage that throws after the commit (`200`, the new photo served, its files still on disk, both old deletions attempted, one `error` line with the media id); a rollback (new files gone, old photo untouched); a transaction that never began (new files gone); an exception thrown after a commit that completed (new files kept, photo served); **a real commit that fails at the database after the work returned** (the backend is terminated just before the commit: the transaction is reported rolled back, and the new files are kept) | same |
+| **Rule 15 against Spring's own transaction manager**: a commit that throws a `DataAccessException` after the work returned (Spring reports « rolled back », files kept); a work that throws (files deleted); a transaction that never begins (files deleted, work never run); a commit that throws a `TransactionException` (unknown, files kept); a rollback that fails (unknown, files kept); a commit (files kept). For the list photo's shared method and for `POST /media` alike | `MediaServiceTest`, over `ScriptedTransactionManager`, a real `AbstractPlatformTransactionManager` whose commit, begin and rollback can be made to fail |
+| The privacy convention: no class but `MediaService` and `RecipeListCoverService` calls a `MediaRepository` method other than the two public lookups, calls `MediaService.open`, or refers to `MediaEntity.class`; and each of the three rules reports the offender it is meant to | `MediaPrivacyArchitectureTest` (ArchUnit) |
 | `createdAt` and `updatedAt` of a write's answer equal those of the next read, for a list and for a recipe | `RecipeListsIntegrationTest`, `RecipesIntegrationTest`, `TimeConfigTest` |
 | Every field `RecipeListResponse` declares `required` is on every route that answers a list, `coverVersion` as an explicit `null` without a photo | `RecipeListsIntegrationTest` |
 | The order of the gates: a `415` and a missing `file` part before the `404`; a `503` before the `400` of a too-large image | `RecipeListCoverUploadIntegrationTest` |
-| A client that goes quiet mid-upload until the server's read timeout: `408`, one `info` line, nothing stored or counted | same (the timeout is lowered on the running server for that one test and put back) |
+| A client that goes quiet mid-upload until the server's read timeout: `408`, one `info` line, nothing stored or counted | same (on a second connector of the running server, with a one-second read timeout, added and removed by that one test) |
 | `findOrphans` does not return an attached photo and does return a detached one; `totalBytesUploadedBy` counts it | `MediaRepositoryTest` (`@DataJpaTest`) |
 | `GET /lists` out of N+1 with photos on some of the lists                                              | `RecipeListServiceQueryCountTest`           |
 | The `415` for a non-multipart request, on both routes, and `413` on a part over 8 MB (still answered by its own handler); the `304` of the public `GET /media/{id}` repeating its `Cache-Control` | `RecipeListCoverIntegrationTest`, `ApiExceptionHandlerTest`, `MediaUploadIntegrationTest` |

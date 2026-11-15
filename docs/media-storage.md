@@ -203,10 +203,17 @@ the list's):
    about 2x, which is very visible at 640 px.
 5. **Write under a generated key.** `<uuid>` plus the extension our encoder produced, sharded as
    `<first 2 chars>/<next 2 chars>/<uuid>.<ext>` so no single directory accumulates every image on the server.
-6. **Insert the `media` row**, and only then return. Every column is measured from the artefact of steps 4–5:
-   `width`/`height` from the written `BufferedImage`, `size_bytes` and `checksum_sha256` from the bytes on disk,
-   `content_type` from the encoder we chose. If the insert fails, both files just written are deleted — no
-   transaction covers the filesystem, so that unwinding is by hand or not at all.
+6. **Insert the `media` row**, in a transaction of its own, and only then return. Every column is measured from the
+   artefact of steps 4–5: `width`/`height` from the written `BufferedImage`, `size_bytes` and `checksum_sha256` from the
+   bytes on disk, `content_type` from the encoder we chose. No transaction covers the filesystem, so what becomes of the
+   two files is decided by hand, by one rule: **they are deleted only when the commit was certainly never attempted** —
+   the transaction never began, or the insert threw (the row is flushed inside the work, so a constraint violation is
+   one of those) and the transaction rolled back. If the commit itself fails, they are **kept** and a `warn` names them:
+   Spring reports « rolled back » for a commit that failed at the database even when the server may have committed, and
+   a file deleted under a committed, public row is an image that answers `404` while a recipe may already reference it,
+   where a stray pair of files is only disk. It used to delete them on any exception after the insert. The rule, and the
+   one method both uploads share, are in
+   [recipe-list-cover.md](recipe-list-cover.md#setting-or-replacing--put-listsidcover).
 
 Two implementation details that are load-bearing rather than incidental:
 
@@ -388,13 +395,15 @@ table — and differs in **who may read it**: only the list's owner, and only th
   The files are deleted after the transaction commits, so a rollback never leaves a row pointing at a deleted file. The
   hook that does it (`MediaService.deleteAfterCommit`) never fails the request that has committed: a storage that throws
   is caught and logged with the media id, per file, so one file that cannot be removed does not keep the other from being.
-  And the *new* files of a replace are deleted only when the transaction is known to have rolled back or never began, not
-  on any exception: see [recipe-list-cover.md](recipe-list-cover.md#setting-or-replacing--put-listsidcover).
+  And the *new* files of a replace are deleted only when the commit was certainly never attempted (the transaction never
+  began, or the work threw and it rolled back), not whenever the transaction reports « rolled back » and not on any
+  exception: see [recipe-list-cover.md](recipe-list-cover.md#setting-or-replacing--put-listsidcover).
 - **Disk use.** `totalBytesUploadedBy` counts list photos: they use disk and carry an `uploaded_by_id`.
 - **List photos never leave an orphan *row*.** The only thing that can be left behind is a **file**: one whose deletion
   failed after commit (logged with its storage key by `MediaStorageService.delete`, or with the media id when the storage
-  threw, and nothing can find it later), the new files of a commit whose outcome was unknown, or files written by a
-  request that was killed before its transaction committed — the same exposure `POST /media` has.
+  threw, and nothing can find it later), the new files of a commit that failed or whose outcome was unknown (kept, with a
+  `warn`, on `POST /media` as well), or files written by a request that was killed before its transaction committed — the
+  same exposure `POST /media` has.
 
 ## Configuration
 
