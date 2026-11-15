@@ -2233,6 +2233,10 @@ components:
             followed by text is a 400.
     RecipeListResponse:
       type: object
+      description: >-
+        One list, on every route that answers with a list. Everything but `containsRecipe` is **always sent**, and
+        `coverVersion` is sent as an explicit `null` when the list has no photo, never left out.
+      required: [id, name, emoji, recipeCount, createdAt, updatedAt, coverVersion, recipeCoverMediaIds]
       properties:
         id:
           type: string

@@ -1,12 +1,17 @@
 package ilenreste.unpeu.recettesback.models.recipes.responses;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.time.Instant;
 import java.util.List;
 
 /**
  * One recipe list, as an item of {@code GET /lists} and as the body of every other route that answers with a list.
+ * <p>
+ * Every component but {@code containsRecipe} is <strong>always sent</strong>, and says so in the contract
+ * ({@code required}), so that the types a client generates from it are not all optional. {@code coverVersion} is
+ * required <em>and</em> nullable: the key is there, with a {@code null}, when the list has no photo.
  *
  * @param id                  the list id
  * @param name                as the owner typed it, trimmed
@@ -31,13 +36,21 @@ import java.util.List;
  *                            not given — which is every route but that one
  */
 public record RecipeListResponse(
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         String id,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         String name,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         String emoji,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         long recipeCount,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         Instant createdAt,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         Instant updatedAt,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, nullable = true)
         String coverVersion,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         List<String> recipeCoverMediaIds,
         @JsonInclude(JsonInclude.Include.NON_NULL)
         Boolean containsRecipe
