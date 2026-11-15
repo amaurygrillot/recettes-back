@@ -31,13 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.CountDownLatch;
-import java.util.function.Supplier;
 
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -73,29 +67,6 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
     }
 
     // ------------------------------------------------------------------------------------------------- helpers
-
-    private static List<ResponseEntity<String>> inParallel(List<Supplier<ResponseEntity<String>>> calls) {
-        ExecutorService pool = Executors.newFixedThreadPool(calls.size());
-        CountDownLatch go = new CountDownLatch(1);
-        try {
-            List<Future<ResponseEntity<String>>> futures = calls.stream()
-                    .map(call -> pool.submit(() -> {
-                        go.await();
-                        return call.get();
-                    }))
-                    .toList();
-            go.countDown();
-            List<ResponseEntity<String>> responses = new ArrayList<>();
-            for (Future<ResponseEntity<String>> future : futures) {
-                responses.add(future.get());
-            }
-            return responses;
-        } catch (InterruptedException | ExecutionException exception) {
-            throw new IllegalStateException(exception);
-        } finally {
-            pool.shutdownNow();
-        }
-    }
 
     // --------------------------------------------------------------------------------- setting and the response
 
@@ -792,69 +763,8 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
         assertThat(storedFiles()).as("the old files went, the new ones stayed").isEqualTo(expected);
     }
 
-    @Test
-    void twoConcurrentPuts_bothAnswer200_andExactlyOnePhotoAndItsTwoFilesRemain() {
-        String id = listWithCover(ownerToken);
-        Set<String> before = storedFiles();
-
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> putCover(id, ownerToken),
-                () -> putCover(id, ownerToken)));
-
-        assertThat(responses).extracting(ResponseEntity::getStatusCode).containsOnly(HttpStatus.OK);
-        Map<String, Object> current = mediaRow(versionOf(id)).orElseThrow();
-        assertThat(mediaRowsUploadedBy(owner.id())).as("exactly one photo row").isEqualTo(1);
-        Set<String> after = storedFiles();
-        assertThat(after).as("and exactly its two files, the others deleted")
-                .hasSize(before.size())
-                .contains((String) current.get("storage_key"), (String) current.get("thumbnail_storage_key"));
-    }
-
-    @Test
-    void aPutRacingARemoval_endsWithAtMostOnePhoto_andNoRowOrFileLeftBehind() {
-        String id = listWithCover(ownerToken);
-        Set<String> before = storedFiles();
-
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> putCover(id, ownerToken),
-                () -> delete(coverPath(id), ownerToken)));
-
-        assertThat(responses).extracting(ResponseEntity::getStatusCode).containsOnly(HttpStatus.OK);
-        String version = versionOf(id);
-        long expectedRows = version == null ? 0 : 1;
-        assertThat(mediaRowsUploadedBy(owner.id())).isEqualTo(expectedRows);
-        assertThat(storedFiles()).hasSize(before.size() - 2 + (int) (expectedRows * 2));
-        if (version != null) {
-            Map<String, Object> current = mediaRow(version).orElseThrow();
-            assertThat(storedFiles()).contains((String) current.get("storage_key"),
-                    (String) current.get("thumbnail_storage_key"));
-        }
-    }
-
-    @Test
-    void aPutRacingTheDeletionOfTheList_leavesNothing_whicheverWins() {
-        String id = createList(unique("Photo"), ownerToken);
-        Set<String> before = storedFiles();
-
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> putCover(id, ownerToken),
-                () -> delete("/lists/" + id, ownerToken)));
-
-        assertThat(responses.get(1).getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
-        assertThat(responses.get(0).getStatusCode()).isIn(HttpStatus.OK, HttpStatus.NOT_FOUND);
-        assertThat(get("/lists/" + id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(mediaRowsUploadedBy(owner.id())).isZero();
-        assertThat(storedFiles()).isEqualTo(before);
-    }
-
-    @Test
-    void twoOverlappingDeletesOfAList_answerOne204AndOne404() {
-        String id = listWithCover(ownerToken);
-
-        List<ResponseEntity<String>> responses = inParallel(List.of(() -> delete("/lists/" + id, ownerToken),
-                () -> delete("/lists/" + id, ownerToken)));
-
-        assertThat(responses).extracting(ResponseEntity::getStatusCode)
-                .containsExactlyInAnyOrder(HttpStatus.NO_CONTENT, HttpStatus.NOT_FOUND);
-        assertThat(mediaRowsUploadedBy(owner.id())).isZero();
-    }
+    // The overlapping writes are in RecipeListCoverConcurrencyIntegrationTest, which holds one write inside the row lock
+    // to prove it.
 
     /**
      * The rename loads the list, a photo is attached from another connection before the rename writes, and the rename

@@ -4,7 +4,6 @@ import ilenreste.unpeu.recettesback.exceptions.RateLimitExceededException;
 import ilenreste.unpeu.recettesback.exceptions.RetryableException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.properties.CorsProperties;
-import ilenreste.unpeu.recettesback.services.media.MediaService;
 import ilenreste.unpeu.recettesback.support.TestImages;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -68,8 +67,6 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
     private static final String BOUNDARY = "----recettes-hang-up-boundary";
     private static final long EIGHT_MIB = 8L * 1024 * 1024;
 
-    @Autowired
-    private MediaService mediaService;
     @Autowired
     private CorsProperties corsProperties;
 
