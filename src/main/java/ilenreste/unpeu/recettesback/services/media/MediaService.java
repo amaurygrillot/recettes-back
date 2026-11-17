@@ -221,20 +221,24 @@ public class MediaService {
      * certain rollback. That is refused, not documented.
      *
      * @param owner what the files are being attached to, in the words of the log (« recipe list 42 »)
-     * @throws IllegalStateException if a transaction is already active, which is a bug in the caller; nothing is written
-     *                               and no file is touched
+     * @throws IllegalStateException if a transaction is already active, which is a bug in the caller; the work is not
+     *                               run, and the files, which will never have a row, are deleted
      */
     public <T> T attachInTransaction(StoredImage image, String owner, Supplier<T> attaching) {
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            // Nothing will ever attach them, and no hook is registered to say so.
+            discard(image);
             throw new IllegalStateException("The files of " + owner + " must be attached in a transaction of their own, "
                     + "and one is already active");
         }
         NewFiles files = new NewFiles(image, owner);
         try {
             return transactions.execute(status -> {
-                files.transactionBegan();
-                // First, so that a failure of anything in the work, a lock included, is still a rollback that removes them.
+                // First, so that a failure of anything in the work, a lock included, is still a rollback that removes
+                // them. Before the transaction is marked as begun: if registering fails, nothing was written, and the
+                // catch below deletes the files.
                 TransactionSynchronizationManager.registerSynchronization(files);
+                files.transactionBegan();
                 T attached = attaching.get();
                 files.workReturned();
                 return attached;
@@ -300,9 +304,18 @@ public class MediaService {
                 discard(image);
                 return;
             }
+            if (!workReturned) {
+                // The work threw and then the rollback itself failed (the connection died): no commit was attempted,
+                // so the files are most likely strays, but nobody saw the rollback happen.
+                log.warn("The transaction to attach the files {} and {} to {} could not be rolled back after its work "
+                                + "threw: keeping them, as the outcome is unknown. No commit was attempted, so they are "
+                                + "most likely strays that can be deleted",
+                        image.storageKey(), image.thumbnailStorageKey(), owner);
+                return;
+            }
             String outcome = status == STATUS_ROLLED_BACK
                     ? "was reported rolled back after its work had returned, so the commit itself failed"
-                    : "ended with an unknown outcome";
+                    : "ended with an unknown outcome after its work had returned";
             log.warn("The transaction to attach the files {} and {} to {} {}: keeping them, because its row may have "
                             + "been committed. Look up the storage key {}: a row means they are its files, no row "
                             + "means they are strays that can be deleted",

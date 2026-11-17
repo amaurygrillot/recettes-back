@@ -574,10 +574,11 @@ class MediaServiceTest {
 
     /**
      * Inside someone else's transaction the template would join it, and the hook would be told how <em>that</em> one
-     * ended: refused, with the work not run and the files untouched (the caller's own transaction decides about them).
+     * ended: refused, with the work not run. The files will never have a row, so they are deleted: no hook is registered
+     * to do it later.
      */
     @Test
-    void aCallerThatIsAlreadyInATransaction_isRefused_withTheWorkNotRunAndTheFilesUntouched() {
+    void aCallerThatIsAlreadyInATransaction_isRefused_theWorkIsNotRun_andTheFilesAreDeleted() {
         AtomicBoolean ran = new AtomicBoolean();
 
         new TransactionTemplate(transactionManager).executeWithoutResult(outer ->
@@ -587,7 +588,7 @@ class MediaServiceTest {
                 })).isInstanceOf(IllegalStateException.class).hasMessageContaining(OWNER));
 
         assertThat(ran).as("the work ran inside the caller's transaction").isFalse();
-        verify(storageService, never()).delete(anyString());
+        assertBothNewFilesWereDeleted();
     }
 
     /** Deleting is best effort: one file the storage cannot delete does not keep the other from being deleted. */

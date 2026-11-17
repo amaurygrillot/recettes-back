@@ -792,7 +792,6 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
             cutTheConnectionBeforeTheCommit(reported);
             return real;
         }).when(mediaService).deleteAfterCommit(any());
-        Set<String> strays = Set.of();
 
         try {
             ResponseEntity<String> response = putCover(id, ownerToken);
@@ -802,16 +801,41 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
             assertThat(reported.get()).as("what Spring reports for a commit that failed at the database")
                     .isEqualTo(TransactionSynchronization.STATUS_ROLLED_BACK);
             assertThat(versionOf(id)).as("the server never committed: still the old photo").isEqualTo(oldVersion);
-            strays = new HashSet<>(storedFiles());
-            strays.removeAll(before);
+            Set<String> strays = filesAddedSince(before);
             assertThat(strays).as("the two new files were kept").hasSize(2);
-            assertThat(output.getAll()).as("and a warning says whose they are, by list and by key")
-                    .contains("recipe list " + id).contains(strays.iterator().next());
+            assertThat(output.getAll()).as("and one warning says whose they are, by list and by key")
+                    .contains("to recipe list " + id + " was reported rolled back after its work had returned")
+                    .contains(strays.iterator().next());
         } finally {
             reset(mediaService);
-            for (String stray : strays) {
-                Files.deleteIfExists(storageRoot().resolve(stray));
+            deleteFiles(filesAddedSince(before));
+        }
+    }
+
+    /**
+     * What a successful attach must not do: warn that it is keeping files. The warning is the only trace of a kept pair,
+     * so it must mean something, and a hook that fell through to it on a committed transaction would log it on every
+     * photo and every upload.
+     */
+    @Test
+    void aPutAndAnUploadThatCommit_logNoWarningAboutTheirFiles(CapturedOutput output) throws Exception {
+        String id = createList(unique("Photo"), ownerToken);
+        assertThat(putCover(id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.OK);
+        Map<String, Object> photo = mediaRow(versionOf(id)).orElseThrow();
+        ResponseEntity<String> upload = sendFile(HttpMethod.POST, "/media", TestImages.jpeg(300, 200), ownerToken);
+        assertThat(upload.getStatusCode()).as(upload.getBody()).isEqualTo(HttpStatus.CREATED);
+        String uploadId = json(upload).path("id").asString();
+        Map<String, Object> uploaded = mediaRow(uploadId).orElseThrow();
+
+        try {
+            for (Map<String, Object> row : List.of(photo, uploaded)) {
+                assertThat(output.getAll()).as("a committed attach says nothing about keeping or deleting its files")
+                        .doesNotContain("The transaction to attach the files " + row.get("storage_key"));
             }
+        } finally {
+            // A public row nobody references: not the list's, so the teardown does not know it.
+            jdbc.update("DELETE FROM media WHERE id = ?", uploadId);
+            deleteFiles(Set.of((String) uploaded.get("storage_key"), (String) uploaded.get("thumbnail_storage_key")));
         }
     }
 
@@ -831,7 +855,6 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
             cutTheConnectionBeforeTheCommit(reported);
             return row;
         }).when(mediaService).persist(any());
-        Set<String> strays = Set.of();
 
         try {
             ResponseEntity<String> response = sendFile(HttpMethod.POST, "/media", TestImages.jpeg(300, 200), ownerToken);
@@ -841,16 +864,27 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
             assertThat(reported.get()).as("what Spring reports for a commit that failed at the database")
                     .isEqualTo(TransactionSynchronization.STATUS_ROLLED_BACK);
             assertThat(mediaRowsUploadedBy(owner.id())).as("the server never committed: no row").isZero();
-            strays = new HashSet<>(storedFiles());
-            strays.removeAll(before);
+            Set<String> strays = filesAddedSince(before);
             assertThat(strays).as("the two files of the upload were kept").hasSize(2);
-            assertThat(output.getAll()).as("and a warning says whose they are, by key").contains("a media upload")
+            assertThat(output.getAll()).as("and one warning says whose they are, by key")
+                    .contains("to a media upload was reported rolled back after its work had returned")
                     .contains(strays.iterator().next());
         } finally {
             reset(mediaService);
-            for (String stray : strays) {
-                Files.deleteIfExists(storageRoot().resolve(stray));
-            }
+            deleteFiles(filesAddedSince(before));
+        }
+    }
+
+    /** The files on disk now that were not there in {@code before}: computed when asked, so a cleanup sees them too. */
+    private Set<String> filesAddedSince(Set<String> before) {
+        Set<String> added = new HashSet<>(storedFiles());
+        added.removeAll(before);
+        return added;
+    }
+
+    private void deleteFiles(Set<String> storageKeys) throws java.io.IOException {
+        for (String storageKey : storageKeys) {
+            Files.deleteIfExists(storageRoot().resolve(storageKey));
         }
     }
 

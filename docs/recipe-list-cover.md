@@ -287,12 +287,18 @@ the runtime, which is what makes it acceptable for a rule that guards the privac
 id)` says « `EntityManager.find` » and nothing about which entity, and ArchUnit does not see constant arguments, so a rule
 on the call would have to forbid every `find` of the application. What it does see is that a class refers to the class
 object `MediaEntity.class`, which every such call needs. Nothing in production code refers to it today, so the rule costs
-nothing, and it is stricter than asked for: a typed `createQuery("…", MediaEntity.class)` and `Session.get` are caught too.
+nothing, and it is stricter than asked for: a typed `createQuery("…", MediaEntity.class)` and the `Class` overloads of `Session.get` are caught too.
 
 **What the rule cannot see**, because the bytecode does not say it: a call through a variable typed as the generic
 `JpaRepository<MediaEntity, String>` instead of `MediaRepository` (nothing is typed that way), **a method reference to an
 inherited method**, such as `mediaRepository::findAllById`, and a `@Query` on *another* repository that selects
-`MediaEntity` from a JPQL string. javac compiles the method reference to a handle on the interface that *declares* the
+`MediaEntity` from a JPQL string. The same family: a **second repository interface** over `MediaEntity` (its calls have
+another owner, so it would need its own rule), a query addressed by **string** with no class literal
+(`createQuery("… MediaEntity …")` with no result class, `Session.get("MediaEntity", id)`, a native query on `media`, a
+`JdbcTemplate`), and **navigation through an association** (`RecipeListEntity.getCover()` from any class that loaded a
+list, which is by design: the visibility of the list is the gate, and `GET /lists/{id}/cover` is the only route that
+serves what it finds). None of these exists in production code today; each is something a review of a new use of the
+media tables has to read. javac compiles the method reference to a handle on the interface that *declares* the
 method (`ListCrudRepository`) and keeps the receiver's type only in the call that builds the lambda, so it looks exactly
 like the `categoriesRepository::findAllById` that `RecipeService` legitimately passes to a helper. That is a pattern this
 code base uses: a new use of `MediaRepository` is something a review has to read. The public lookups are declared on
@@ -356,8 +362,12 @@ kept case may answer a `500` while the photo is set: **the front re-reads the li
 after any cancel.
 
 **What the rule costs, written down rather than hidden.** A rollback that is certain but happens after the work returned
-(a flush that fails at commit, a transaction marked rollback-only) looks exactly like the lost-acknowledgement case, so it
-keeps its two files too: a stray pair of files that nothing references and no route can reach. The work flushes before it
+(a flush or a `beforeCommit` callback that fails at commit, a transaction found rollback-only) looks exactly like the
+lost-acknowledgement case, and so does a work that threw whose rollback then failed (the connection died: the status is
+« unknown », and the `warn` says that no commit was attempted). Each keeps its two files too: a stray pair of files that
+nothing references and no route can reach. When the server did commit and the answer was an error, the **old** photo's
+pair is left behind as well, because its deletion is scheduled after a commit the application never saw succeed; the
+`warn` speaks of the new pair only, and the old one is found by the list's former `coverVersion`. The work flushes before it
 returns (`listsRepository.flush()` in the attach, for the list; the insert of the row, for `POST /media`) precisely so that
 the ordinary failures, a constraint or a lost lock, happen *inside* it and stay certain. What is left is rare and is disk
 only: the `warn` carries the list and both keys, so someone cleaning up can tell, by looking up the key, whether a row
