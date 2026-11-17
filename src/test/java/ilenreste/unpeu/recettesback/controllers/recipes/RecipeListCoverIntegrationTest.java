@@ -819,23 +819,28 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
      */
     @Test
     void aPutAndAnUploadThatCommit_logNoWarningAboutTheirFiles(CapturedOutput output) throws Exception {
+        Set<String> before = storedFiles();
         String id = createList(unique("Photo"), ownerToken);
-        assertThat(putCover(id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.OK);
-        Map<String, Object> photo = mediaRow(versionOf(id)).orElseThrow();
-        ResponseEntity<String> upload = sendFile(HttpMethod.POST, "/media", TestImages.jpeg(300, 200), ownerToken);
-        assertThat(upload.getStatusCode()).as(upload.getBody()).isEqualTo(HttpStatus.CREATED);
-        String uploadId = json(upload).path("id").asString();
-        Map<String, Object> uploaded = mediaRow(uploadId).orElseThrow();
 
         try {
+            assertThat(putCover(id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.OK);
+            Map<String, Object> photo = mediaRow(versionOf(id)).orElseThrow();
+            ResponseEntity<String> upload = sendFile(HttpMethod.POST, "/media", TestImages.jpeg(300, 200), ownerToken);
+            assertThat(upload.getStatusCode()).as(upload.getBody()).isEqualTo(HttpStatus.CREATED);
+            Map<String, Object> uploaded = mediaRow(json(upload).path("id").asString()).orElseThrow();
+
             for (Map<String, Object> row : List.of(photo, uploaded)) {
                 assertThat(output.getAll()).as("a committed attach says nothing about keeping or deleting its files")
                         .doesNotContain("The transaction to attach the files " + row.get("storage_key"));
             }
         } finally {
-            // A public row nobody references: not the list's, so the teardown does not know it.
-            jdbc.update("DELETE FROM media WHERE id = ?", uploadId);
-            deleteFiles(Set.of((String) uploaded.get("storage_key"), (String) uploaded.get("thumbnail_storage_key")));
+            // The upload is a public row nobody references, which the teardown does not know: the owner's media that no
+            // list points at. Removed whatever failed above, so that the account can still be deleted.
+            jdbc.update("""
+                    DELETE FROM media WHERE uploaded_by_id = ?
+                      AND id NOT IN (SELECT cover_media_id FROM recipe_lists WHERE cover_media_id IS NOT NULL)
+                    """, owner.id());
+            deleteFiles(filesAddedSince(before));
         }
     }
 

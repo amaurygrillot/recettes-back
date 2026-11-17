@@ -573,6 +573,27 @@ class MediaServiceTest {
     }
 
     /**
+     * The hook is registered <em>before</em> the transaction is marked as begun. If registering fails (a manager with no
+     * synchronization), nothing was written and nothing can be committed, so the files go through the « never began »
+     * path, once. Marked as begun first, it would be a transaction that began, a rollback, and no hook to say so: two new
+     * files for ever.
+     */
+    @Test
+    void aTransactionWhoseHookCannotBeRegistered_neverRanTheWork_andTheFilesAreDeleted() {
+        transactionManager.setTransactionSynchronization(
+                org.springframework.transaction.support.AbstractPlatformTransactionManager.SYNCHRONIZATION_NEVER);
+        AtomicBoolean ran = new AtomicBoolean();
+
+        assertThatThrownBy(() -> mediaService.attachInTransaction(NEW_FILES, OWNER, () -> {
+            ran.set(true);
+            return "attached";
+        })).isInstanceOf(IllegalStateException.class);
+
+        assertThat(ran).as("the work ran without a hook to settle its files").isFalse();
+        assertBothNewFilesWereDeleted();
+    }
+
+    /**
      * Inside someone else's transaction the template would join it, and the hook would be told how <em>that</em> one
      * ended: refused, with the work not run. The files will never have a row, so they are deleted: no hook is registered
      * to do it later.

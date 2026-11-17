@@ -297,7 +297,8 @@ another owner, so it would need its own rule), a query addressed by **string** w
 (`createQuery("… MediaEntity …")` with no result class, `Session.get("MediaEntity", id)`, a native query on `media`, a
 `JdbcTemplate`), and **navigation through an association** (`RecipeListEntity.getCover()` from any class that loaded a
 list, which is by design: the visibility of the list is the gate, and `GET /lists/{id}/cover` is the only route that
-serves what it finds). None of these exists in production code today; each is something a review of a new use of the
+serves what it finds). None of the first two exists in production code today (the third is used, legitimately, by `RecipeListService` and
+the cover service); each is something a review of a new use of the
 media tables has to read. javac compiles the method reference to a handle on the interface that *declares* the
 method (`ListCrudRepository`) and keeps the receiver's type only in the call that builds the lambda, so it looks exactly
 like the `categoriesRepository::findAllById` that `RecipeService` legitimately passes to a helper. That is a pattern this
@@ -352,8 +353,8 @@ The rule is one sentence: **the new files are deleted when, and only when, the c
 transaction never began, or the work threw and the transaction rolled back.** It is `MediaService.attachInTransaction`,
 which opens the transaction, registers the `afterCompletion` hook first thing inside it, sets a flag once the work has
 returned (the hook deletes only on `STATUS_ROLLED_BACK` **with the flag unset**), and has a `catch` that deletes only when
-the transaction never began. It refuses to run inside a transaction that is already active (an `IllegalStateException`,
-nothing written): the template would join it and the hook would be told how the *outer* transaction ended, after the work
+the transaction never began. It refuses to run inside a transaction that is already active (an `IllegalStateException`:
+the work is not run and the two files, which nothing will ever attach, are deleted): the template would join it and the hook would be told how the *outer* transaction ended, after the work
 had long returned. `POST /media` goes through the same method ([below](#what-can-still-leave-something-behind)),
 which is what keeps the two from disagreeing. The rule used to be « deleted when the transaction rolled back », and before
 that one `catch` of every exception around the whole call, which could not tell a rollback from a failure *after* the
@@ -367,7 +368,8 @@ lost-acknowledgement case, and so does a work that threw whose rollback then fai
 « unknown », and the `warn` says that no commit was attempted). Each keeps its two files too: a stray pair of files that
 nothing references and no route can reach. When the server did commit and the answer was an error, the **old** photo's
 pair is left behind as well, because its deletion is scheduled after a commit the application never saw succeed; the
-`warn` speaks of the new pair only, and the old one is found by the list's former `coverVersion`. The work flushes before it
+`warn` speaks of the new pair only, and nothing can find the old one: its row is deleted, and its files are named after a
+random key that has no relation to the media id (so not to the former `coverVersion` either). They are disk, no more. The work flushes before it
 returns (`listsRepository.flush()` in the attach, for the list; the insert of the row, for `POST /media`) precisely so that
 the ordinary failures, a constraint or a lost lock, happen *inside* it and stay certain. What is left is rare and is disk
 only: the `warn` carries the list and both keys, so someone cleaning up can tell, by looking up the key, whether a row
