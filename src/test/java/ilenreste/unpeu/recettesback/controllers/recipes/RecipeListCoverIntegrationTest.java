@@ -16,6 +16,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -32,6 +33,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static ilenreste.unpeu.recettesback.support.HttpTestSupport.body;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -729,13 +731,16 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
     }
 
     /**
-     * The commit went through and its acknowledgement was lost (the connection dropped, say): the caller sees an
-     * exception while the database holds the new row. Deleting the new files here would leave a photo that answers
-     * {@code 404} for ever, so they are kept. The old photo, whose deletion is scheduled after the commit that did
-     * happen, is gone.
+     * The transaction committed and <em>then</em> the caller saw an exception (here, the {@code TransactionTemplate}
+     * throws once the real {@code execute} has returned): the database holds the new row. Deleting the new files here
+     * would leave a photo that answers {@code 404} for ever, so they are kept. The old photo, whose deletion is
+     * scheduled after the commit that did happen, is gone.
+     * <p>
+     * This is an exception after a commit that <strong>completed</strong>, which is all it proves. A commit that fails
+     * at the database is the next test.
      */
     @Test
-    void aCommitWhoseOutcomeIsLost_keepsTheNewFiles_becauseTheRowMayWellBeThere() {
+    void anExceptionThrownAfterACommitThatCompleted_keepsTheNewFiles_becauseTheRowIsThere() {
         String id = listWithCover(ownerToken);
         String oldVersion = versionOf(id);
         Map<String, Object> old = mediaRow(oldVersion).orElseThrow();
@@ -761,6 +766,131 @@ class RecipeListCoverIntegrationTest extends RecipeListsHttpSupport {
         expected.removeAll(Set.of((String) old.get("storage_key"), (String) old.get("thumbnail_storage_key")));
         expected.addAll(Set.of((String) current.get("storage_key"), (String) current.get("thumbnail_storage_key")));
         assertThat(storedFiles()).as("the old files went, the new ones stayed").isEqualTo(expected);
+    }
+
+    /**
+     * The commit itself fails at the database, after the work has returned: the PostgreSQL backend of the transaction is
+     * terminated just before the {@code COMMIT} is sent, which is what a connection that drops at that instant looks like
+     * from this side. Spring reports such a transaction as <em>rolled back</em> (it asserts it here, so that this test
+     * cannot pass for being a different case), although with a real lost acknowledgement the server may have committed:
+     * from the client the two cannot be told apart. Deleting the new files on that report is how a committed photo ends
+     * up answering {@code 404}, so they are kept.
+     * <p>
+     * Here the server did <em>not</em> commit (the backend is gone before it reads the {@code COMMIT}), so the old photo
+     * is still the list's and the two new files are strays, which is the price of the rule and is cleaned up below.
+     */
+    @Test
+    void aCommitThatFailsAtTheDatabaseAfterTheWorkReturned_keepsTheNewFiles_eventhoughSpringCallsItARollback(
+            CapturedOutput output) throws Exception {
+        String id = listWithCover(ownerToken);
+        String oldVersion = versionOf(id);
+        Set<String> before = storedFiles();
+        AtomicInteger reported = new AtomicInteger(-1);
+        // The last step of the work that is spied runs inside the transaction: it arranges for the connection to be cut.
+        doAnswer(deletion -> {
+            Object real = deletion.callRealMethod();
+            cutTheConnectionBeforeTheCommit(reported);
+            return real;
+        }).when(mediaService).deleteAfterCommit(any());
+
+        try {
+            ResponseEntity<String> response = putCover(id, ownerToken);
+            reset(mediaService);
+
+            assertThat(response.getStatusCode().is5xxServerError()).as(response.getBody()).isTrue();
+            assertThat(reported.get()).as("what Spring reports for a commit that failed at the database")
+                    .isEqualTo(TransactionSynchronization.STATUS_ROLLED_BACK);
+            assertThat(versionOf(id)).as("the server never committed: still the old photo").isEqualTo(oldVersion);
+            Set<String> strays = filesAddedSince(before);
+            assertThat(strays).as("the two new files were kept").hasSize(2);
+            assertThat(output.getAll()).as("and one warning says whose they are, by list and by key")
+                    .contains("to recipe list " + id + " was reported rolled back after its work had returned")
+                    .contains(strays.iterator().next());
+        } finally {
+            reset(mediaService);
+            deleteFiles(filesAddedSince(before));
+        }
+    }
+
+    /**
+     * What a successful attach must not do: warn that it is keeping files. The warning is the only trace of a kept pair,
+     * so it must mean something, and a hook that fell through to it on a committed transaction would log it on every
+     * photo and every upload.
+     */
+    @Test
+    void aPutAndAnUploadThatCommit_logNoWarningAboutTheirFiles(CapturedOutput output) throws Exception {
+        Set<String> before = storedFiles();
+        String id = createList(unique("Photo"), ownerToken);
+
+        try {
+            assertThat(putCover(id, ownerToken).getStatusCode()).isEqualTo(HttpStatus.OK);
+            Map<String, Object> photo = mediaRow(versionOf(id)).orElseThrow();
+            ResponseEntity<String> upload = sendFile(HttpMethod.POST, "/media", TestImages.jpeg(300, 200), ownerToken);
+            assertThat(upload.getStatusCode()).as(upload.getBody()).isEqualTo(HttpStatus.CREATED);
+            Map<String, Object> uploaded = mediaRow(json(upload).path("id").asString()).orElseThrow();
+
+            for (Map<String, Object> row : List.of(photo, uploaded)) {
+                assertThat(output.getAll()).as("a committed attach says nothing about keeping or deleting its files")
+                        .doesNotContain("The transaction to attach the files " + row.get("storage_key"));
+            }
+        } finally {
+            // The upload is a public row nobody references, which the teardown does not know: the owner's media that no
+            // list points at. Removed whatever failed above, so that the account can still be deleted.
+            jdbc.update("""
+                    DELETE FROM media WHERE uploaded_by_id = ?
+                      AND id NOT IN (SELECT cover_media_id FROM recipe_lists WHERE cover_media_id IS NOT NULL)
+                    """, owner.id());
+            deleteFiles(filesAddedSince(before));
+        }
+    }
+
+    /**
+     * The same commit that fails at the database, for {@code POST /media}, whose row is <strong>public</strong>: it used
+     * to delete the files on any exception after its insert, and a lost acknowledgement there leaves an image that
+     * answers {@code 404} while a recipe may already reference it. It follows the rule of the list photo, through the same
+     * method, so its files are kept too (here, as strays, because the server never committed).
+     */
+    @Test
+    void aCommitThatFailsAtTheDatabase_keepsTheFilesOfAnUpload_eventhoughSpringCallsItARollback(CapturedOutput output)
+            throws Exception {
+        Set<String> before = storedFiles();
+        AtomicInteger reported = new AtomicInteger(-1);
+        doAnswer(insert -> {
+            Object row = insert.callRealMethod();
+            cutTheConnectionBeforeTheCommit(reported);
+            return row;
+        }).when(mediaService).persist(any());
+
+        try {
+            ResponseEntity<String> response = sendFile(HttpMethod.POST, "/media", TestImages.jpeg(300, 200), ownerToken);
+            reset(mediaService);
+
+            assertThat(response.getStatusCode().is5xxServerError()).as(response.getBody()).isTrue();
+            assertThat(reported.get()).as("what Spring reports for a commit that failed at the database")
+                    .isEqualTo(TransactionSynchronization.STATUS_ROLLED_BACK);
+            assertThat(mediaRowsUploadedBy(owner.id())).as("the server never committed: no row").isZero();
+            Set<String> strays = filesAddedSince(before);
+            assertThat(strays).as("the two files of the upload were kept").hasSize(2);
+            assertThat(output.getAll()).as("and one warning says whose they are, by key")
+                    .contains("to a media upload was reported rolled back after its work had returned")
+                    .contains(strays.iterator().next());
+        } finally {
+            reset(mediaService);
+            deleteFiles(filesAddedSince(before));
+        }
+    }
+
+    /** The files on disk now that were not there in {@code before}: computed when asked, so a cleanup sees them too. */
+    private Set<String> filesAddedSince(Set<String> before) {
+        Set<String> added = new HashSet<>(storedFiles());
+        added.removeAll(before);
+        return added;
+    }
+
+    private void deleteFiles(Set<String> storageKeys) throws java.io.IOException {
+        for (String storageKey : storageKeys) {
+            Files.deleteIfExists(storageRoot().resolve(storageKey));
+        }
     }
 
     // The overlapping writes are in RecipeListCoverConcurrencyIntegrationTest, which holds one write inside the row lock

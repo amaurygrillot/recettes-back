@@ -12,11 +12,8 @@ import ilenreste.unpeu.recettesback.services.media.StoredMedia;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
-
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The photo of a recipe list: set or replace it, remove it, read it. The rules, and the reasons for them, are in
@@ -31,9 +28,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <h2>Transactions: none across the upload</h2>
  * {@link #replace} is deliberately <strong>not</strong> {@code @Transactional}. It checks the list in a short read
  * transaction, runs the shared upload pipeline with <strong>no database connection held</strong> (a decode, and the
- * wait for the processing pool, can take seconds), and only then opens the short write transaction that attaches the
- * photo. That transaction is a {@link TransactionTemplate}, not a second annotated method of this class, because a
- * call from one method of a bean to another does not cross the proxy and would run with no transaction at all.
+ * wait for the processing pool, can take seconds), and only then has {@link MediaService#attachInTransaction} open the
+ * short write transaction that attaches the photo. That transaction is a {@code TransactionTemplate} inside
+ * {@code MediaService}, not a second annotated method of this class, because a call from one method of a bean to
+ * another does not cross the proxy and would run with no transaction at all.
  *
  * <h2>The lock</h2>
  * The write transaction locks the list's row again ({@code PESSIMISTIC_WRITE}, after the ownership check), reads the photo it holds <em>now</em>, swaps
@@ -48,14 +46,12 @@ public class RecipeListCoverService {
     private final RecipeListService lists;
     private final RecipeListsRepository listsRepository;
     private final MediaService mediaService;
-    private final TransactionTemplate transactions;
 
     public RecipeListCoverService(RecipeListService lists, RecipeListsRepository listsRepository,
-                                  MediaService mediaService, TransactionTemplate transactions) {
+                                  MediaService mediaService) {
         this.lists = lists;
         this.listsRepository = listsRepository;
         this.mediaService = mediaService;
-        this.transactions = transactions;
     }
 
     /**
@@ -65,35 +61,23 @@ public class RecipeListCoverService {
      * ({@link MediaService#intake}: the rate limit 429, the format and dimensions 400, the decode pool 503), then
      * the attach. A list deleted in the meantime is a 404.
      * <p>
-     * <strong>What becomes of the two new files depends on how the transaction ended, and only on that.</strong> They
-     * are deleted when it rolled back ({@link MediaService#discardIfRolledBack}, registered first thing in the attach) or
-     * never began (the {@code catch} below): either way no row points at them, and the old photo is left alone, so a
-     * failed request leaves nothing behind. They are <strong>kept</strong> when it committed, whatever is thrown after
-     * it, and when its outcome is unknown ({@code STATUS_UNKNOWN}): the row may be there, and deleting
-     * the files of a committed photo leaves a list that answers 404 for ever. Hence no {@code catch} of every exception
-     * around the whole call: it cannot tell a rollback from a failure after the commit.
+     * <strong>What becomes of the two new files depends on whether the commit was ever attempted</strong>, and is decided
+     * by {@link MediaService#attachInTransaction}, which this shares with {@code POST /media}. They are deleted when the
+     * transaction never began, or when {@link #attach} threw and it rolled back: either way no row points at them, and
+     * the old photo is left alone, so a failed request leaves nothing behind. They are <strong>kept</strong> when it
+     * committed, whatever is thrown after it, when it reports a rollback <em>after</em> {@link #attach} returned (the
+     * commit itself failed, and the server may have committed) and when its outcome is unknown: deleting the files of a
+     * committed photo leaves a list that answers 404 for ever. Hence no {@code catch} of every exception around the
+     * whole call, and not even « delete whenever it rolled back »: neither can tell a rollback that is certain from a
+     * commit that failed.
      */
     public RecipeListResponse replace(String listId, MultipartFile file) {
         lists.requireOwned(listId);
         StoredImage image = mediaService.intake(file);
-        AtomicBoolean transactionBegan = new AtomicBoolean();
-        try {
-            return transactions.execute(status -> {
-                transactionBegan.set(true);
-                return attach(listId, image);
-            });
-        } catch (RuntimeException failure) {
-            if (!transactionBegan.get()) {
-                log.warn("The transaction to attach a photo to recipe list {} could not begin: deleting its files", listId);
-                mediaService.discard(image);
-            }
-            throw failure;
-        }
+        return mediaService.attachInTransaction(image, "recipe list " + listId, () -> attach(listId, image));
     }
 
     private RecipeListResponse attach(String listId, StoredImage image) {
-        // First, so that a failure of anything below, the lock included, is still a rollback that removes the files.
-        mediaService.discardIfRolledBack(image);
         RecipeListEntity list = lists.ownedListForUpdate(listId);
         MediaEntity previous = list.getCover();
         list.setCover(mediaService.persist(image));

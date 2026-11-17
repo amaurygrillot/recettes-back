@@ -39,8 +39,10 @@ import static org.mockito.Mockito.reset;
  * <strong>These tests prove the lock, which a pair of requests released together cannot.</strong> Two requests fired at
  * once only overlap if the scheduler lets them, so without any lock they pass whenever the writes happen to run one after
  * the other. Here the overlap is made, not hoped for: the first write is <em>parked</em> inside its locked transaction
- * (at a step of its own that runs under the lock, a spy of the shared context), the second is started and shown to be
- * <em>waiting on the row lock</em> in {@code pg_stat_activity}, and only then is the first released. With the lock taken
+ * (at a step of its own that runs under the lock, a spy of the shared context, which records its own PostgreSQL backend),
+ * the second is started and shown to be <em>blocked by that backend</em> on the row lock ({@code pg_stat_activity} and
+ * {@code pg_blocking_pids}: not merely waiting, which another application on the same database could be), and only then
+ * is the first released. With the lock taken
  * out, the second write sails through while the first is parked, the wait is never seen and every test here fails, which is
  * how it was checked.
  * <p>
@@ -90,10 +92,14 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         private final CountDownLatch reached = new CountDownLatch(1);
         private final CountDownLatch released = new CountDownLatch(1);
         private final AtomicBoolean taken = new AtomicBoolean();
+        private volatile int backend;
 
         Answer<Object> park() {
             return call -> {
                 if (taken.compareAndSet(false, true)) {
+                    // Read from inside the parked transaction, before anyone is told it is parked: which PostgreSQL
+                    // backend holds the row lock is what the second write is then shown to be blocked by.
+                    backend = backendOfTheTransaction();
                     reached.countDown();
                     assertThat(released.await(PATIENCE.toMillis(), TimeUnit.MILLISECONDS))
                             .as("the test never released the parked write").isTrue();
@@ -105,6 +111,11 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         void awaitReached() throws InterruptedException {
             assertThat(reached.await(PATIENCE.toMillis(), TimeUnit.MILLISECONDS))
                     .as("the first write never reached the step where it is to be parked").isTrue();
+        }
+
+        /** The PostgreSQL backend that runs the parked transaction: valid once {@link #awaitReached} has returned. */
+        int backend() {
+            return backend;
         }
 
         void release() {
@@ -141,11 +152,14 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
     }
 
     /**
-     * Waits until PostgreSQL itself reports a backend waiting on a lock of {@code recipe_lists}: the second write is
-     * blocked behind the first, which is the one thing a test without the lock cannot show. Gives up, with a message that
-     * says what it means, if the second write finishes instead (nothing made it wait) or the deadline passes.
+     * Waits until PostgreSQL itself reports a backend waiting on a lock of {@code recipe_lists} <strong>that the parked
+     * transaction's own backend holds</strong> ({@code pg_blocking_pids}): the second write is blocked behind the first,
+     * which is the one thing a test without the lock cannot show. Counting any backend waiting on any lock of the table
+     * would let another application on the same development database (the one started from the IDE, say) satisfy it, and
+     * the test would pass for the wrong reason. Gives up, with a message that says what it means, if the second write
+     * finishes instead (nothing made it wait) or the deadline passes.
      */
-    private void awaitBlockedOnTheRowLock(Future<?> second) throws InterruptedException {
+    private void awaitBlockedByTheParkedWrite(Future<?> second, Parked parked) throws InterruptedException {
         long deadline = System.nanoTime() + PATIENCE.toNanos();
         while (System.nanoTime() < deadline) {
             if (second.isDone()) {
@@ -156,13 +170,15 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
                     SELECT count(*) FROM pg_stat_activity
                     WHERE datname = current_database() AND pid <> pg_backend_pid()
                       AND wait_event_type = 'Lock' AND query ILIKE '%recipe_lists%'
-                    """, Integer.class);
+                      AND ? = ANY(pg_blocking_pids(pid))
+                    """, Integer.class, parked.backend());
             if (waiting != null && waiting > 0) {
                 return;
             }
             Thread.sleep(20);
         }
-        throw new AssertionError("The second write was never seen waiting on the row lock within " + PATIENCE);
+        throw new AssertionError("The second write was never seen blocked by the parked write's backend "
+                + parked.backend() + " within " + PATIENCE);
     }
 
     private static <T> T result(Future<T> request) throws InterruptedException, ExecutionException, TimeoutException {
@@ -213,7 +229,7 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         Future<ResponseEntity<String>> first = start(() -> putCover(id, ownerToken, PORTRAIT));
         parked.awaitReached();
         Future<ResponseEntity<String>> second = start(() -> putCover(id, ownerToken, SMALL));
-        awaitBlockedOnTheRowLock(second);
+        awaitBlockedByTheParkedWrite(second, parked);
         parked.release();
 
         ResponseEntity<String> firstAnswer = result(first);
@@ -246,7 +262,7 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         Future<ResponseEntity<String>> put = start(() -> putCover(id, ownerToken, PORTRAIT));
         parked.awaitReached();
         Future<ResponseEntity<String>> removal = start(() -> delete(coverPath(id), ownerToken));
-        awaitBlockedOnTheRowLock(removal);
+        awaitBlockedByTheParkedWrite(removal, parked);
         parked.release();
 
         ResponseEntity<String> putAnswer = result(put);
@@ -271,7 +287,7 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         Future<ResponseEntity<String>> removal = start(() -> delete(coverPath(id), ownerToken));
         parked.awaitReached();
         Future<ResponseEntity<String>> put = start(() -> putCover(id, ownerToken, PORTRAIT));
-        awaitBlockedOnTheRowLock(put);
+        awaitBlockedByTheParkedWrite(put, parked);
         parked.release();
 
         ResponseEntity<String> removalAnswer = result(removal);
@@ -299,7 +315,7 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         Future<ResponseEntity<String>> put = start(() -> putCover(id, ownerToken, PORTRAIT));
         parked.awaitReached();
         Future<ResponseEntity<String>> deletion = start(() -> delete("/lists/" + id, ownerToken));
-        awaitBlockedOnTheRowLock(deletion);
+        awaitBlockedByTheParkedWrite(deletion, parked);
         parked.release();
 
         assertThat(result(put).getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -320,7 +336,7 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         Future<ResponseEntity<String>> deletion = start(() -> delete("/lists/" + id, ownerToken));
         parked.awaitReached();
         Future<ResponseEntity<String>> put = start(() -> putCover(id, ownerToken, PORTRAIT));
-        awaitBlockedOnTheRowLock(put);
+        awaitBlockedByTheParkedWrite(put, parked);
         parked.release();
 
         assertThat(result(deletion).getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
@@ -344,7 +360,7 @@ class RecipeListCoverConcurrencyIntegrationTest extends RecipeListsHttpSupport {
         Future<ResponseEntity<String>> first = start(() -> delete("/lists/" + id, ownerToken));
         parked.awaitReached();
         Future<ResponseEntity<String>> second = start(() -> delete("/lists/" + id, ownerToken));
-        awaitBlockedOnTheRowLock(second);
+        awaitBlockedByTheParkedWrite(second, parked);
         parked.release();
 
         assertThat(result(first).getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);

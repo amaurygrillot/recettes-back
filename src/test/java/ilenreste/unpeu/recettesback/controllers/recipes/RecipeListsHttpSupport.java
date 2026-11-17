@@ -25,6 +25,7 @@ import ilenreste.unpeu.recettesback.support.RecipeListFixtures;
 import ilenreste.unpeu.recettesback.support.TestAccount;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
+import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,6 +39,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -46,6 +49,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +57,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -324,6 +329,64 @@ abstract class RecipeListsHttpSupport {
 
     protected boolean fileExists(String storageKey) {
         return Files.isRegularFile(storageRoot().resolve(storageKey));
+    }
+
+    /**
+     * For a write whose transaction is to fail <em>at the commit</em>: called from a spied step that runs inside the
+     * transaction, on the request's own thread, it arranges for the PostgreSQL backend that runs the transaction to be
+     * terminated just before the {@code COMMIT} is sent. That is what a connection that drops at that instant looks like
+     * from this side, and it is a real failure of the real commit, which a mock cannot be.
+     * <p>
+     * {@code reported} receives what the transaction manager reports to the synchronizations once the transaction is
+     * over, so that a test can assert it was the case it means to test (Spring says « rolled back » for such a commit,
+     * although with a lost acknowledgement the server may have committed) and did not pass for being another.
+     */
+    protected void cutTheConnectionBeforeTheCommit(AtomicInteger reported) {
+        int backend = backendOfTheTransaction();
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void beforeCompletion() {
+                terminateAndAwait(backend);
+            }
+
+            @Override
+            public void afterCompletion(int status) {
+                reported.set(status);
+            }
+        });
+    }
+
+    /**
+     * The PostgreSQL backend (its pid) that runs the transaction the calling thread is in: for a spied step of a write,
+     * which runs inside it, to say which backend it is holding locks in. Read through the transaction's own connection
+     * and without flushing, because a native query through the entity manager would flush what the spied step is about
+     * to write.
+     */
+    protected int backendOfTheTransaction() {
+        return entityManager.unwrap(Session.class).doReturningWork(connection -> {
+            try (var statement = connection.createStatement();
+                 var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
+                rows.next();
+                return rows.getInt(1);
+            }
+        });
+    }
+
+    /** Ends that backend from another connection, and does not return until PostgreSQL says it is gone. */
+    private void terminateAndAwait(int backend) {
+        jdbc.queryForObject("SELECT pg_terminate_backend(?)", Boolean.class, backend);
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE pid = ?", Integer.class, backend) > 0) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("Backend " + backend + " was still there 10 s after it was terminated");
+            }
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting for backend " + backend + " to go", interrupted);
+            }
+        }
     }
 
     protected static JsonNode json(ResponseEntity<String> response) {

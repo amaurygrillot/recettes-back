@@ -5,6 +5,8 @@ import ilenreste.unpeu.recettesback.exceptions.RetryableException;
 import ilenreste.unpeu.recettesback.exceptions.ServiceOverloadedException;
 import ilenreste.unpeu.recettesback.properties.CorsProperties;
 import ilenreste.unpeu.recettesback.support.TestImages;
+import org.apache.catalina.connector.Connector;
+import org.apache.catalina.startup.Tomcat;
 import org.apache.coyote.AbstractProtocol;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.Test;
@@ -236,7 +238,7 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         try (Socket socket = new Socket("localhost", port)) {
             socket.setSoLinger(reset, 0);
             OutputStream out = socket.getOutputStream();
-            out.write(requestHead(id, body.length));
+            out.write(requestHead(port, id, body.length));
             out.write(body, 0, body.length / 2);
             out.flush();
             Thread.sleep(300);
@@ -258,9 +260,14 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
 
     /**
      * The other way a body stops arriving: the client does not hang up, it just goes quiet (a phone that lost its signal
-     * halfway, a tab that was suspended) until the server's own read timeout gives up on it. Real HTTP, real timeout: the
-     * server's connection timeout is lowered for the duration of the test, on the running server and for the connection
-     * this test opens, and put back (no application context of its own, which would be a connection pool of its own).
+     * halfway, a tab that was suspended) until the server's own read timeout gives up on it. Real HTTP, real timeout, on a
+     * <strong>second connector of the running server</strong> whose read timeout is one second, added for this test and
+     * removed after it. The shared connector's setting is never touched: lowering it, even for a second and even to put
+     * it back, would shorten the keep-alive of every connection that finished a response meanwhile, including the shared
+     * test client's, and would make this test depend on nothing else running. No application context of its own either,
+     * which would be a connection pool of its own. The connector is a bare one, without the application's other
+     * {@code server.tomcat.*} settings: only the read timeout matters to what is asserted here, and everything above the
+     * connector (the filters, the handler, the controller) is the application's own.
      * <p>
      * What it answers is the <strong>container's</strong> {@code 408 Request Timeout}, with Spring Boot's JSON error body
      * rather than a problem: Tomcat has already decided the request is over when the exception reaches the handler, so
@@ -276,21 +283,27 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         Snapshot before = snapshot(id);
         clearInvocations(rateLimiter, reencoder);
         byte[] body = multipartBody(TestImages.jpeg(1600, 1200));
-        AbstractProtocol<?> protocol = tomcatProtocol();
-        int configured = protocol.getConnectionTimeout();
+        Tomcat tomcat = tomcat();
+        Connector quiet = new Connector();
+        quiet.setPort(0);
+        ((AbstractProtocol<?>) quiet.getProtocolHandler()).setConnectionTimeout(1_000);
         String answer;
 
-        protocol.setConnectionTimeout(1_000);
-        try (Socket socket = new Socket("localhost", port)) {
-            socket.setSoTimeout((int) Duration.ofSeconds(20).toMillis());
-            OutputStream out = socket.getOutputStream();
-            out.write(requestHead(id, body.length));
-            out.write(body, 0, body.length / 2);
-            out.flush();
-            // Nothing more is sent: the server waits for its read timeout and then answers.
-            answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+        // Everything from the moment the connector is added is inside the try, so that however it fails the port is freed.
+        try {
+            tomcat.getService().addConnector(quiet);
+            try (Socket socket = new Socket("localhost", quiet.getLocalPort())) {
+                socket.setSoTimeout((int) Duration.ofSeconds(20).toMillis());
+                OutputStream out = socket.getOutputStream();
+                out.write(requestHead(quiet.getLocalPort(), id, body.length));
+                out.write(body, 0, body.length / 2);
+                out.flush();
+                // Nothing more is sent: the server waits for its read timeout and then answers.
+                answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+            }
         } finally {
-            protocol.setConnectionTimeout(configured);
+            tomcat.getService().removeConnector(quiet);
+            quiet.destroy();
         }
 
         assertThat(answer).as("the container's own answer to a client that went quiet").startsWith("HTTP/1.1 408");
@@ -307,10 +320,10 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         assertThat(decodePermits().availablePermits()).isEqualTo(mediaProperties.maxConcurrentProcessing());
     }
 
-    /** The running server's HTTP connector, for the one test that has to make its read timeout short. */
-    private AbstractProtocol<?> tomcatProtocol() {
+    /** The running embedded Tomcat, for the one test that needs a connector of its own. */
+    private Tomcat tomcat() {
         WebServer server = ((WebServerApplicationContext) applicationContext).getWebServer();
-        return (AbstractProtocol<?>) ((TomcatWebServer) server).getTomcat().getConnector().getProtocolHandler();
+        return ((TomcatWebServer) server).getTomcat();
     }
 
     /**
@@ -336,7 +349,7 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         try (Socket socket = new Socket("localhost", port)) {
             socket.setSoLinger(true, 0);
             OutputStream out = socket.getOutputStream();
-            out.write(requestHead(id, body.length));
+            out.write(requestHead(port, id, body.length));
             out.write(body);
             out.flush();
             assertThat(decoding.await(10, TimeUnit.SECONDS)).as("the server is decoding").isTrue();
@@ -364,8 +377,8 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         return TestImages.concat(TestImages.concat(head, image), tail);
     }
 
-    private byte[] requestHead(String listId, int contentLength) {
-        return ("PUT " + coverPath(listId) + " HTTP/1.1\r\nHost: localhost:" + port
+    private byte[] requestHead(int serverPort, String listId, int contentLength) {
+        return ("PUT " + coverPath(listId) + " HTTP/1.1\r\nHost: localhost:" + serverPort
                 + "\r\nAuthorization: " + ownerToken
                 + "\r\nContent-Type: multipart/form-data; boundary=" + BOUNDARY
                 + "\r\nContent-Length: " + contentLength

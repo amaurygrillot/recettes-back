@@ -17,6 +17,7 @@ import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -28,6 +29,7 @@ import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -55,9 +57,8 @@ import java.util.stream.Collectors;
  * decision. {@link #upload} ({@code POST /media}) then inserts a public row, measuring every column from the
  * artefact of the steps above; a list's own photo is attached in the transaction of its list, so that its row is
  * born attached and never exists as an ordinary, publicly readable image (see {@code docs/recipe-list-cover.md}).
- * Whoever cannot finish must {@link #discard} the files, since no transaction covers the filesystem; a caller whose
- * transaction attaches them registers {@link #discardIfRolledBack} instead, so that the files go only if the
- * transaction does.
+ * No transaction covers the filesystem, so what becomes of the two files is decided by {@link #attachInTransaction},
+ * the one place both callers go through: they are deleted only when the commit was certainly never attempted.
  * <p>
  * The two file writes share one {@code try}: if either fails, both files are deleted, so the claim above — a
  * failure at any step stores nothing — holds for the thumbnail write as well as for the insert.
@@ -75,6 +76,7 @@ public class MediaService {
     private final MediaMapper mediaMapper;
     private final CurrentUserService currentUserService;
     private final UploadRateLimiter rateLimiter;
+    private final TransactionTemplate transactions;
 
     /**
      * Bounds how many uploads decode at once.
@@ -89,7 +91,8 @@ public class MediaService {
 
     public MediaService(MediaRepository mediaRepository, MediaStorageService storageService,
                         ImageReencoder reencoder, MediaProperties properties, MediaMapper mediaMapper,
-                        CurrentUserService currentUserService, UploadRateLimiter rateLimiter) {
+                        CurrentUserService currentUserService, UploadRateLimiter rateLimiter,
+                        TransactionTemplate transactions) {
         this.mediaRepository = mediaRepository;
         this.storageService = storageService;
         this.reencoder = reencoder;
@@ -97,25 +100,29 @@ public class MediaService {
         this.mediaMapper = mediaMapper;
         this.currentUserService = currentUserService;
         this.rateLimiter = rateLimiter;
+        this.transactions = transactions;
         // Fair, so a burst does not starve the request that has been waiting longest.
         this.processingPermits = new Semaphore(properties.maxConcurrentProcessing(), true);
     }
 
+    /**
+     * {@code POST /media}: the gates and the files of {@link #intake}, then the public row, inserted in a transaction of
+     * its own by {@link #attachInTransaction}, which also decides what becomes of the files if that does not complete.
+     * The files are deleted only if the commit was certainly never attempted; a commit that fails keeps them, because
+     * this row is public and a deleted file under a committed row is an image that answers {@code 404} while a recipe
+     * may already reference it.
+     */
     public MediaResponse upload(MultipartFile file) {
         StoredImage image = intake(file);
-        try {
-            MediaEntity saved = persist(image);
-            log.info("Stored media {} as {}x{} {}", saved.getId(),
-                    saved.getWidth(), saved.getHeight(), saved.getContentType());
-            return mediaMapper.toResponse(saved);
-        } catch (RuntimeException exception) {
-            // The files are on disk and no transaction covers them, so unwind by hand -
-            // otherwise every failed upload leaves orphans nothing will ever reference.
-            log.error("Rolling back the files written for a media upload that could not be completed",
-                    exception);
-            discard(image);
-            throw exception;
-        }
+        MediaEntity saved = attachInTransaction(image, "a media upload", () -> {
+            MediaEntity row = persist(image);
+            // Flushed inside the work, so that an insert the database refuses fails here, where the rollback is
+            // certain, and not at the commit, where it looks like a commit that failed.
+            mediaRepository.flush();
+            return row;
+        });
+        log.info("Stored media {} as {}x{} {}", saved.getId(), saved.getWidth(), saved.getHeight(), saved.getContentType());
+        return mediaMapper.toResponse(saved);
     }
 
     /**
@@ -191,38 +198,129 @@ public class MediaService {
     }
 
     /**
+     * Runs {@code attaching}, the code that gives the files of an {@link #intake} their row, in a new transaction, and
+     * settles the files by how that transaction ended. <strong>The files are deleted when, and only when, the commit was
+     * certainly never attempted</strong>: the transaction never began, or {@code attaching} threw and the transaction
+     * rolled back.
+     * <p>
+     * « Rolled back » alone is not enough, because it is what the transaction manager reports for a commit that failed
+     * at the database too (the connection drops while PostgreSQL commits and the acknowledgement is lost: JPA throws a
+     * {@code DataAccessException} and the manager rolls back what it can and says {@code STATUS_ROLLED_BACK}) — and
+     * then the server may have committed. So a rollback reported <em>after {@code attaching} returned</em>, like a
+     * commit whose outcome is unknown ({@code STATUS_UNKNOWN}), keeps the files and logs a {@code warn}: a deleted file
+     * under a committed row is an image that answers {@code 404} for ever, where a stray pair of files is only disk. A
+     * commit that completed keeps them as well, whatever is thrown after it.
+     * <p>
+     * {@code attaching} should therefore flush what it writes before it returns, so that the ordinary failures (a
+     * constraint, a lost lock) happen inside it, where the rollback is certain.
+     * <p>
+     * No transaction may be active: it is the caller of {@link #intake}, which holds no connection while an image
+     * decodes, and this opens the short one that attaches the result. A caller inside a transaction would make the
+     * template join it, so that the hook below would be told how the <em>outer</em> transaction ended, long after the work
+     * returned: a failure of the rest of that transaction would look like a failed commit and keep the files of a
+     * certain rollback. That is refused, not documented.
+     *
+     * @param owner what the files are being attached to, in the words of the log (« recipe list 42 »)
+     * @throws IllegalStateException if a transaction is already active, which is a bug in the caller; the work is not
+     *                               run, and the files, which will never have a row, are deleted
+     */
+    public <T> T attachInTransaction(StoredImage image, String owner, Supplier<T> attaching) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            // Nothing will ever attach them, and no hook is registered to say so.
+            discard(image);
+            throw new IllegalStateException("The files of " + owner + " must be attached in a transaction of their own, "
+                    + "and one is already active");
+        }
+        NewFiles files = new NewFiles(image, owner);
+        try {
+            return transactions.execute(status -> {
+                // First, so that a failure of anything in the work, a lock included, is still a rollback that removes
+                // them. Before the transaction is marked as begun: if registering fails, nothing was written, and the
+                // catch below deletes the files.
+                TransactionSynchronizationManager.registerSynchronization(files);
+                files.transactionBegan();
+                T attached = attaching.get();
+                files.workReturned();
+                return attached;
+            });
+        } catch (RuntimeException failure) {
+            if (!files.hasBegun()) {
+                log.warn("The transaction to attach the files {} and {} to {} could not begin: deleting them",
+                        image.storageKey(), image.thumbnailStorageKey(), owner);
+                discard(image);
+            }
+            throw failure;
+        }
+    }
+
+    /**
      * Deletes the files of an {@link #intake} whose row will never exist. Best effort, like every delete of the
      * storage: a file that cannot be deleted is logged, and never stops the other from being tried or fails the
      * caller, who is already unwinding something.
      */
-    public void discard(StoredImage image) {
+    private void discard(StoredImage image) {
         deleteQuietly(image.storageKey(), "an upload that was never attached");
         deleteQuietly(image.thumbnailStorageKey(), "an upload that was never attached");
     }
 
     /**
-     * Deletes the files of an {@link #intake} <strong>only if the surrounding transaction ends rolled back</strong>:
-     * the row that would have referenced them was never committed, so nothing can. A commit, and a commit whose outcome
-     * is unknown, keep them, because the row may well be there and a deleted file under a committed row is a photo that
-     * answers {@code 404} for ever, where a stray pair of files is only disk.
-     * <p>
-     * For the caller whose transaction attaches the files: it registers this first thing in the transaction, so that the
-     * decision belongs to how the transaction <em>ended</em> and not to which exception happened to reach a
-     * {@code catch}.
-     *
-     * @throws IllegalStateException if no transaction is active, which is a bug in the caller
+     * The new files of one {@link #attachInTransaction}, and what is known about how it went: whether the transaction
+     * began, and whether the work had returned when it ended. Registered as the transaction's own synchronization, so
+     * that what is done with the files is decided by how the transaction <em>ended</em> and not by which exception
+     * happened to reach a {@code catch}. One thread only: the transaction is bound to the one that runs the attach.
      */
-    public void discardIfRolledBack(StoredImage image) {
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCompletion(int status) {
-                if (status == STATUS_ROLLED_BACK) {
-                    log.warn("The transaction rolled back: deleting the files {} and {} written for it",
-                            image.storageKey(), image.thumbnailStorageKey());
-                    discard(image);
-                }
+    private final class NewFiles implements TransactionSynchronization {
+
+        private final StoredImage image;
+        private final String owner;
+        private boolean begun;
+        private boolean workReturned;
+
+        private NewFiles(StoredImage image, String owner) {
+            this.image = image;
+            this.owner = owner;
+        }
+
+        void transactionBegan() {
+            begun = true;
+        }
+
+        void workReturned() {
+            workReturned = true;
+        }
+
+        boolean hasBegun() {
+            return begun;
+        }
+
+        @Override
+        public void afterCompletion(int status) {
+            if (status == STATUS_COMMITTED) {
+                return;
             }
-        });
+            if (status == STATUS_ROLLED_BACK && !workReturned) {
+                log.warn("The transaction to attach the files {} and {} to {} rolled back: deleting them",
+                        image.storageKey(), image.thumbnailStorageKey(), owner);
+                discard(image);
+                return;
+            }
+            if (!workReturned) {
+                // The work threw and then the rollback itself failed (the connection died): no commit was attempted,
+                // so the files are most likely strays, but nobody saw the rollback happen.
+                log.warn("The transaction to attach the files {} and {} to {} could not be rolled back after its work "
+                                + "threw: keeping them, as the outcome is unknown. No commit was attempted, so they are "
+                                + "most likely strays that can be deleted",
+                        image.storageKey(), image.thumbnailStorageKey(), owner);
+                return;
+            }
+            String outcome = status == STATUS_ROLLED_BACK
+                    ? "was reported rolled back after its work had returned, so the commit itself failed"
+                    : "ended with an unknown outcome after its work had returned";
+            log.warn("The transaction to attach the files {} and {} to {} {}: keeping them, because its row may have "
+                            + "been committed. Look up the storage key {}: a row means they are its files, no row "
+                            + "means they are strays that can be deleted",
+                    image.storageKey(), image.thumbnailStorageKey(), owner, outcome, image.storageKey());
+        }
     }
 
     /**
