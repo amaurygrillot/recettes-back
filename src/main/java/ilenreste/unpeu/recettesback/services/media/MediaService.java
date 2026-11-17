@@ -215,11 +215,20 @@ public class MediaService {
      * constraint, a lost lock) happen inside it, where the rollback is certain.
      * <p>
      * No transaction may be active: it is the caller of {@link #intake}, which holds no connection while an image
-     * decodes, and this opens the short one that attaches the result.
+     * decodes, and this opens the short one that attaches the result. A caller inside a transaction would make the
+     * template join it, so that the hook below would be told how the <em>outer</em> transaction ended, long after the work
+     * returned: a failure of the rest of that transaction would look like a failed commit and keep the files of a
+     * certain rollback. That is refused, not documented.
      *
      * @param owner what the files are being attached to, in the words of the log (« recipe list 42 »)
+     * @throws IllegalStateException if a transaction is already active, which is a bug in the caller; nothing is written
+     *                               and no file is touched
      */
     public <T> T attachInTransaction(StoredImage image, String owner, Supplier<T> attaching) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("The files of " + owner + " must be attached in a transaction of their own, "
+                    + "and one is already active");
+        }
         NewFiles files = new NewFiles(image, owner);
         try {
             return transactions.execute(status -> {

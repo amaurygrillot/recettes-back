@@ -265,7 +265,9 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
      * removed after it. The shared connector's setting is never touched: lowering it, even for a second and even to put
      * it back, would shorten the keep-alive of every connection that finished a response meanwhile, including the shared
      * test client's, and would make this test depend on nothing else running. No application context of its own either,
-     * which would be a connection pool of its own.
+     * which would be a connection pool of its own. The connector is a bare one, without the application's other
+     * {@code server.tomcat.*} settings: only the read timeout matters to what is asserted here, and everything above the
+     * connector (the filters, the handler, the controller) is the application's own.
      * <p>
      * What it answers is the <strong>container's</strong> {@code 408 Request Timeout}, with Spring Boot's JSON error body
      * rather than a problem: Tomcat has already decided the request is over when the exception reaches the handler, so
@@ -287,15 +289,18 @@ class RecipeListCoverUploadIntegrationTest extends RecipeListsHttpSupport {
         ((AbstractProtocol<?>) quiet.getProtocolHandler()).setConnectionTimeout(1_000);
         String answer;
 
-        tomcat.getService().addConnector(quiet);
-        try (Socket socket = new Socket("localhost", quiet.getLocalPort())) {
-            socket.setSoTimeout((int) Duration.ofSeconds(20).toMillis());
-            OutputStream out = socket.getOutputStream();
-            out.write(requestHead(quiet.getLocalPort(), id, body.length));
-            out.write(body, 0, body.length / 2);
-            out.flush();
-            // Nothing more is sent: the server waits for its read timeout and then answers.
-            answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+        // Everything from the moment the connector is added is inside the try, so that however it fails the port is freed.
+        try {
+            tomcat.getService().addConnector(quiet);
+            try (Socket socket = new Socket("localhost", quiet.getLocalPort())) {
+                socket.setSoTimeout((int) Duration.ofSeconds(20).toMillis());
+                OutputStream out = socket.getOutputStream();
+                out.write(requestHead(quiet.getLocalPort(), id, body.length));
+                out.write(body, 0, body.length / 2);
+                out.flush();
+                // Nothing more is sent: the server waits for its read timeout and then answers.
+                answer = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+            }
         } finally {
             tomcat.getService().removeConnector(quiet);
             quiet.destroy();

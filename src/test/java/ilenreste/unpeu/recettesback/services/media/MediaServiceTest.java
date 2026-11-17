@@ -572,6 +572,24 @@ class MediaServiceTest {
         assertBothNewFilesWereDeleted();
     }
 
+    /**
+     * Inside someone else's transaction the template would join it, and the hook would be told how <em>that</em> one
+     * ended: refused, with the work not run and the files untouched (the caller's own transaction decides about them).
+     */
+    @Test
+    void aCallerThatIsAlreadyInATransaction_isRefused_withTheWorkNotRunAndTheFilesUntouched() {
+        AtomicBoolean ran = new AtomicBoolean();
+
+        new TransactionTemplate(transactionManager).executeWithoutResult(outer ->
+                assertThatThrownBy(() -> mediaService.attachInTransaction(NEW_FILES, OWNER, () -> {
+                    ran.set(true);
+                    return "attached";
+                })).isInstanceOf(IllegalStateException.class).hasMessageContaining(OWNER));
+
+        assertThat(ran).as("the work ran inside the caller's transaction").isFalse();
+        verify(storageService, never()).delete(anyString());
+    }
+
     /** Deleting is best effort: one file the storage cannot delete does not keep the other from being deleted. */
     @Test
     void aStorageThatThrowsOnTheFirstFile_doesNotKeepTheSecondFromBeingDeleted() {

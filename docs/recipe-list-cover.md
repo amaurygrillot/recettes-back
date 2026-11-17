@@ -323,8 +323,8 @@ steps, and which of them is in a transaction:
    decode under the processing pool, the re-encode, and **both files written** under generated keys. It creates **no row**.
 3. *(short write transaction)* **attach**: reload the list **with a row lock** (`PESSIMISTIC_WRITE`), read the *current*
    photo, insert the new `media` row (stamped with its uploader by auditing), point the list at it, delete the old row,
-   and schedule the old files for deletion **after commit**. A list deleted meanwhile is not found here: `404`, and the
-   new files are removed.
+   and schedule the old files for deletion **after commit**. A list deleted meanwhile is not found here: `404`, the work
+   throws before any commit is attempted, and the new files are removed.
 4. Both files of the old photo are deleted once the transaction has committed. The answer is the updated list.
 
 **What happens to the new files depends on whether the commit was ever attempted**, and on nothing else. The files are on
@@ -346,7 +346,9 @@ The rule is one sentence: **the new files are deleted when, and only when, the c
 transaction never began, or the work threw and the transaction rolled back.** It is `MediaService.attachInTransaction`,
 which opens the transaction, registers the `afterCompletion` hook first thing inside it, sets a flag once the work has
 returned (the hook deletes only on `STATUS_ROLLED_BACK` **with the flag unset**), and has a `catch` that deletes only when
-the transaction never began. `POST /media` goes through the same method ([below](#what-can-still-leave-something-behind)),
+the transaction never began. It refuses to run inside a transaction that is already active (an `IllegalStateException`,
+nothing written): the template would join it and the hook would be told how the *outer* transaction ended, after the work
+had long returned. `POST /media` goes through the same method ([below](#what-can-still-leave-something-behind)),
 which is what keeps the two from disagreeing. The rule used to be « deleted when the transaction rolled back », and before
 that one `catch` of every exception around the whole call, which could not tell a rollback from a failure *after* the
 commit (the hook that deletes the old files throwing) and deleted the files of a photo that was committed. The request in a
@@ -545,7 +547,7 @@ another name. An unknown `variant` on `GET` is a `400` too.
 A `PUT` refused with a `400`, a `413`, a `415`, a `429` or a `503` leaves **the photo, its `coverVersion`, the list's
 `updatedAt`, the rows, the files and the bytes served** exactly as they were. This holds because the only code that
 touches the list runs after every one of those gates and inside the one transaction that either replaces the photo or
-rolls back; the new files are written first and are deleted if the transaction rolls back or never begins. The tests take a snapshot of all of it
+rolls back; the new files are written first and are deleted if the transaction never begins or the work throws and it rolls back (the rule of [the outcome of a replace](#setting-or-replacing--put-listsidcover): a refusal never reaches the commit). The tests take a snapshot of all of it
 before and after, for each status, with the real limiter and the real decode pool for the last two.
 
 ### 5. The order of calls
